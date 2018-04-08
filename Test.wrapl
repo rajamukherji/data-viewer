@@ -1,0 +1,22 @@
+MOD Test;
+
+IMP IO.Terminal USE Out;
+IMP IO.File;
+IMP Sys.Program;
+IMP Math.Random;
+IMP Std.Real;
+
+VAR random <- Random.New():__seed;
+VAR file <- File.Open("test.csv", File.Flag.Write + File.Flag.Text);
+VAR i;
+EVERY i <- 1:to(100000) DO (
+	VAR filename <- 'node{i}';
+	VAR x <- random:generate(Real.T, 1.0) * 20.0 - 10.0;
+	VAR y <- random:generate(Real.T, 1.0) * 20.0 - 10.0;
+	file:write('\"{filename}\",{x},{y}\n');
+);
+file:close;
+
+Program.Exit(0);
+
+END Test.
