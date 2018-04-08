@@ -116,9 +116,7 @@ static void load_nodes_field_callback(void *Field, size_t Size, csv_node_loader_
 }
 
 static void load_nodes_row_callback(int Char, csv_node_loader_t *Loader) {
-	if (++Loader->Row % 1000 == 0) {
-		printf("Loaded row %d: <%s, %f, %f>\n", Loader->Row, Loader->Node->FileName, Loader->Node->X, Loader->Node->Y);
-	}
+	if (++Loader->Row % 1000 == 0) printf("Loaded row %d\n", Loader->Row);
 	if (Loader->Root) {
 		add_node(Loader->Root, Loader->Node, 1);
 	} else {
@@ -192,21 +190,23 @@ static GdkPixbuf *get_node_pixbuf(viewer_t *Viewer, node_t *Node) {
 		} else {
 			++Viewer->NumCachedImages;
 		}
-		/*GError *Error = 0;
-		Node->Pixbuf = gdk_pixbuf_new_from_file_at_size(Node->FileName, 128, -1, &Error);*/
-		guchar *Pixels = malloc(128 * 192 * 4);
-		cairo_surface_t *Surface = cairo_image_surface_create_for_data(Pixels, CAIRO_FORMAT_ARGB32, 128, 192, 128 * 4);
-		cairo_t *Cairo = cairo_create(Surface);
-		cairo_rectangle(Cairo, 0.0, 0.0, 128.0, 192.0);
-		cairo_set_source_rgb(Cairo,
-			(Node->X - Viewer->DataMin.X) / (Viewer->DataMax.X - Viewer->DataMin.X),
-			1.0,
-			(Node->Y - Viewer->DataMin.Y) / (Viewer->DataMax.Y - Viewer->DataMin.Y)
-		);
-		cairo_fill(Cairo);
-		cairo_destroy(Cairo);
-		cairo_surface_destroy(Surface);
-		Node->Pixbuf = gdk_pixbuf_new_from_data(Pixels, GDK_COLORSPACE_RGB, TRUE, 8, 128, 192, 128 * 4, free, 0);
+		GError *Error = 0;
+		Node->Pixbuf = gdk_pixbuf_new_from_file_at_size(Node->FileName, 128, -1, &Error);
+		if (!Node->Pixbuf) {
+			guchar *Pixels = malloc(128 * 192 * 4);
+			cairo_surface_t *Surface = cairo_image_surface_create_for_data(Pixels, CAIRO_FORMAT_ARGB32, 128, 192, 128 * 4);
+			cairo_t *Cairo = cairo_create(Surface);
+			cairo_rectangle(Cairo, 0.0, 0.0, 128.0, 192.0);
+			cairo_set_source_rgb(Cairo,
+				(Node->X - Viewer->DataMin.X) / (Viewer->DataMax.X - Viewer->DataMin.X),
+				1.0,
+				(Node->Y - Viewer->DataMin.Y) / (Viewer->DataMax.Y - Viewer->DataMin.Y)
+			);
+			cairo_fill(Cairo);
+			cairo_destroy(Cairo);
+			cairo_surface_destroy(Surface);
+			Node->Pixbuf = gdk_pixbuf_new_from_data(Pixels, GDK_COLORSPACE_RGB, TRUE, 8, 128, 192, 128 * 4, free, 0);
+		}
 	}
 	if (Viewer->CacheTail) {
 		Node->CachePrev = Viewer->CacheTail;
