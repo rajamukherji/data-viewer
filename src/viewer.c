@@ -207,10 +207,6 @@ typedef struct {
 static int set_node_colour(colour_range_t *ColourRange, node_t *Node) {
 	double Value = Node->Values[ColourRange->Index];
 	double H = 6.0 * (Value - ColourRange->Min) / ColourRange->Range;
-	/*double F = H - floor(H);
-	double P = POINT_COLOUR_VALUE * (1.0 - POINT_COLOUR_SATURATION);
-	double Q = POINT_COLOUR_VALUE * (1.0 - POINT_COLOUR_SATURATION * F);
-	double T = POINT_COLOUR_VALUE * (1.0 - POINT_COLOUR_SATURATION * (1.0 - F));*/
 	if (H < 1.0) {
 		Node->R = POINT_COLOUR_VALUE;
 		Node->G = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 1.0);
@@ -260,7 +256,7 @@ static void load_nodes(viewer_t *Viewer, const char *CsvFileName) {
 	}
 	char Buffer[4096];
 	struct csv_parser Parser[1];
-	csv_init(Parser, 0);
+	csv_init(Parser, CSV_APPEND_NULL);
 	size_t Count = fread(Buffer, 1, 4096, File);
 	csv_node_loader_t Loader[1] = {{Viewer, 0, 0, 0}};
 	while (Count > 0) {
@@ -325,10 +321,13 @@ static GdkPixbuf *get_node_pixbuf(viewer_t *Viewer, node_t *Node) {
 }
 
 static int draw_node_image(viewer_t *Viewer, node_t *Node) {
-	GdkPixbuf *Pixbuf = get_node_pixbuf(Viewer, Node);
-	GtkTreeIter Iter;
-	gtk_list_store_insert_with_values(Viewer->ImagesStore, &Iter, -1, 0, Node->FileName, 1, Pixbuf, -1);
-	return ++Viewer->NumVisibleImages == MAX_VISIBLE_IMAGES;
+	++Viewer->NumVisibleImages;
+	if (Viewer->NumVisibleImages <= MAX_VISIBLE_IMAGES) {
+		GdkPixbuf *Pixbuf = get_node_pixbuf(Viewer, Node);
+		GtkTreeIter Iter;
+		gtk_list_store_insert_with_values(Viewer->ImagesStore, &Iter, -1, 0, Node->FileName, 1, Pixbuf, -1);
+	}
+	return 0;
 }
 
 static void draw_node_images(viewer_t *Viewer) {
@@ -339,6 +338,9 @@ static void draw_node_images(viewer_t *Viewer) {
 	double X2 = Viewer->Min.X + (Viewer->Pointer.X + Viewer->BoxSize / 2) / Viewer->Scale.X;
 	double Y2 = Viewer->Min.Y + (Viewer->Pointer.Y + Viewer->BoxSize / 2) / Viewer->Scale.Y;
 	foreach_node(Viewer->Root, X1, Y1, X2, Y2, Viewer, (node_callback_t *)draw_node_image);
+	char Title[64];
+	sprintf(Title, "%d images under cursor", Viewer->NumVisibleImages);
+	gtk_window_set_title(GTK_WINDOW(Viewer->ResultsWindow), Title);
 }
 
 static int redraw_point(viewer_t *Viewer, node_t *Node) {
@@ -441,6 +443,8 @@ static void resize_viewer(GtkWidget *Widget, GdkRectangle *Allocation, viewer_t 
 	Viewer->CachedBackground = cairo_image_surface_create(CAIRO_FORMAT_RGB24, CacheWidth, CacheHeight);*/
 	Viewer->CachedBackground = cairo_image_surface_create(CAIRO_FORMAT_RGB24, Allocation->width, Allocation->height);
 	redraw_viewer_background(Viewer);
+	draw_node_images(Viewer);
+	gtk_widget_queue_draw(Widget);
 }
 
 static gboolean scroll_viewer(GtkWidget *Widget, GdkEventScroll *Event, viewer_t *Viewer) {
@@ -452,8 +456,8 @@ static gboolean scroll_viewer(GtkWidget *Widget, GdkEventScroll *Event, viewer_t
 		zoom_viewer(Viewer, X, Y, 1.0 / 1.1);
 	}
 	redraw_viewer_background(Viewer);
-	gtk_widget_queue_draw(Widget);
 	draw_node_images(Viewer);
+	gtk_widget_queue_draw(Widget);
 	return FALSE;
 }
 
@@ -474,8 +478,8 @@ static gboolean motion_notify_viewer(GtkWidget *Widget, GdkEventMotion *Event, v
 	}
 	Viewer->Pointer.X = Event->x;
 	Viewer->Pointer.Y = Event->y;
-	gtk_widget_queue_draw(Widget);
 	draw_node_images(Viewer);
+	gtk_widget_queue_draw(Widget);
 	return FALSE;
 }
 
@@ -484,22 +488,40 @@ static gboolean key_press_viewer(GtkWidget *Widget, GdkEventKey *Event, viewer_t
 	case GDK_KEY_x: {
 		set_viewer_indices(Viewer, (Viewer->XIndex + 1) % Viewer->NumValues, Viewer->YIndex);
 		redraw_viewer_background(Viewer);
-		gtk_widget_queue_draw(Widget);
 		draw_node_images(Viewer);
+		gtk_widget_queue_draw(Widget);
 		break;
 	}
 	case GDK_KEY_y: {
 		set_viewer_indices(Viewer, Viewer->XIndex, (Viewer->YIndex + 1) % Viewer->NumValues);
 		redraw_viewer_background(Viewer);
-		gtk_widget_queue_draw(Widget);
 		draw_node_images(Viewer);
+		gtk_widget_queue_draw(Widget);
+		break;
+	}
+	case GDK_KEY_X: {
+		set_viewer_indices(Viewer, (Viewer->XIndex + Viewer->NumValues - 1) % Viewer->NumValues, Viewer->YIndex);
+		redraw_viewer_background(Viewer);
+		draw_node_images(Viewer);
+		gtk_widget_queue_draw(Widget);
+		break;
+	}
+	case GDK_KEY_Y: {
+		set_viewer_indices(Viewer, Viewer->XIndex, (Viewer->YIndex + Viewer->NumValues - 1) % Viewer->NumValues);
+		redraw_viewer_background(Viewer);
+		draw_node_images(Viewer);
+		gtk_widget_queue_draw(Widget);
 		break;
 	}
 	case GDK_KEY_c: {
 		set_viewer_colour_index(Viewer, (Viewer->CIndex + 1) % Viewer->NumValues);
 		redraw_viewer_background(Viewer);
-		gtk_widget_queue_draw(Widget);
 		draw_node_images(Viewer);
+		gtk_widget_queue_draw(Widget);
+		break;
+	}
+	case GDK_KEY_s: {
+		cairo_surface_write_to_png(Viewer->CachedBackground, "screenshot.png");
 		break;
 	}
 	}
