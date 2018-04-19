@@ -8,6 +8,17 @@
 #include <gdk-pixbuf/gdk-pixbuf.h>
 #include "libcsv/csv.h"
 
+#define MAX_CACHED_IMAGES 1024
+#define MAX_VISIBLE_IMAGES 64
+#define POINT_COLOUR_CHROMA 0.5
+#define POINT_COLOUR_SATURATION 0.7
+#define POINT_COLOUR_VALUE 0.9
+
+typedef struct node_t node_t;
+typedef int node_callback_t(void *Data, node_t *Node);
+typedef struct field_t field_t;
+typedef struct viewer_t viewer_t;
+
 typedef struct {
 	double X, Y;
 } point_t;
@@ -16,25 +27,20 @@ typedef struct {
 	double Min, Max;
 } range_t;
 
-typedef struct node_t node_t;
-typedef int node_callback_t(void *Data, node_t *Node);
-
 struct node_t {
 	node_t *Children[4];
 	const char *FileName;
 	GdkPixbuf *Pixbuf;
 	node_t *CacheNext, *CachePrev;
 	double X, Y, R, G, B;
-	double Values[];
 };
 
-typedef struct viewer_t viewer_t;
-
-#define MAX_CACHED_IMAGES 1024
-#define MAX_VISIBLE_IMAGES 64
-#define POINT_COLOUR_CHROMA 0.5
-#define POINT_COLOUR_SATURATION 0.7
-#define POINT_COLOUR_VALUE 0.9
+struct field_t {
+	const char *Name;
+	range_t Range;
+	GtkListStore *Choices;
+	double Values[];
+};
 
 struct viewer_t {
 	GtkWidget *PointsWindow;
@@ -43,15 +49,15 @@ struct viewer_t {
 	GtkWidget *ImagesView;
 	GtkWidget *ImagesScrolledArea;
 	GtkListStore *ImagesStore;
-	node_t *Root;
+	node_t *Root, *Nodes;
 	cairo_t *Cairo;
 	cairo_surface_t *CachedBackground;
 	node_t *CacheHead, *CacheTail;
+	field_t **Fields;
 	point_t Min, Max, Scale, DataMin, DataMax, Pointer;
 	double PointSize, BoxSize;
-	int NumValues, NumCachedImages, NumVisibleImages;
+	int NumNodes, NumFields, NumCachedImages, NumVisibleImages;
 	int XIndex, YIndex, CIndex;
-	range_t *Ranges;
 };
 
 static void add_node(node_t *Root, node_t *Node) {
@@ -101,93 +107,35 @@ static int foreach_node(node_t *Root, double X1, double Y1, double X2, double Y2
 	}
 }
 
-typedef struct {
-	viewer_t *Viewer;
-	node_t *Node;
-	int Index, Row;
-} csv_node_loader_t;
-
-static void load_nodes_field_callback(void *Field, size_t Size, csv_node_loader_t *Loader) {
-	if (Loader->Row) {
-		if (!Loader->Index) {
-			node_t *Node = (node_t *)malloc(sizeof(node_t) + Loader->Viewer->NumValues * sizeof(double));
-			memset(Node, 0, sizeof(node_t));
-			Node->Children[3] = Loader->Node;
-			Loader->Node = Node;
-			char *FileName = malloc(Size + 1);
-			memcpy(FileName, Field, Size);
-			FileName[Size] = 0;
-			Node->FileName = FileName;
-		} else {
-			int Index = Loader->Index - 1;
-			double Value = Loader->Node->Values[Index] = atof(Field);
-			if (Loader->Viewer->Ranges[Index].Min > Value) Loader->Viewer->Ranges[Index].Min = Value;
-			if (Loader->Viewer->Ranges[Index].Max < Value) Loader->Viewer->Ranges[Index].Max = Value;
-		}
-	}
-	++Loader->Index;
-}
-
-static void load_nodes_row_callback(int Char, csv_node_loader_t *Loader) {
-	if (!Loader->Row) {
-		int NumValues = Loader->Viewer->NumValues = Loader->Index - 1;
-		range_t *Ranges = Loader->Viewer->Ranges = (range_t *)malloc(NumValues * sizeof(range_t));
-		for (int I = 0; I < NumValues; ++I) {
-			Ranges[I].Min = INFINITY;
-			Ranges[I].Max = -INFINITY;
-		}
-	}
-	Loader->Index = 0;
-	++Loader->Row;
-	if (Loader->Row % 1000 == 0) printf("Loaded row %d\n", Loader->Row);
-}
-
-static void readd_node(node_t *Root, node_t *Node, int XIndex, int YIndex) {
-	node_t *Children[4] = {
-		Node->Children[0],
-		Node->Children[1],
-		Node->Children[2],
-		Node->Children[3]
-	};
-	Node->Children[0] = 0;
-	Node->Children[1] = 0;
-	Node->Children[2] = 0;
-	Node->Children[3] = 0;
-	Node->X = Node->Values[XIndex];
-	Node->Y = Node->Values[YIndex];
-	add_node(Root, Node);
-	if (Children[0]) readd_node(Root, Children[0], XIndex, YIndex);
-	if (Children[1]) readd_node(Root, Children[1], XIndex, YIndex);
-	if (Children[2]) readd_node(Root, Children[2], XIndex, YIndex);
-	if (Children[3]) readd_node(Root, Children[3], XIndex, YIndex);
-}
-
 static void set_viewer_indices(viewer_t *Viewer, int XIndex, int YIndex) {
 	Viewer->XIndex = XIndex;
 	Viewer->YIndex = YIndex;
-	node_t *Root = Viewer->Root;
-	node_t *Children[4] = {
-		Root->Children[0],
-		Root->Children[1],
-		Root->Children[2],
-		Root->Children[3]
-	};
-	Root->Children[0] = 0;
-	Root->Children[1] = 0;
-	Root->Children[2] = 0;
-	Root->Children[3] = 0;
-	Root->X = Root->Values[XIndex];
-	Root->Y = Root->Values[YIndex];
-	if (Children[0]) readd_node(Root, Children[0], XIndex, YIndex);
-	if (Children[1]) readd_node(Root, Children[1], XIndex, YIndex);
-	if (Children[2]) readd_node(Root, Children[2], XIndex, YIndex);
-	if (Children[3]) readd_node(Root, Children[3], XIndex, YIndex);
-	double RangeX = Viewer->Ranges[XIndex].Max - Viewer->Ranges[XIndex].Min;
-	double RangeY = Viewer->Ranges[YIndex].Max - Viewer->Ranges[YIndex].Min;
-	Viewer->DataMin.X = Viewer->Ranges[XIndex].Min - RangeX * 0.01;
-	Viewer->DataMin.Y = Viewer->Ranges[YIndex].Min - RangeY * 0.01;
-	Viewer->DataMax.X = Viewer->Ranges[XIndex].Max + RangeX * 0.01;
-	Viewer->DataMax.Y = Viewer->Ranges[YIndex].Max + RangeY * 0.01;
+	int NumNodes = Viewer->NumNodes;
+	field_t *XField = Viewer->Fields[XIndex];
+	field_t *YField = Viewer->Fields[YIndex];
+	field_t *CField = Viewer->Fields[Viewer->CIndex];
+
+	node_t *Node = Viewer->Nodes;
+	double *XValue = XField->Values;
+	double *YValue = YField->Values;
+	for (int I = NumNodes; --I >= 0;) {
+		Node->X = *XValue;
+		Node->Y = *YValue;
+		Node->Children[0] = Node->Children[1] = Node->Children[2] = Node->Children[3] = 0;
+		++Node;
+		++XValue;
+		++YValue;
+	}
+
+	node_t *Root = Viewer->Root = Node = Viewer->Nodes;
+	for (int I = NumNodes - 1; --I >= 0;) add_node(Root, ++Node);
+
+	double RangeX = XField->Range.Max - XField->Range.Min;
+	double RangeY = YField->Range.Max - YField->Range.Min;
+	Viewer->DataMin.X = XField->Range.Min - RangeX * 0.01;
+	Viewer->DataMin.Y = YField->Range.Min - RangeY * 0.01;
+	Viewer->DataMax.X = XField->Range.Max + RangeX * 0.01;
+	Viewer->DataMax.Y = YField->Range.Max + RangeY * 0.01;
 	Viewer->Min = Viewer->DataMin;
 	Viewer->Max = Viewer->DataMax;
 	int Width = gtk_widget_get_allocated_width(Viewer->DrawingArea);
@@ -195,18 +143,11 @@ static void set_viewer_indices(viewer_t *Viewer, int XIndex, int YIndex) {
 	Viewer->Scale.X = Width / (Viewer->Max.X - Viewer->Min.X);
 	Viewer->Scale.Y = Height / (Viewer->Max.Y - Viewer->Min.Y);
 	char Title[64];
-	sprintf(Title, "X = %d, Y = %d, Colour = %d", Viewer->XIndex, Viewer->YIndex, Viewer->CIndex);
+	sprintf(Title, "X = %s, Y = %s, Colour = %s", XField->Name, YField->Name, CField->Name);
 	gtk_window_set_title(GTK_WINDOW(Viewer->PointsWindow), Title);
 }
 
-typedef struct {
-	int Index;
-	double Min, Range;
-} colour_range_t;
-
-static int set_node_colour(colour_range_t *ColourRange, node_t *Node) {
-	double Value = Node->Values[ColourRange->Index];
-	double H = 6.0 * (Value - ColourRange->Min) / ColourRange->Range;
+static inline void set_node_rgb(node_t *Node, double H) {
 	if (H < 1.0) {
 		Node->R = POINT_COLOUR_VALUE;
 		Node->G = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 1.0);
@@ -232,41 +173,130 @@ static int set_node_colour(colour_range_t *ColourRange, node_t *Node) {
 		Node->G = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
 		Node->B = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 5.0);
 	}
-	return 0;
 }
 
-static void set_viewer_colour_index(viewer_t *Viewer, int Index) {
-	Viewer->CIndex = Index;
-	colour_range_t ColourRange[1] = {{
-		Index,
-		Viewer->Ranges[Index].Min,
-		Viewer->Ranges[Index].Max - Viewer->Ranges[Index].Min
-	}};
-	foreach_node(Viewer->Root, -INFINITY, -INFINITY, INFINITY, INFINITY, ColourRange, (node_callback_t *)set_node_colour);
+static void set_viewer_colour_index(viewer_t *Viewer, int CIndex) {
+	Viewer->CIndex = CIndex;
+	int NumNodes = Viewer->NumNodes;
+	field_t *XField = Viewer->Fields[Viewer->XIndex];
+	field_t *YField = Viewer->Fields[Viewer->YIndex];
+	field_t *CField = Viewer->Fields[CIndex];
+	double Min = CField->Range.Min;
+	double Range = CField->Range.Max - Min;
+	node_t *Node = Viewer->Nodes;
+	double *CValue = CField->Values;
+	for (int I = NumNodes; --I >= 0;) {
+		set_node_rgb(Node, 6.0 * (*CValue - Min) / Range);
+		++Node;
+		++CValue;
+	}
 	char Title[64];
-	sprintf(Title, "X = %d, Y = %d, Colour = %d", Viewer->XIndex, Viewer->YIndex, Viewer->CIndex);
+	sprintf(Title, "X = %s, Y = %s, Colour = %s", XField->Name, YField->Name, CField->Name);
 	gtk_window_set_title(GTK_WINDOW(Viewer->PointsWindow), Title);
 }
 
+typedef struct {
+	viewer_t *Viewer;
+	field_t **Fields;
+	node_t *Nodes;
+	int Index, Row;
+} csv_node_loader_t;
+
+static void load_nodes_field_callback(void *Text, size_t Size, csv_node_loader_t *Loader) {
+	if (!Loader->Row) {
+		if (Loader->Index) {
+			char *FieldName = malloc(Size + 1);
+			memcpy(FieldName, Text, Size);
+			FieldName[Size] = 0;
+			Loader->Fields[Loader->Index - 1]->Name = FieldName;
+		}
+	} else {
+		if (!Loader->Index) {
+			char *FileName = malloc(Size + 1);
+			memcpy(FileName, Text, Size);
+			FileName[Size] = 0;
+			Loader->Nodes[Loader->Row - 1].FileName = FileName;
+		} else {
+			int Index = Loader->Index - 1;
+			field_t *Field = Loader->Fields[Index];
+			double Value = Field->Values[Loader->Row - 1] = atof(Text);
+			if (Field->Range.Min > Value) Field->Range.Min = Value;
+			if (Field->Range.Max < Value) Field->Range.Max = Value;
+		}
+	}
+	++Loader->Index;
+}
+
+static void load_nodes_row_callback(int Char, csv_node_loader_t *Loader) {
+	Loader->Index = 0;
+	++Loader->Row;
+	if (Loader->Row % 10000 == 0) printf("Loaded row %d\n", Loader->Row);
+}
+
+static void count_nodes_field_callback(void *Text, size_t Size, csv_node_loader_t *Loader) {
+	++Loader->Index;
+}
+
+static void count_nodes_row_callback(int Char, csv_node_loader_t *Loader) {
+	if (!Loader->Row) {
+		int NumValues = Loader->Viewer->NumFields = Loader->Index - 1;
+	}
+	Loader->Index = 0;
+	++Loader->Row;
+	if (Loader->Row % 10000 == 0) printf("Counted row %d\n", Loader->Row);
+}
+
 static void load_nodes(viewer_t *Viewer, const char *CsvFileName) {
+	csv_node_loader_t Loader[1] = {{Viewer, 0, 0, 0, 0}};
+	char Buffer[4096];
+	struct csv_parser Parser[1];
+
+	printf("Counting rows...\n");
 	FILE *File = fopen(CsvFileName, "r");
 	if (!File) {
 		fprintf(stderr, "Error reading from %s\n", CsvFileName);
 		exit(1);
 	}
-	char Buffer[4096];
-	struct csv_parser Parser[1];
-	csv_init(Parser, CSV_APPEND_NULL);
+	csv_init(Parser, 0);
 	size_t Count = fread(Buffer, 1, 4096, File);
-	csv_node_loader_t Loader[1] = {{Viewer, 0, 0, 0}};
+	while (Count > 0) {
+		csv_parse(Parser, Buffer, Count, (void *)count_nodes_field_callback, (void *)count_nodes_row_callback, Loader);
+		Count = fread(Buffer, 1, 4096, File);
+	}
+	fclose(File);
+	csv_fini(Parser, (void *)count_nodes_field_callback, (void *)count_nodes_row_callback, Loader);
+	csv_free(Parser);
+
+	int NumNodes = Viewer->NumNodes = Loader->Row - 1;
+	int NumFields = Viewer->NumFields;
+	node_t *Nodes = Viewer->Nodes = (node_t *)malloc(NumNodes * sizeof(node_t));
+	memset(Nodes, 0, NumNodes * sizeof(node_t));
+	field_t **Fields = Viewer->Fields = (field_t **)malloc(NumFields * sizeof(field_t *));
+	for (int I = 0; I < NumFields; ++I) {
+		field_t *Field = Fields[I] = (field_t *)malloc(sizeof(field_t) + NumNodes * sizeof(double));
+		Field->Choices = 0;
+		Field->Range.Min = INFINITY;
+		Field->Range.Max = -INFINITY;
+		Fields[I] = Field;
+	}
+
+	printf("Loading rows...\n");
+	fopen(CsvFileName, "r");
+	Loader->Nodes = Nodes;
+	Loader->Fields = Fields;
+	Loader->Row = Loader->Index = 0;
+	csv_init(Parser, CSV_APPEND_NULL);
+	Count = fread(Buffer, 1, 4096, File);
 	while (Count > 0) {
 		csv_parse(Parser, Buffer, Count, (void *)load_nodes_field_callback, (void *)load_nodes_row_callback, Loader);
 		Count = fread(Buffer, 1, 4096, File);
 	}
 	fclose(File);
-	Viewer->Root = Loader->Node;
+	csv_fini(Parser, (void *)load_nodes_field_callback, (void *)load_nodes_row_callback, Loader);
+	csv_free(Parser);
+
 	set_viewer_indices(Viewer, 0, 1);
-	set_viewer_colour_index(Viewer, Viewer->NumValues - 1);
+	set_viewer_colour_index(Viewer, Viewer->NumFields - 1);
 }
 
 static GdkPixbuf *get_node_pixbuf(viewer_t *Viewer, node_t *Node) {
@@ -486,35 +516,42 @@ static gboolean motion_notify_viewer(GtkWidget *Widget, GdkEventMotion *Event, v
 static gboolean key_press_viewer(GtkWidget *Widget, GdkEventKey *Event, viewer_t *Viewer) {
 	switch (Event->keyval) {
 	case GDK_KEY_x: {
-		set_viewer_indices(Viewer, (Viewer->XIndex + 1) % Viewer->NumValues, Viewer->YIndex);
-		redraw_viewer_background(Viewer);
-		draw_node_images(Viewer);
-		gtk_widget_queue_draw(Widget);
-		break;
-	}
-	case GDK_KEY_y: {
-		set_viewer_indices(Viewer, Viewer->XIndex, (Viewer->YIndex + 1) % Viewer->NumValues);
+		set_viewer_indices(Viewer, (Viewer->XIndex + 1) % Viewer->NumFields, Viewer->YIndex);
 		redraw_viewer_background(Viewer);
 		draw_node_images(Viewer);
 		gtk_widget_queue_draw(Widget);
 		break;
 	}
 	case GDK_KEY_X: {
-		set_viewer_indices(Viewer, (Viewer->XIndex + Viewer->NumValues - 1) % Viewer->NumValues, Viewer->YIndex);
+		set_viewer_indices(Viewer, (Viewer->XIndex + Viewer->NumFields - 1) % Viewer->NumFields, Viewer->YIndex);
+		redraw_viewer_background(Viewer);
+		draw_node_images(Viewer);
+		gtk_widget_queue_draw(Widget);
+		break;
+	}
+	case GDK_KEY_y: {
+		set_viewer_indices(Viewer, Viewer->XIndex, (Viewer->YIndex + 1) % Viewer->NumFields);
 		redraw_viewer_background(Viewer);
 		draw_node_images(Viewer);
 		gtk_widget_queue_draw(Widget);
 		break;
 	}
 	case GDK_KEY_Y: {
-		set_viewer_indices(Viewer, Viewer->XIndex, (Viewer->YIndex + Viewer->NumValues - 1) % Viewer->NumValues);
+		set_viewer_indices(Viewer, Viewer->XIndex, (Viewer->YIndex + Viewer->NumFields - 1) % Viewer->NumFields);
 		redraw_viewer_background(Viewer);
 		draw_node_images(Viewer);
 		gtk_widget_queue_draw(Widget);
 		break;
 	}
 	case GDK_KEY_c: {
-		set_viewer_colour_index(Viewer, (Viewer->CIndex + 1) % Viewer->NumValues);
+		set_viewer_colour_index(Viewer, (Viewer->CIndex + 1) % Viewer->NumFields);
+		redraw_viewer_background(Viewer);
+		draw_node_images(Viewer);
+		gtk_widget_queue_draw(Widget);
+		break;
+	}
+	case GDK_KEY_C: {
+		set_viewer_colour_index(Viewer, (Viewer->CIndex + Viewer->NumFields - 1) % Viewer->NumFields);
 		redraw_viewer_background(Viewer);
 		draw_node_images(Viewer);
 		gtk_widget_queue_draw(Widget);
