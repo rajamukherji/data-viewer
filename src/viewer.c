@@ -37,25 +37,28 @@ struct node_t {
 
 struct field_t {
 	const char *Name;
+	union {
+		GHashTable *EnumHash;
+		GtkListStore *EnumStore;
+	};
 	range_t Range;
-	GtkListStore *Choices;
 	double Values[];
 };
 
 struct viewer_t {
-	GtkWidget *PointsWindow;
+	GtkWidget *MainWindow;
 	GtkWidget *DrawingArea;
-	GtkWidget *ResultsWindow;
 	GtkWidget *ImagesView;
 	GtkWidget *ImagesScrolledArea;
 	GtkListStore *ImagesStore;
+	GtkListStore *FieldsStore;
 	node_t *Root, *Nodes;
 	cairo_t *Cairo;
 	cairo_surface_t *CachedBackground;
 	node_t *CacheHead, *CacheTail;
-	field_t **Fields;
+	field_t **Fields, *EditField;
 	point_t Min, Max, Scale, DataMin, DataMax, Pointer;
-	double PointSize, BoxSize;
+	double PointSize, BoxSize, EditValue;
 	int NumNodes, NumFields, NumCachedImages, NumVisibleImages;
 	int XIndex, YIndex, CIndex;
 };
@@ -144,7 +147,7 @@ static void set_viewer_indices(viewer_t *Viewer, int XIndex, int YIndex) {
 	Viewer->Scale.Y = Height / (Viewer->Max.Y - Viewer->Min.Y);
 	char Title[64];
 	sprintf(Title, "X = %s, Y = %s, Colour = %s", XField->Name, YField->Name, CField->Name);
-	gtk_window_set_title(GTK_WINDOW(Viewer->PointsWindow), Title);
+	gtk_window_set_title(GTK_WINDOW(Viewer->MainWindow), Title);
 }
 
 static inline void set_node_rgb(node_t *Node, double H) {
@@ -183,6 +186,7 @@ static void set_viewer_colour_index(viewer_t *Viewer, int CIndex) {
 	field_t *CField = Viewer->Fields[CIndex];
 	double Min = CField->Range.Min;
 	double Range = CField->Range.Max - Min;
+	if (Range <= 1.0e-6) Range = 1.0;
 	node_t *Node = Viewer->Nodes;
 	double *CValue = CField->Values;
 	for (int I = NumNodes; --I >= 0;) {
@@ -192,7 +196,7 @@ static void set_viewer_colour_index(viewer_t *Viewer, int CIndex) {
 	}
 	char Title[64];
 	sprintf(Title, "X = %s, Y = %s, Colour = %s", XField->Name, YField->Name, CField->Name);
-	gtk_window_set_title(GTK_WINDOW(Viewer->PointsWindow), Title);
+	gtk_window_set_title(GTK_WINDOW(Viewer->MainWindow), Title);
 }
 
 typedef struct {
@@ -219,7 +223,35 @@ static void load_nodes_field_callback(void *Text, size_t Size, csv_node_loader_t
 		} else {
 			int Index = Loader->Index - 1;
 			field_t *Field = Loader->Fields[Index];
-			double Value = Field->Values[Loader->Row - 1] = atof(Text);
+			double Value;
+			insert:
+			if (Field->EnumHash) {
+				char *EnumName = malloc(Size + 1);
+				memcpy(EnumName, Text, Size);
+				EnumName[Size] = 0;
+				gpointer *Ref = g_hash_table_lookup(Field->EnumHash, EnumName);
+				if (Ref) {
+					Value = *(double *)Ref;
+					free(EnumName);
+				} else {
+					Ref = (void *)&Field->Values[Loader->Row - 1];
+					Value = g_hash_table_size(Field->EnumHash);
+					g_hash_table_insert(Field->EnumHash, EnumName, Ref);
+				}
+			} else {
+				char *End;
+				Value = strtod(Text, &End);
+				if (End == Text) {
+					if (Loader->Row != 1) {
+						// TODO: Convert all previously loaded values to enums
+						fprintf(stderr, "Convert previous values into enums has not been done yet!");
+						exit(1);
+					}
+					Field->EnumHash = g_hash_table_new(g_str_hash, g_str_equal);
+					goto insert;
+				}
+			}
+			Field->Values[Loader->Row - 1] = Value;
 			if (Field->Range.Min > Value) Field->Range.Min = Value;
 			if (Field->Range.Max < Value) Field->Range.Max = Value;
 		}
@@ -246,7 +278,7 @@ static void count_nodes_row_callback(int Char, csv_node_loader_t *Loader) {
 	if (Loader->Row % 10000 == 0) printf("Counted row %d\n", Loader->Row);
 }
 
-static void load_nodes(viewer_t *Viewer, const char *CsvFileName) {
+static void viewer_open_file(viewer_t *Viewer, const char *CsvFileName) {
 	csv_node_loader_t Loader[1] = {{Viewer, 0, 0, 0, 0}};
 	char Buffer[4096];
 	struct csv_parser Parser[1];
@@ -274,7 +306,7 @@ static void load_nodes(viewer_t *Viewer, const char *CsvFileName) {
 	field_t **Fields = Viewer->Fields = (field_t **)malloc(NumFields * sizeof(field_t *));
 	for (int I = 0; I < NumFields; ++I) {
 		field_t *Field = Fields[I] = (field_t *)malloc(sizeof(field_t) + NumNodes * sizeof(double));
-		Field->Choices = 0;
+		Field->EnumHash = 0;
 		Field->Range.Min = INFINITY;
 		Field->Range.Max = -INFINITY;
 		Fields[I] = Field;
@@ -285,7 +317,7 @@ static void load_nodes(viewer_t *Viewer, const char *CsvFileName) {
 	Loader->Nodes = Nodes;
 	Loader->Fields = Fields;
 	Loader->Row = Loader->Index = 0;
-	csv_init(Parser, CSV_APPEND_NULL);
+	csv_init(Parser, 0);
 	Count = fread(Buffer, 1, 4096, File);
 	while (Count > 0) {
 		csv_parse(Parser, Buffer, Count, (void *)load_nodes_field_callback, (void *)load_nodes_row_callback, Loader);
@@ -295,6 +327,15 @@ static void load_nodes(viewer_t *Viewer, const char *CsvFileName) {
 	csv_fini(Parser, (void *)load_nodes_field_callback, (void *)load_nodes_row_callback, Loader);
 	csv_free(Parser);
 
+	for (int I = 0; I < NumFields; ++I) {
+		field_t *Field = Fields[I];
+		GtkTreeIter Iter;
+		gtk_list_store_insert_with_values(Viewer->FieldsStore, &Iter, -1, 0, Field->Name, 1, I, -1);
+	}
+
+	Viewer->XIndex = 0;
+	Viewer->YIndex = 1;
+	Viewer->CIndex = Viewer->NumFields - 1;
 	set_viewer_indices(Viewer, 0, 1);
 	set_viewer_colour_index(Viewer, Viewer->NumFields - 1);
 }
@@ -370,7 +411,7 @@ static void draw_node_images(viewer_t *Viewer) {
 	foreach_node(Viewer->Root, X1, Y1, X2, Y2, Viewer, (node_callback_t *)draw_node_image);
 	char Title[64];
 	sprintf(Title, "%d images under cursor", Viewer->NumVisibleImages);
-	gtk_window_set_title(GTK_WINDOW(Viewer->ResultsWindow), Title);
+	//gtk_window_set_title(GTK_WINDOW(Viewer->ResultsWindow), Title);
 }
 
 static int redraw_point(viewer_t *Viewer, node_t *Node) {
@@ -473,7 +514,7 @@ static void resize_viewer(GtkWidget *Widget, GdkRectangle *Allocation, viewer_t 
 	Viewer->CachedBackground = cairo_image_surface_create(CAIRO_FORMAT_RGB24, CacheWidth, CacheHeight);*/
 	Viewer->CachedBackground = cairo_image_surface_create(CAIRO_FORMAT_RGB24, Allocation->width, Allocation->height);
 	redraw_viewer_background(Viewer);
-	draw_node_images(Viewer);
+	//draw_node_images(Viewer);
 	gtk_widget_queue_draw(Widget);
 }
 
@@ -565,19 +606,100 @@ static gboolean key_press_viewer(GtkWidget *Widget, GdkEventKey *Event, viewer_t
 	return FALSE;
 }
 
+static void x_field_changed(GtkComboBox *Widget, viewer_t *Viewer) {
+	set_viewer_indices(Viewer, gtk_combo_box_get_active(Widget), Viewer->YIndex);
+	redraw_viewer_background(Viewer);
+	draw_node_images(Viewer);
+	gtk_widget_queue_draw(Viewer->DrawingArea);
+}
+
+static void y_field_changed(GtkComboBox *Widget, viewer_t *Viewer) {
+	set_viewer_indices(Viewer, Viewer->XIndex, gtk_combo_box_get_active(Widget));
+	redraw_viewer_background(Viewer);
+	draw_node_images(Viewer);
+	gtk_widget_queue_draw(Viewer->DrawingArea);
+}
+
+static void c_field_changed(GtkComboBox *Widget, viewer_t *Viewer) {
+	set_viewer_colour_index(Viewer, gtk_combo_box_get_active(Widget));
+	redraw_viewer_background(Viewer);
+	draw_node_images(Viewer);
+	gtk_widget_queue_draw(Viewer->DrawingArea);
+}
+
+static void create_viewer_toolbar(viewer_t *Viewer, GtkToolbar *Toolbar) {
+	GtkToolItem *OpenCsvButton = gtk_tool_button_new(gtk_image_new_from_icon_name("gtk-open", GTK_ICON_SIZE_SMALL_TOOLBAR), "Open");
+	GtkToolItem *SaveCsvButton = gtk_tool_button_new(gtk_image_new_from_icon_name("gtk-save", GTK_ICON_SIZE_SMALL_TOOLBAR), "Save");
+	gtk_toolbar_insert(Toolbar, OpenCsvButton, -1);
+	gtk_toolbar_insert(Toolbar, SaveCsvButton, -1);
+	gtk_toolbar_insert(Toolbar, gtk_separator_tool_item_new(), -1);
+
+	GtkCellRenderer *FieldRenderer;
+	GtkWidget *XFieldCombo = gtk_combo_box_new_with_model(GTK_TREE_MODEL(Viewer->FieldsStore));
+	FieldRenderer = gtk_cell_renderer_text_new();
+	gtk_cell_layout_pack_end(GTK_CELL_LAYOUT(XFieldCombo), FieldRenderer, TRUE);
+	gtk_cell_layout_add_attribute(GTK_CELL_LAYOUT(XFieldCombo), FieldRenderer, "text", 0);
+	GtkWidget *YFieldCombo = gtk_combo_box_new_with_model(GTK_TREE_MODEL(Viewer->FieldsStore));
+	FieldRenderer = gtk_cell_renderer_text_new();
+	gtk_cell_layout_pack_end(GTK_CELL_LAYOUT(YFieldCombo), FieldRenderer, TRUE);
+	gtk_cell_layout_add_attribute(GTK_CELL_LAYOUT(YFieldCombo), FieldRenderer, "text", 0);
+	GtkWidget *CFieldCombo = gtk_combo_box_new_with_model(GTK_TREE_MODEL(Viewer->FieldsStore));
+	FieldRenderer = gtk_cell_renderer_text_new();
+	gtk_cell_layout_pack_end(GTK_CELL_LAYOUT(CFieldCombo), FieldRenderer, TRUE);
+	gtk_cell_layout_add_attribute(GTK_CELL_LAYOUT(CFieldCombo), FieldRenderer, "text", 0);
+
+	g_signal_connect(G_OBJECT(XFieldCombo), "changed", G_CALLBACK(x_field_changed), Viewer);
+	g_signal_connect(G_OBJECT(YFieldCombo), "changed", G_CALLBACK(y_field_changed), Viewer);
+	g_signal_connect(G_OBJECT(CFieldCombo), "changed", G_CALLBACK(c_field_changed), Viewer);
+
+	GtkToolItem *ComboItem;
+
+	ComboItem = gtk_tool_item_new();
+	gtk_container_add(GTK_CONTAINER(ComboItem), XFieldCombo);
+	gtk_toolbar_insert(Toolbar, ComboItem, -1);
+	ComboItem = gtk_tool_item_new();
+	gtk_container_add(GTK_CONTAINER(ComboItem), YFieldCombo);
+	gtk_toolbar_insert(Toolbar, ComboItem, -1);
+	ComboItem = gtk_tool_item_new();
+	gtk_container_add(GTK_CONTAINER(ComboItem), CFieldCombo);
+	gtk_toolbar_insert(Toolbar, ComboItem, -1);
+
+
+	GtkWidget *EditFieldCombo = gtk_combo_box_new_with_model(GTK_TREE_MODEL(Viewer->FieldsStore));
+
+
+}
+
 static viewer_t *create_viewer(const char *CsvFileName) {
 	viewer_t *Viewer = (viewer_t *)malloc(sizeof(viewer_t));
 	Viewer->PointSize = 5.0;
 	Viewer->BoxSize = 40.0;
-	Viewer->PointsWindow = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-	Viewer->DrawingArea = gtk_drawing_area_new();
 	Viewer->CachedBackground = 0;
 	Viewer->CacheHead = Viewer->CacheTail = 0;
 	Viewer->NumCachedImages = 0;
+
+	Viewer->FieldsStore = gtk_list_store_new(2, G_TYPE_STRING, G_TYPE_INT);
+
+	GtkWidget *MainWindow = Viewer->MainWindow = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+	Viewer->DrawingArea = gtk_drawing_area_new();
+
+	GtkWidget *MainVBox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+	gtk_container_add(GTK_CONTAINER(MainWindow), MainVBox);
+
+	GtkWidget *Toolbar = gtk_toolbar_new();
+	gtk_box_pack_start(GTK_BOX(MainVBox), Toolbar, FALSE, FALSE, 0);
+	create_viewer_toolbar(Viewer, GTK_TOOLBAR(Toolbar));
+
+	GtkWidget *MainVPaned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
+	gtk_box_pack_start(GTK_BOX(MainVBox), MainVPaned, TRUE, TRUE, 0);
+
 	Viewer->ImagesScrolledArea = gtk_scrolled_window_new(0, 0);
 	Viewer->ImagesStore = gtk_list_store_new(2, G_TYPE_STRING, GDK_TYPE_PIXBUF);
 	Viewer->ImagesView = gtk_icon_view_new_with_model(GTK_TREE_MODEL(Viewer->ImagesStore));
-	Viewer->ResultsWindow = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+
+	gtk_paned_pack1(GTK_PANED(MainVPaned), Viewer->DrawingArea, TRUE, TRUE);
+	gtk_paned_pack2(GTK_PANED(MainVPaned), Viewer->ImagesScrolledArea, TRUE, TRUE);
+
 	gtk_icon_view_set_text_column(GTK_ICON_VIEW(Viewer->ImagesView), 0);
 	gtk_icon_view_set_pixbuf_column(GTK_ICON_VIEW(Viewer->ImagesView), 1);
 	gtk_icon_view_set_item_width(GTK_ICON_VIEW(Viewer->ImagesView), 72);
@@ -586,23 +708,18 @@ static viewer_t *create_viewer(const char *CsvFileName) {
 	gtk_widget_add_events(Viewer->DrawingArea, GDK_BUTTON_PRESS_MASK);
 	gtk_widget_add_events(Viewer->DrawingArea, GDK_BUTTON_RELEASE_MASK);
 	gtk_widget_add_events(Viewer->DrawingArea, GDK_KEY_PRESS);
-	gtk_widget_set_can_focus(Viewer->DrawingArea, TRUE);
-	gtk_container_add(GTK_CONTAINER(Viewer->PointsWindow), Viewer->DrawingArea);
 	gtk_container_add(GTK_CONTAINER(Viewer->ImagesScrolledArea), Viewer->ImagesView);
-	gtk_container_add(GTK_CONTAINER(Viewer->ResultsWindow), Viewer->ImagesScrolledArea);
 	g_signal_connect(G_OBJECT(Viewer->DrawingArea), "draw", G_CALLBACK(redraw_viewer), Viewer);
 	g_signal_connect(G_OBJECT(Viewer->DrawingArea), "size-allocate", G_CALLBACK(resize_viewer), Viewer);
 	g_signal_connect(G_OBJECT(Viewer->DrawingArea), "scroll-event", G_CALLBACK(scroll_viewer), Viewer);
 	g_signal_connect(G_OBJECT(Viewer->DrawingArea), "button-press-event", G_CALLBACK(button_press_viewer), Viewer);
 	g_signal_connect(G_OBJECT(Viewer->DrawingArea), "motion-notify-event", G_CALLBACK(motion_notify_viewer), Viewer);
 	g_signal_connect(G_OBJECT(Viewer->DrawingArea), "key-press-event", G_CALLBACK(key_press_viewer), Viewer);
-	g_signal_connect(G_OBJECT(Viewer->ResultsWindow), "destroy", G_CALLBACK(gtk_main_quit), 0);
-	g_signal_connect(G_OBJECT(Viewer->PointsWindow), "destroy", G_CALLBACK(gtk_main_quit), 0);
-	load_nodes(Viewer, CsvFileName);
-	gtk_window_resize(GTK_WINDOW(Viewer->PointsWindow), 640, 480);
-	gtk_widget_show_all(Viewer->PointsWindow);
-	gtk_window_resize(GTK_WINDOW(Viewer->ResultsWindow), 640, 480);
-	gtk_widget_show_all(Viewer->ResultsWindow);
+	g_signal_connect(G_OBJECT(Viewer->MainWindow), "destroy", G_CALLBACK(gtk_main_quit), 0);
+	viewer_open_file(Viewer, CsvFileName);
+	gtk_window_resize(GTK_WINDOW(Viewer->MainWindow), 640, 480);
+	gtk_paned_set_position(GTK_PANED(MainVPaned), 320);
+	gtk_widget_show_all(Viewer->MainWindow);
 	return Viewer;
 }
 
