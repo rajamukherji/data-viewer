@@ -190,7 +190,7 @@ static void set_viewer_colour_index(viewer_t *Viewer, int CIndex) {
 			if (*CValue > 0.0) {
 				set_node_rgb(Node, 6.0 * (*CValue - Min) / Range);
 			} else {
-				Node->R = Node->G = Node->B = 0.0;
+				Node->R = Node->G = Node->B = POINT_COLOUR_SATURATION;
 			}
 			++Node;
 			++CValue;
@@ -231,22 +231,26 @@ static void load_nodes_field_callback(void *Text, size_t Size, csv_node_loader_t
 			double Value;
 			insert:
 			if (Field->EnumHash) {
-				char *EnumName = malloc(Size + 1);
-				memcpy(EnumName, Text, Size);
-				EnumName[Size] = 0;
-				gpointer *Ref = g_hash_table_lookup(Field->EnumHash, EnumName);
-				if (Ref) {
-					Value = *(double *)Ref;
-					free(EnumName);
+				if (Size) {
+					char *EnumName = malloc(Size + 1);
+					memcpy(EnumName, Text, Size);
+					EnumName[Size] = 0;
+					gpointer *Ref = g_hash_table_lookup(Field->EnumHash, EnumName);
+					if (Ref) {
+						Value = *(double *)Ref;
+						free(EnumName);
+					} else {
+						Ref = (void *)&Field->Values[Loader->Row - 1];
+						g_hash_table_insert(Field->EnumHash, EnumName, Ref);
+						Value = g_hash_table_size(Field->EnumHash);
+						const char **EnumNames = (const char **)malloc((Value + 1) * sizeof(const char *));
+						memcpy(EnumNames, Field->EnumNames, Value * sizeof(const char *));
+						EnumNames[(int)Value] = EnumName;
+						free(Field->EnumNames);
+						Field->EnumNames = EnumNames;
+					}
 				} else {
-					Ref = (void *)&Field->Values[Loader->Row - 1];
-					g_hash_table_insert(Field->EnumHash, EnumName, Ref);
-					Value = g_hash_table_size(Field->EnumHash);
-					const char **EnumNames = (const char **)malloc((Value + 1) * sizeof(const char *));
-					memcpy(EnumNames, Field->EnumNames, Value * sizeof(const char *));
-					EnumNames[(int)Value] = EnumName;
-					free(Field->EnumNames);
-					Field->EnumNames = EnumNames;
+					Value = 0.0;
 				}
 			} else {
 				char *End;
@@ -306,7 +310,7 @@ static void viewer_open_file(viewer_t *Viewer, const char *CsvFileName) {
 		fprintf(stderr, "Error reading from %s\n", CsvFileName);
 		exit(1);
 	}
-	csv_init(Parser, 0);
+	csv_init(Parser, CSV_APPEND_NULL);
 	size_t Count = fread(Buffer, 1, 4096, File);
 	while (Count > 0) {
 		csv_parse(Parser, Buffer, Count, (void *)count_nodes_field_callback, (void *)count_nodes_row_callback, Loader);
@@ -334,7 +338,7 @@ static void viewer_open_file(viewer_t *Viewer, const char *CsvFileName) {
 	Loader->Nodes = Nodes;
 	Loader->Fields = Fields;
 	Loader->Row = Loader->Index = 0;
-	csv_init(Parser, 0);
+	csv_init(Parser, CSV_APPEND_NULL);
 	Count = fread(Buffer, 1, 4096, File);
 	while (Count > 0) {
 		csv_parse(Parser, Buffer, Count, (void *)load_nodes_field_callback, (void *)load_nodes_row_callback, Loader);
@@ -902,6 +906,65 @@ static void create_viewer_toolbar(viewer_t *Viewer, GtkToolbar *Toolbar) {
 	g_signal_connect(G_OBJECT(AddValueButton), "clicked", G_CALLBACK(add_value_clicked), Viewer);
 }
 
+static viewer_t *create_viewer_action_bar(viewer_t *Viewer, GtkActionBar *ActionBar) {
+	//GtkToolItem *OpenCsvButton = gtk_tool_button_new(gtk_image_new_from_icon_name("gtk-open", GTK_ICON_SIZE_SMALL_TOOLBAR), "Open");
+	GtkWidget *SaveCsvButton = gtk_button_new_with_label("Save");
+	gtk_button_set_image(GTK_BUTTON(SaveCsvButton), gtk_image_new_from_icon_name("gtk-save", GTK_ICON_SIZE_SMALL_TOOLBAR));
+	gtk_action_bar_pack_start(ActionBar, SaveCsvButton);
+
+	g_signal_connect(G_OBJECT(SaveCsvButton), "clicked", G_CALLBACK(save_csv), Viewer);
+
+	GtkCellRenderer *FieldRenderer;
+	GtkWidget *XComboBox = Viewer->XComboBox = gtk_combo_box_new_with_model(GTK_TREE_MODEL(Viewer->FieldsStore));
+	FieldRenderer = gtk_cell_renderer_text_new();
+	gtk_cell_layout_pack_end(GTK_CELL_LAYOUT(XComboBox), FieldRenderer, TRUE);
+	gtk_cell_layout_add_attribute(GTK_CELL_LAYOUT(XComboBox), FieldRenderer, "text", 0);
+	GtkWidget *YComboBox = Viewer->YComboBox = gtk_combo_box_new_with_model(GTK_TREE_MODEL(Viewer->FieldsStore));
+	FieldRenderer = gtk_cell_renderer_text_new();
+	gtk_cell_layout_pack_end(GTK_CELL_LAYOUT(YComboBox), FieldRenderer, TRUE);
+	gtk_cell_layout_add_attribute(GTK_CELL_LAYOUT(YComboBox), FieldRenderer, "text", 0);
+	GtkWidget *CComboBox = Viewer->CComboBox = gtk_combo_box_new_with_model(GTK_TREE_MODEL(Viewer->FieldsStore));
+	FieldRenderer = gtk_cell_renderer_text_new();
+	gtk_cell_layout_pack_end(GTK_CELL_LAYOUT(CComboBox), FieldRenderer, TRUE);
+	gtk_cell_layout_add_attribute(GTK_CELL_LAYOUT(CComboBox), FieldRenderer, "text", 0);
+
+	g_signal_connect(G_OBJECT(XComboBox), "changed", G_CALLBACK(x_field_changed), Viewer);
+	g_signal_connect(G_OBJECT(YComboBox), "changed", G_CALLBACK(y_field_changed), Viewer);
+	g_signal_connect(G_OBJECT(CComboBox), "changed", G_CALLBACK(c_field_changed), Viewer);
+
+	gtk_action_bar_pack_start(ActionBar, XComboBox);
+	gtk_action_bar_pack_start(ActionBar, YComboBox);
+	gtk_action_bar_pack_start(ActionBar, CComboBox);
+
+
+	GtkWidget *EditFieldComboBox = Viewer->EditFieldComboBox = gtk_combo_box_new_with_model(GTK_TREE_MODEL(Viewer->FieldsStore));
+	FieldRenderer = gtk_cell_renderer_text_new();
+	gtk_cell_layout_pack_end(GTK_CELL_LAYOUT(EditFieldComboBox), FieldRenderer, TRUE);
+	gtk_cell_layout_add_attribute(GTK_CELL_LAYOUT(EditFieldComboBox), FieldRenderer, "text", 0);
+	GtkWidget *EditValueComboBox = Viewer->EditValueComboBox = gtk_combo_box_new();
+	FieldRenderer = gtk_cell_renderer_text_new();
+	gtk_cell_layout_pack_end(GTK_CELL_LAYOUT(EditValueComboBox), FieldRenderer, TRUE);
+	gtk_cell_layout_add_attribute(GTK_CELL_LAYOUT(EditValueComboBox), FieldRenderer, "text", 0);
+
+	g_signal_connect(G_OBJECT(EditFieldComboBox), "changed", G_CALLBACK(edit_field_changed), Viewer);
+	g_signal_connect(G_OBJECT(EditValueComboBox), "changed", G_CALLBACK(edit_value_changed), Viewer);
+
+	GtkWidget *AddFieldButton = gtk_button_new_with_label("Add Field");
+	gtk_button_set_image(GTK_BUTTON(AddFieldButton), gtk_image_new_from_icon_name("gtk-add", GTK_ICON_SIZE_SMALL_TOOLBAR));
+
+	GtkWidget *AddValueButton = gtk_button_new_with_label("Add Value");
+	gtk_button_set_image(GTK_BUTTON(AddValueButton), gtk_image_new_from_icon_name("gtk-add", GTK_ICON_SIZE_SMALL_TOOLBAR));
+
+	gtk_action_bar_pack_start(ActionBar, EditFieldComboBox);
+	gtk_action_bar_pack_start(ActionBar, AddFieldButton);
+
+	gtk_action_bar_pack_start(ActionBar, EditValueComboBox);
+	gtk_action_bar_pack_start(ActionBar, AddValueButton);
+
+	g_signal_connect(G_OBJECT(AddFieldButton), "clicked", G_CALLBACK(add_field_clicked), Viewer);
+	g_signal_connect(G_OBJECT(AddValueButton), "clicked", G_CALLBACK(add_value_clicked), Viewer);
+}
+
 static viewer_t *create_viewer(const char *CsvFileName) {
 	viewer_t *Viewer = (viewer_t *)malloc(sizeof(viewer_t));
 	Viewer->PointSize = 5.0;
@@ -919,9 +982,13 @@ static viewer_t *create_viewer(const char *CsvFileName) {
 	GtkWidget *MainVBox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
 	gtk_container_add(GTK_CONTAINER(MainWindow), MainVBox);
 
-	GtkWidget *Toolbar = gtk_toolbar_new();
+	/*GtkWidget *Toolbar = gtk_toolbar_new();
 	gtk_box_pack_start(GTK_BOX(MainVBox), Toolbar, FALSE, FALSE, 0);
-	create_viewer_toolbar(Viewer, GTK_TOOLBAR(Toolbar));
+	create_viewer_toolbar(Viewer, GTK_TOOLBAR(Toolbar));*/
+
+	GtkWidget *ActionBar = gtk_action_bar_new();
+	gtk_box_pack_start(GTK_BOX(MainVBox), ActionBar, FALSE, FALSE, 0);
+	create_viewer_action_bar(Viewer, GTK_ACTION_BAR(ActionBar));
 
 	GtkWidget *MainVPaned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
 	gtk_box_pack_start(GTK_BOX(MainVBox), MainVPaned, TRUE, TRUE, 0);
