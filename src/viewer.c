@@ -17,6 +17,7 @@
 typedef struct node_t node_t;
 typedef int node_callback_t(void *Data, node_t *Node);
 typedef struct field_t field_t;
+typedef struct filter_t filter_t;
 typedef struct viewer_t viewer_t;
 
 typedef struct {
@@ -33,6 +34,7 @@ struct node_t {
 	GdkPixbuf *Pixbuf;
 	node_t *CacheNext, *CachePrev;
 	double X, Y, R, G, B;
+	int Filtered;
 };
 
 struct field_t {
@@ -46,19 +48,34 @@ struct field_t {
 	double Values[];
 };
 
+typedef void filter_fn_t(int Count, node_t *Nodes, double *Input, double Value);
+
+struct filter_t {
+	filter_t *Next;
+	viewer_t *Viewer;
+	field_t *Field;
+	filter_fn_t *Operator;
+	GtkWidget *Widget, *ValueWidget;
+	double Value;
+};
+
 struct viewer_t {
 	GtkWidget *MainWindow;
+    GtkWidget *FilterWindow, *FiltersBox;
 	GtkWidget *DrawingArea;
 	GtkWidget *ImagesView;
 	GtkWidget *ImagesScrolledArea;
 	GtkWidget *XComboBox, *YComboBox, *CComboBox, *EditFieldComboBox, *EditValueComboBox;
 	GtkListStore *ImagesStore;
 	GtkListStore *FieldsStore;
+	GtkListStore *OperatorsStore;
 	node_t *Root, *Nodes;
 	cairo_t *Cairo;
 	cairo_surface_t *CachedBackground;
 	node_t *CacheHead, *CacheTail;
 	field_t **Fields, *EditField;
+	filter_t *Filters;
+	int *Filtered;
 	point_t Min, Max, Scale, DataMin, DataMax, Pointer;
 	double PointSize, BoxSize, EditValue;
 	int NumNodes, NumFields, NumCachedImages, NumVisibleImages;
@@ -131,8 +148,22 @@ static void set_viewer_indices(viewer_t *Viewer, int XIndex, int YIndex) {
 		++YValue;
 	}
 
-	node_t *Root = Viewer->Root = Node = Viewer->Nodes;
-	for (int I = NumNodes - 1; --I >= 0;) add_node(Root, ++Node);
+	node_t *Root = 0;
+	Node = Viewer->Nodes;
+	int I = NumNodes;
+	while (--I >= 0) {
+		if (!Node->Filtered) {
+			Root = Node;
+			break;
+		}
+		++Node;
+	}
+	++Node;
+	Viewer->Root = Root;
+	while (--I >= 0) {
+		if (!Node->Filtered) add_node(Root, Node);
+		++Node;
+	}
 
 	double RangeX = XField->Range.Max - XField->Range.Min;
 	double RangeY = YField->Range.Max - YField->Range.Min;
@@ -742,7 +773,7 @@ static void text_input_dialog(const char *Title, viewer_t *Viewer, text_dialog_c
 }
 
 static void edit_value_changed(GtkComboBox *Widget, viewer_t *Viewer) {
-	Viewer->EditValue = gtk_combo_box_get_active(GTK_COMBO_BOX(Widget)) + 1;
+	Viewer->EditValue = gtk_combo_box_get_active(Widget) + 1;
 }
 
 static void add_field_callback(const char *Name, viewer_t *Viewer, void *Data) {
@@ -833,6 +864,188 @@ static void save_csv(GtkWidget *Button, viewer_t *Viewer) {
 		fclose(File);
 	}
 	gtk_widget_destroy(FileChooser);
+}
+
+static void filter_operator_equal(int Count, node_t *Node, double *Input, double Value) {
+	while (--Count >= 0) {
+		if (!Node->Filtered) if (Input[0] != Value) Node->Filtered = 1;
+		++Node;
+		++Input;
+	}
+}
+
+static void filter_operator_not_equal(int Count, node_t *Node, double *Input, double Value) {
+	while (--Count >= 0) {
+		if (!Node->Filtered) if (Input[0] == Value) Node->Filtered = 1;
+		++Node;
+		++Input;
+	}
+}
+
+static void filter_operator_less(int Count, node_t *Node, double *Input, double Value) {
+	while (--Count >= 0) {
+		if (!Node->Filtered) if (Input[0] >= Value) Node->Filtered = 1;
+		++Node;
+		++Input;
+	}
+}
+
+static void filter_operator_greater(int Count, node_t *Node, double *Input, double Value) {
+	while (--Count >= 0) {
+		if (!Node->Filtered) if (Input[0] <= Value) Node->Filtered = 1;
+		++Node;
+		++Input;
+	}
+}
+
+static void filter_operator_less_or_equal(int Count, node_t *Node, double *Input, double Value) {
+	while (--Count >= 0) {
+		if (!Node->Filtered) if (Input[0] > Value) Node->Filtered = 1;
+		++Node;
+		++Input;
+	}
+}
+
+static void filter_operator_greater_or_equal(int Count, node_t *Node, double *Input, double Value) {
+	while (--Count >= 0) {
+		if (!Node->Filtered) if (Input[0] < Value) Node->Filtered = 1;
+		++Node;
+		++Input;
+	}
+}
+
+static void viewer_filter_nodes(viewer_t *Viewer) {
+	int NumNodes = Viewer->NumNodes;
+	node_t *Node = Viewer->Nodes;
+	for (int I = NumNodes; --I >= 0;) {
+		Node->Filtered = 0;
+		++Node;
+	}
+	for (filter_t *Filter = Viewer->Filters; Filter; Filter = Filter->Next) {
+		if (Filter->Operator && Filter->Field) {
+			Filter->Operator(Viewer->NumNodes, Viewer->Nodes, Filter->Field->Values, Filter->Value);
+		}
+	}
+	set_viewer_indices(Viewer, Viewer->XIndex, Viewer->YIndex);
+	redraw_viewer_background(Viewer);
+	draw_node_images(Viewer);
+	gtk_widget_queue_draw(Viewer->DrawingArea);
+}
+
+static void filter_enum_value_changed(GtkComboBox *Widget, filter_t *Filter) {
+	Filter->Value = gtk_combo_box_get_active(Widget) + 1;
+	viewer_filter_nodes(Filter->Viewer);
+}
+
+static void filter_real_value_changed(GtkSpinButton *Widget, filter_t *Filter) {
+	Filter->Value = gtk_spin_button_get_value(Widget);
+	viewer_filter_nodes(Filter->Viewer);
+}
+
+static void filter_field_changed(GtkComboBox *Widget, filter_t *Filter) {
+	viewer_t *Viewer = Filter->Viewer;
+	field_t *Field = Filter->Field = Viewer->Fields[gtk_combo_box_get_active(GTK_COMBO_BOX(Widget))];
+	if (Filter->ValueWidget) gtk_widget_destroy(Filter->ValueWidget);
+	if (Field->EnumStore) {
+		GtkWidget *ValueComboBox = Filter->ValueWidget = gtk_combo_box_new_with_model(GTK_TREE_MODEL(Field->EnumStore));
+		GtkCellRenderer *FieldRenderer = gtk_cell_renderer_text_new();
+		gtk_cell_layout_pack_end(GTK_CELL_LAYOUT(ValueComboBox), FieldRenderer, TRUE);
+		gtk_cell_layout_add_attribute(GTK_CELL_LAYOUT(ValueComboBox), FieldRenderer, "text", 0);
+		g_signal_connect(G_OBJECT(ValueComboBox), "changed", G_CALLBACK(filter_enum_value_changed), Filter);
+	} else {
+		GtkWidget *ValueSpinButton = Filter->ValueWidget = gtk_spin_button_new_with_range(Field->Range.Min, Field->Range.Max, (Field->Range.Max - Field->Range.Min) / 20.0);
+		g_signal_connect(G_OBJECT(ValueSpinButton), "value-changed", G_CALLBACK(filter_real_value_changed), Filter);
+	}
+	gtk_box_pack_start(GTK_BOX(Filter->Widget), Filter->ValueWidget, FALSE, FALSE, 4);
+	gtk_widget_show_all(Filter->Widget);
+}
+
+static void filter_operator_changed(GtkComboBox *Widget, filter_t *Filter) {
+	switch (gtk_combo_box_get_active(Widget)) {
+	case 0: Filter->Operator = filter_operator_equal; break;
+	case 1: Filter->Operator = filter_operator_not_equal; break;
+	case 2: Filter->Operator = filter_operator_less; break;
+	case 3: Filter->Operator = filter_operator_greater; break;
+	case 4: Filter->Operator = filter_operator_less_or_equal; break;
+	case 5: Filter->Operator = filter_operator_greater_or_equal; break;
+	default: Filter->Operator = 0; break;
+	}
+	viewer_filter_nodes(Filter->Viewer);
+}
+
+static void filter_remove(GtkWidget *Button, filter_t *Filter) {
+	viewer_t *Viewer = Filter->Viewer;
+	// TODO: Remove filter from list and ui
+	viewer_filter_nodes(Viewer);
+}
+
+static void filter_create(GtkButton *Widget, viewer_t *Viewer) {
+	filter_t *Filter = (filter_t *)malloc(sizeof(filter_t));
+	Filter->Viewer = Viewer;
+	GtkWidget *FilterBox = Filter->Widget = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+	Filter->ValueWidget = 0;
+	Filter->Field = 0;
+	Filter->Operator = 0;
+
+	GtkWidget *RemoveButton = gtk_button_new_with_label("Remove");
+	gtk_button_set_image(GTK_BUTTON(RemoveButton), gtk_image_new_from_icon_name("gtk-remove", GTK_ICON_SIZE_BUTTON));
+	gtk_box_pack_start(GTK_BOX(FilterBox), RemoveButton, FALSE, FALSE, 4);
+
+	GtkCellRenderer *FieldRenderer;
+	GtkWidget *FieldComboBox = gtk_combo_box_new_with_model(GTK_TREE_MODEL(Viewer->FieldsStore));
+	FieldRenderer = gtk_cell_renderer_text_new();
+	gtk_cell_layout_pack_end(GTK_CELL_LAYOUT(FieldComboBox), FieldRenderer, TRUE);
+	gtk_cell_layout_add_attribute(GTK_CELL_LAYOUT(FieldComboBox), FieldRenderer, "text", 0);
+	gtk_box_pack_start(GTK_BOX(FilterBox), FieldComboBox, FALSE, FALSE, 4);
+
+	GtkWidget *OperatorComboBox = gtk_combo_box_new_with_model(GTK_TREE_MODEL(Viewer->OperatorsStore));
+	FieldRenderer = gtk_cell_renderer_text_new();
+	gtk_cell_layout_pack_end(GTK_CELL_LAYOUT(OperatorComboBox), FieldRenderer, TRUE);
+	gtk_cell_layout_add_attribute(GTK_CELL_LAYOUT(OperatorComboBox), FieldRenderer, "text", 0);
+	gtk_box_pack_start(GTK_BOX(FilterBox), OperatorComboBox, FALSE, FALSE, 4);
+
+	g_signal_connect(G_OBJECT(RemoveButton), "clicked", G_CALLBACK(filter_remove), Filter);
+	g_signal_connect(G_OBJECT(FieldComboBox), "changed", G_CALLBACK(filter_field_changed), Filter);
+	g_signal_connect(G_OBJECT(OperatorComboBox), "changed", G_CALLBACK(filter_operator_changed), Filter);
+
+	gtk_box_pack_start(GTK_BOX(Viewer->FiltersBox), FilterBox, FALSE, FALSE, 6);
+	gtk_widget_show_all(FilterBox);
+
+	Filter->Next = Viewer->Filters;
+	Viewer->Filters = Filter;
+}
+
+static gboolean hide_filter_window(GtkWidget *Widget, GdkEvent *Event, viewer_t *Viewer) {
+	gtk_widget_hide(Widget);
+	return TRUE;
+}
+
+static void create_filter_window(viewer_t *Viewer) {
+	GtkWidget *Window = Viewer->FilterWindow = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+	gtk_window_set_transient_for(GTK_WINDOW(Window), GTK_WINDOW(Viewer->MainWindow));
+	gtk_container_set_border_width(GTK_CONTAINER(Window), 6);
+	GtkWidget *FiltersBox = Viewer->FiltersBox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+	gtk_container_add(GTK_CONTAINER(Window), FiltersBox);
+
+	GtkListStore *OperatorsStore = Viewer->OperatorsStore = gtk_list_store_new(2, G_TYPE_STRING, G_TYPE_POINTER);
+	gtk_list_store_insert_with_values(OperatorsStore, 0, -1, 0, "=", 1, filter_operator_equal, -1);
+	gtk_list_store_insert_with_values(OperatorsStore, 0, -1, 0, "≠", 1, filter_operator_not_equal, -1);
+	gtk_list_store_insert_with_values(OperatorsStore, 0, -1, 0, "<", 1, filter_operator_less, -1);
+	gtk_list_store_insert_with_values(OperatorsStore, 0, -1, 0, ">", 1, filter_operator_greater, -1);
+	gtk_list_store_insert_with_values(OperatorsStore, 0, -1, 0, "≤", 1, filter_operator_less_or_equal, -1);
+	gtk_list_store_insert_with_values(OperatorsStore, 0, -1, 0, "≥", 1, filter_operator_greater_or_equal, -1);
+
+	GtkWidget *CreateButton = gtk_button_new_with_label("Add");
+	gtk_button_set_image(GTK_BUTTON(CreateButton), gtk_image_new_from_icon_name("gtk-add", GTK_ICON_SIZE_BUTTON));
+	gtk_box_pack_start(GTK_BOX(FiltersBox), CreateButton, FALSE, FALSE, 6);
+
+	g_signal_connect(G_OBJECT(CreateButton), "clicked", G_CALLBACK(filter_create), Viewer);
+
+	g_signal_connect(G_OBJECT(Window), "delete-event", G_CALLBACK(hide_filter_window), Viewer);
+}
+
+static void show_filter_window(GtkButton *Widget, viewer_t *Viewer) {
+	gtk_widget_show_all(Viewer->FilterWindow);
 }
 
 static void create_viewer_toolbar(viewer_t *Viewer, GtkToolbar *Toolbar) {
@@ -963,6 +1176,14 @@ static viewer_t *create_viewer_action_bar(viewer_t *Viewer, GtkActionBar *Action
 
 	g_signal_connect(G_OBJECT(AddFieldButton), "clicked", G_CALLBACK(add_field_clicked), Viewer);
 	g_signal_connect(G_OBJECT(AddValueButton), "clicked", G_CALLBACK(add_value_clicked), Viewer);
+
+	create_filter_window(Viewer);
+
+	GtkWidget *FilterButton = gtk_button_new_with_label("Filter");
+	gtk_button_set_image(GTK_BUTTON(SaveCsvButton), gtk_image_new_from_icon_name("gtk-filter", GTK_ICON_SIZE_SMALL_TOOLBAR));
+	gtk_action_bar_pack_start(ActionBar, FilterButton);
+
+	g_signal_connect(G_OBJECT(FilterButton), "clicked", G_CALLBACK(show_filter_window), Viewer);
 }
 
 static viewer_t *create_viewer(const char *CsvFileName) {
@@ -973,6 +1194,7 @@ static viewer_t *create_viewer(const char *CsvFileName) {
 	Viewer->CacheHead = Viewer->CacheTail = 0;
 	Viewer->NumCachedImages = 0;
 	Viewer->EditField = 0;
+	Viewer->Filters = 0;
 
 	Viewer->FieldsStore = gtk_list_store_new(2, G_TYPE_STRING, G_TYPE_INT);
 
