@@ -213,6 +213,7 @@ static void set_viewer_colour_index(viewer_t *Viewer, int CIndex) {
 	field_t *CField = Viewer->Fields[CIndex];
 	double Min = CField->Range.Min;
 	double Range = CField->Range.Max - Min;
+	if (!CField->EnumStore) Range += 1.0;
 	if (Range <= 1.0e-6) Range = 1.0;
 	node_t *Node = Viewer->Nodes;
 	double *CValue = CField->Values;
@@ -385,7 +386,10 @@ static void viewer_open_file(viewer_t *Viewer, const char *CsvFileName) {
 		if (Field->EnumHash) {
 			GHashTable *EnumHash = Field->EnumHash;
 			GtkListStore *EnumStore = Field->EnumStore = gtk_list_store_new(2, G_TYPE_STRING, G_TYPE_DOUBLE);
-			g_hash_table_foreach(EnumHash, (GHFunc)create_field_enum_store, EnumStore);
+			int EnumSize = g_hash_table_size(EnumHash) + 1;
+			for (int J = 0; J < EnumSize; ++J) {
+				gtk_list_store_insert_with_values(Field->EnumStore, 0, -1, 0, Field->EnumNames[J], 1, (double)(J + 1), -1);
+			}
 		}
 	}
 
@@ -750,11 +754,11 @@ static void text_input_dialog(const char *Title, viewer_t *Viewer, text_dialog_c
 	gtk_box_pack_start(GTK_BOX(VBox), ButtonBox, FALSE, FALSE, 4);
 
 	GtkWidget *CancelButton = gtk_button_new_with_label("Cancel");
-	gtk_button_set_image(GTK_BUTTON(CancelButton), gtk_image_new_from_icon_name("gtk-cancel", GTK_ICON_SIZE_BUTTON));
+	gtk_button_set_image(GTK_BUTTON(CancelButton), gtk_image_new_from_icon_name("window-close-symbolic", GTK_ICON_SIZE_BUTTON));
 	gtk_box_pack_start(GTK_BOX(ButtonBox), CancelButton, FALSE, FALSE, 4);
 
 	GtkWidget *AcceptButton = gtk_button_new_with_label("Accept");
-	gtk_button_set_image(GTK_BUTTON(AcceptButton), gtk_image_new_from_icon_name("gtk-accept", GTK_ICON_SIZE_BUTTON));
+	gtk_button_set_image(GTK_BUTTON(AcceptButton), gtk_image_new_from_icon_name("emblem-ok-symbolic", GTK_ICON_SIZE_BUTTON));
 	gtk_box_pack_start(GTK_BOX(ButtonBox), AcceptButton, FALSE, FALSE, 4);
 
 	text_dialog_info_t *Info = (text_dialog_info_t *)malloc(sizeof(text_dialog_info_t));
@@ -773,7 +777,7 @@ static void text_input_dialog(const char *Title, viewer_t *Viewer, text_dialog_c
 }
 
 static void edit_value_changed(GtkComboBox *Widget, viewer_t *Viewer) {
-	Viewer->EditValue = gtk_combo_box_get_active(Widget) + 1;
+	Viewer->EditValue = gtk_combo_box_get_active(Widget);
 }
 
 static void add_field_callback(const char *Name, viewer_t *Viewer, void *Data) {
@@ -787,6 +791,7 @@ static void add_field_callback(const char *Name, viewer_t *Viewer, void *Data) {
 	Field->EnumNames[0] = "";
 	Field->Name = Name;
 	Field->Range.Min = Field->Range.Max = 0;
+	gtk_list_store_insert_with_values(Field->EnumStore, 0, -1, 0, "", 1, 0.0, -1);
 	memset(Field->Values, 0, Viewer->NumNodes * sizeof(double));
 	for (int I = 0; I < Viewer->NumFields; ++I) Fields[I] = Viewer->Fields[I];
 	Fields[Viewer->NumFields] = Field;
@@ -804,7 +809,7 @@ static void add_value_callback(const char *Name, viewer_t *Viewer, void *Data) {
 	field_t *Field = Viewer->EditField;
 	if (!Field || !Field->EnumStore) return;
 	Name = strdup(Name);
-	double Value = Viewer->EditValue = gtk_tree_model_iter_n_children(GTK_TREE_MODEL(Field->EnumStore), 0) + 1;
+	double Value = Viewer->EditValue = gtk_tree_model_iter_n_children(GTK_TREE_MODEL(Field->EnumStore), 0);
 	gtk_list_store_insert_with_values(Field->EnumStore, 0, -1, 0, Name, 1, Value, -1);
 	const char **EnumNames = (const char **)malloc((Value + 1) * sizeof(const char *));
 	memcpy(EnumNames, Field->EnumNames, Value * sizeof(const char *));
@@ -829,8 +834,8 @@ static void save_csv(GtkWidget *Button, viewer_t *Viewer) {
 		"Save as CSV file",
 		GTK_WINDOW(Viewer->MainWindow),
 		GTK_FILE_CHOOSER_ACTION_SAVE,
-		"gtk-cancel", GTK_RESPONSE_CANCEL,
-		"gtk-save", GTK_RESPONSE_ACCEPT,
+		"Cancel", GTK_RESPONSE_CANCEL,
+		"Save", GTK_RESPONSE_ACCEPT,
 		0
 	);
 	if (gtk_dialog_run(GTK_DIALOG(FileChooser)) == GTK_RESPONSE_ACCEPT) {
@@ -933,7 +938,7 @@ static void viewer_filter_nodes(viewer_t *Viewer) {
 }
 
 static void filter_enum_value_changed(GtkComboBox *Widget, filter_t *Filter) {
-	Filter->Value = gtk_combo_box_get_active(Widget) + 1;
+	Filter->Value = gtk_combo_box_get_active(Widget);
 	viewer_filter_nodes(Filter->Viewer);
 }
 
@@ -975,7 +980,10 @@ static void filter_operator_changed(GtkComboBox *Widget, filter_t *Filter) {
 
 static void filter_remove(GtkWidget *Button, filter_t *Filter) {
 	viewer_t *Viewer = Filter->Viewer;
-	// TODO: Remove filter from list and ui
+	filter_t **Slot = &Viewer->Filters;
+	while (Slot[0] != Filter) Slot = &Slot[0]->Next;
+	Slot[0] = Slot[0]->Next;
+	gtk_widget_destroy(Filter->Widget);
 	viewer_filter_nodes(Viewer);
 }
 
@@ -988,7 +996,7 @@ static void filter_create(GtkButton *Widget, viewer_t *Viewer) {
 	Filter->Operator = 0;
 
 	GtkWidget *RemoveButton = gtk_button_new_with_label("Remove");
-	gtk_button_set_image(GTK_BUTTON(RemoveButton), gtk_image_new_from_icon_name("gtk-remove", GTK_ICON_SIZE_BUTTON));
+	gtk_button_set_image(GTK_BUTTON(RemoveButton), gtk_image_new_from_icon_name("list-remove-symbolic", GTK_ICON_SIZE_BUTTON));
 	gtk_box_pack_start(GTK_BOX(FilterBox), RemoveButton, FALSE, FALSE, 4);
 
 	GtkCellRenderer *FieldRenderer;
@@ -1036,7 +1044,7 @@ static void create_filter_window(viewer_t *Viewer) {
 	gtk_list_store_insert_with_values(OperatorsStore, 0, -1, 0, "≥", 1, filter_operator_greater_or_equal, -1);
 
 	GtkWidget *CreateButton = gtk_button_new_with_label("Add");
-	gtk_button_set_image(GTK_BUTTON(CreateButton), gtk_image_new_from_icon_name("gtk-add", GTK_ICON_SIZE_BUTTON));
+	gtk_button_set_image(GTK_BUTTON(CreateButton), gtk_image_new_from_icon_name("list-add-symbolic", GTK_ICON_SIZE_BUTTON));
 	gtk_box_pack_start(GTK_BOX(FiltersBox), CreateButton, FALSE, FALSE, 6);
 
 	g_signal_connect(G_OBJECT(CreateButton), "clicked", G_CALLBACK(filter_create), Viewer);
@@ -1049,8 +1057,8 @@ static void show_filter_window(GtkButton *Widget, viewer_t *Viewer) {
 }
 
 static void create_viewer_toolbar(viewer_t *Viewer, GtkToolbar *Toolbar) {
-	//GtkToolItem *OpenCsvButton = gtk_tool_button_new(gtk_image_new_from_icon_name("gtk-open", GTK_ICON_SIZE_SMALL_TOOLBAR), "Open");
-	GtkToolItem *SaveCsvButton = gtk_tool_button_new(gtk_image_new_from_icon_name("gtk-save", GTK_ICON_SIZE_SMALL_TOOLBAR), "Save");
+	//GtkToolItem *OpenCsvButton = gtk_tool_button_new(gtk_image_new_from_icon_name("gtk-open", GTK_ICON_SIZE_BUTTON), "Open");
+	GtkToolItem *SaveCsvButton = gtk_tool_button_new(gtk_image_new_from_icon_name("document-save-as-symbolic", GTK_ICON_SIZE_BUTTON), "Save");
 	//gtk_toolbar_insert(Toolbar, OpenCsvButton, -1);
 	gtk_toolbar_insert(Toolbar, SaveCsvButton, -1);
 
@@ -1100,8 +1108,8 @@ static void create_viewer_toolbar(viewer_t *Viewer, GtkToolbar *Toolbar) {
 	g_signal_connect(G_OBJECT(EditFieldComboBox), "changed", G_CALLBACK(edit_field_changed), Viewer);
 	g_signal_connect(G_OBJECT(EditValueComboBox), "changed", G_CALLBACK(edit_value_changed), Viewer);
 
-	GtkToolItem *AddFieldButton = gtk_tool_button_new(gtk_image_new_from_icon_name("gtk-add", GTK_ICON_SIZE_SMALL_TOOLBAR), "Add Field");
-	GtkToolItem *AddValueButton = gtk_tool_button_new(gtk_image_new_from_icon_name("gtk-add", GTK_ICON_SIZE_SMALL_TOOLBAR), "Add Value");
+	GtkToolItem *AddFieldButton = gtk_tool_button_new(gtk_image_new_from_icon_name("list-add-symbolic", GTK_ICON_SIZE_BUTTON), "Add Field");
+	GtkToolItem *AddValueButton = gtk_tool_button_new(gtk_image_new_from_icon_name("list-add-symbolic", GTK_ICON_SIZE_BUTTON), "Add Value");
 
 	gtk_toolbar_insert(Toolbar, gtk_separator_tool_item_new(), -1);
 	ComboItem = gtk_tool_item_new();
@@ -1120,9 +1128,9 @@ static void create_viewer_toolbar(viewer_t *Viewer, GtkToolbar *Toolbar) {
 }
 
 static viewer_t *create_viewer_action_bar(viewer_t *Viewer, GtkActionBar *ActionBar) {
-	//GtkToolItem *OpenCsvButton = gtk_tool_button_new(gtk_image_new_from_icon_name("gtk-open", GTK_ICON_SIZE_SMALL_TOOLBAR), "Open");
+	//GtkToolItem *OpenCsvButton = gtk_tool_button_new(gtk_image_new_from_icon_name("gtk-open", GTK_ICON_SIZE_BUTTON), "Open");
 	GtkWidget *SaveCsvButton = gtk_button_new_with_label("Save");
-	gtk_button_set_image(GTK_BUTTON(SaveCsvButton), gtk_image_new_from_icon_name("gtk-save", GTK_ICON_SIZE_SMALL_TOOLBAR));
+	gtk_button_set_image(GTK_BUTTON(SaveCsvButton), gtk_image_new_from_icon_name("document-save-as-symbolic", GTK_ICON_SIZE_BUTTON));
 	gtk_action_bar_pack_start(ActionBar, SaveCsvButton);
 
 	g_signal_connect(G_OBJECT(SaveCsvButton), "clicked", G_CALLBACK(save_csv), Viewer);
@@ -1163,10 +1171,10 @@ static viewer_t *create_viewer_action_bar(viewer_t *Viewer, GtkActionBar *Action
 	g_signal_connect(G_OBJECT(EditValueComboBox), "changed", G_CALLBACK(edit_value_changed), Viewer);
 
 	GtkWidget *AddFieldButton = gtk_button_new_with_label("Add Field");
-	gtk_button_set_image(GTK_BUTTON(AddFieldButton), gtk_image_new_from_icon_name("gtk-add", GTK_ICON_SIZE_SMALL_TOOLBAR));
+	gtk_button_set_image(GTK_BUTTON(AddFieldButton), gtk_image_new_from_icon_name("list-add-symbolic", GTK_ICON_SIZE_BUTTON));
 
 	GtkWidget *AddValueButton = gtk_button_new_with_label("Add Value");
-	gtk_button_set_image(GTK_BUTTON(AddValueButton), gtk_image_new_from_icon_name("gtk-add", GTK_ICON_SIZE_SMALL_TOOLBAR));
+	gtk_button_set_image(GTK_BUTTON(AddValueButton), gtk_image_new_from_icon_name("list-add-symbolic", GTK_ICON_SIZE_BUTTON));
 
 	gtk_action_bar_pack_start(ActionBar, EditFieldComboBox);
 	gtk_action_bar_pack_start(ActionBar, AddFieldButton);
@@ -1180,7 +1188,7 @@ static viewer_t *create_viewer_action_bar(viewer_t *Viewer, GtkActionBar *Action
 	create_filter_window(Viewer);
 
 	GtkWidget *FilterButton = gtk_button_new_with_label("Filter");
-	gtk_button_set_image(GTK_BUTTON(SaveCsvButton), gtk_image_new_from_icon_name("gtk-filter", GTK_ICON_SIZE_SMALL_TOOLBAR));
+	gtk_button_set_image(GTK_BUTTON(FilterButton), gtk_image_new_from_icon_name("edit-find-replace-symbolic", GTK_ICON_SIZE_BUTTON));
 	gtk_action_bar_pack_start(ActionBar, FilterButton);
 
 	g_signal_connect(G_OBJECT(FilterButton), "clicked", G_CALLBACK(show_filter_window), Viewer);
