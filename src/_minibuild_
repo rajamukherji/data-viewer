@@ -56,4 +56,4 @@ file("libcsv.o") => fun(Object) do
 	execute('gcc -c {CFLAGS} -o{Object} -I{Source:dir} {Source}')
 end
 
-c_program(BIN_DIR/"viewer", [file("viewer.o"), file("libcsv.o")])
+c_program(BIN_DIR/"data-viewer", [file("viewer.o"), file("libcsv.o")])
