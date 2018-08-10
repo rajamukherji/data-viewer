@@ -45,6 +45,7 @@ struct field_t {
 	const char **EnumNames;
 	range_t Range;
 	int PreviewIndex;
+	GtkTreeViewColumn *PreviewColumn;
 	double Values[];
 };
 
@@ -358,6 +359,7 @@ static void viewer_open_file(viewer_t *Viewer, const char *CsvFileName) {
 		Field->Range.Min = INFINITY;
 		Field->Range.Max = -INFINITY;
 		Field->PreviewIndex = -1;
+		Field->PreviewColumn = 0;
 		Fields[I] = Field;
 	}
 
@@ -463,7 +465,7 @@ static int draw_node_value(viewer_t *Viewer, node_t *Node) {
 	if (Viewer->NumVisibleImages <= MAX_VISIBLE_IMAGES) {
 		for (int I = 0; I < NumFields; ++I) {
 			field_t *Field = Fields[I];
-			if (Field->PreviewIndex >= 0) {
+			if (Field->PreviewColumn) {
 				double Value = Field->Values[Index];
 				GdkRGBA Colour[1];
 				Colour->alpha = 0.5;
@@ -848,6 +850,7 @@ static void add_field_callback(const char *Name, viewer_t *Viewer, void *Data) {
 	Field->Name = Name;
 	Field->Range.Min = Field->Range.Max = 0;
 	Field->PreviewIndex = -1;
+	Field->PreviewColumn = 0;
 	gtk_list_store_insert_with_values(Field->EnumStore, 0, -1, 0, "", 1, 0.0, -1);
 	memset(Field->Values, 0, Viewer->NumNodes * sizeof(double));
 	for (int I = 0; I < Viewer->NumFields; ++I) Fields[I] = Viewer->Fields[I];
@@ -1130,19 +1133,54 @@ static void view_images_clicked(GtkWidget *Button, viewer_t *Viewer) {
 	gtk_widget_show_all(ImagesScrolledArea);
 }
 
+static void data_column_remove_clicked(GtkWidget *Button, field_t *Field) {
+	Field->PreviewIndex = -1;
+	GtkTreeView *ValuesView = GTK_TREE_VIEW(gtk_tree_view_column_get_tree_view(Field->PreviewColumn));
+	gtk_tree_view_remove_column(ValuesView, Field->PreviewColumn);
+	Field->PreviewColumn = 0;
+}
+
 static void view_data_clicked(GtkWidget *Button, viewer_t *Viewer) {
 	if (Viewer->ImagesStore) {
 		gtk_container_remove(GTK_CONTAINER(Viewer->MainVPaned), Viewer->PreviewWidget);
 		g_object_unref(G_OBJECT(Viewer->ImagesStore));
 		Viewer->ImagesStore = 0;
 	}
-	Viewer->ValuesStore = gtk_list_store_new(1, G_TYPE_STRING);
+
+	int NumFields = Viewer->NumFields;
+	GType Types[NumFields * 2 - 2];
+	for (int I = 1; I < NumFields; ++I) {
+		field_t *Field = Viewer->Fields[I];
+		Types[2 * I - 2] = Field->EnumStore ? G_TYPE_STRING : G_TYPE_DOUBLE;
+		Types[2 * I - 1] = GDK_TYPE_RGBA;
+		Field->PreviewIndex = 2 * I - 2;
+	}
+
+	Viewer->ValuesStore = gtk_list_store_newv(2 * NumFields - 2, Types);
 	GtkWidget *ValuesScrolledArea = Viewer->PreviewWidget = gtk_scrolled_window_new(0, 0);
 	GtkWidget *ValuesView = gtk_tree_view_new_with_model(GTK_TREE_MODEL(Viewer->ValuesStore));
 
-	//gtk_icon_view_set_text_column(GTK_ICON_VIEW(ImagesView), 0);
-	//gtk_icon_view_set_pixbuf_column(GTK_ICON_VIEW(ImagesView), 1);
-	//gtk_icon_view_set_item_width(GTK_ICON_VIEW(ImagesView), 72);
+	for (int I = 1; I < NumFields; ++I) {
+		field_t *Field = Viewer->Fields[I];
+		GtkTreeViewColumn *Column = gtk_tree_view_column_new();
+		GtkWidget *Header = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+		GtkWidget *Title = gtk_label_new(Field->Name);
+		gtk_box_pack_start(GTK_BOX(Header), Title, TRUE, TRUE, 2);
+		GtkWidget *RemoveButton = gtk_event_box_new();
+		gtk_container_add(GTK_CONTAINER(RemoveButton), gtk_image_new_from_icon_name("window-close", GTK_ICON_SIZE_SMALL_TOOLBAR));
+		gtk_box_pack_end(GTK_BOX(Header), RemoveButton, FALSE, FALSE, 2);
+		gtk_tree_view_column_set_widget(Column, Header);
+		gtk_widget_show_all(Header);
+		gtk_tree_view_column_set_clickable(Column, TRUE);
+		gtk_tree_view_column_set_reorderable(Column, TRUE);
+		GtkCellRenderer *Renderer = gtk_cell_renderer_text_new();
+		gtk_tree_view_column_pack_start(Column, Renderer, TRUE);
+		gtk_tree_view_column_add_attribute(Column, Renderer, "text", Field->PreviewIndex);
+		gtk_tree_view_column_add_attribute(Column, Renderer, "background-rgba", Field->PreviewIndex + 1);
+		gtk_tree_view_append_column(GTK_TREE_VIEW(ValuesView), Column);
+		Field->PreviewColumn = Column;
+		g_signal_connect(Column, "clicked", G_CALLBACK(data_column_remove_clicked), Field);
+	}
 
 	gtk_container_add(GTK_CONTAINER(ValuesScrolledArea), ValuesView);
 	gtk_paned_pack2(GTK_PANED(Viewer->MainVPaned), ValuesScrolledArea, TRUE, TRUE);
