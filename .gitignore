@@ -1,0 +1,4 @@
+/bin/*
+/obj/*
+/test/*
+/_minibuild_.db*
