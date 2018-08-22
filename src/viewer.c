@@ -38,10 +38,8 @@ struct node_t {
 
 struct field_t {
 	const char *Name;
-	union {
-		GHashTable *EnumHash;
-		GtkListStore *EnumStore;
-	};
+	GHashTable *EnumHash;
+	GtkListStore *EnumStore;
 	const char **EnumNames;
 	range_t Range;
 	int PreviewIndex;
@@ -382,9 +380,8 @@ static void viewer_open_file(viewer_t *Viewer, const char *CsvFileName) {
 		field_t *Field = Fields[I];
 		gtk_list_store_insert_with_values(Viewer->FieldsStore, 0, -1, 0, Field->Name, 1, I, -1);
 		if (Field->EnumHash) {
-			GHashTable *EnumHash = Field->EnumHash;
 			GtkListStore *EnumStore = Field->EnumStore = gtk_list_store_new(2, G_TYPE_STRING, G_TYPE_DOUBLE);
-			int EnumSize = g_hash_table_size(EnumHash) + 1;
+			int EnumSize = g_hash_table_size(Field->EnumHash) + 1;
 			for (int J = 0; J < EnumSize; ++J) {
 				gtk_list_store_insert_with_values(Field->EnumStore, 0, -1, 0, Field->EnumNames[J], 1, (double)(J + 1), -1);
 			}
@@ -1002,6 +999,14 @@ static void filter_enum_value_changed(GtkComboBox *Widget, filter_t *Filter) {
 	viewer_filter_nodes(Filter->Viewer);
 }
 
+static void filter_enum_entry_changed(GtkEntry *Widget, filter_t *Filter) {
+	gpointer *Ref = g_hash_table_lookup(Filter->Field->EnumHash, gtk_entry_get_text(GTK_ENTRY(Widget)));
+	if (Ref) {
+		Filter->Value = *(double *)Ref;
+		viewer_filter_nodes(Filter->Viewer);
+	}
+}
+
 static void filter_real_value_changed(GtkSpinButton *Widget, filter_t *Filter) {
 	Filter->Value = gtk_spin_button_get_value(Widget);
 	viewer_filter_nodes(Filter->Viewer);
@@ -1012,11 +1017,20 @@ static void filter_field_changed(GtkComboBox *Widget, filter_t *Filter) {
 	field_t *Field = Filter->Field = Viewer->Fields[gtk_combo_box_get_active(GTK_COMBO_BOX(Widget))];
 	if (Filter->ValueWidget) gtk_widget_destroy(Filter->ValueWidget);
 	if (Field->EnumStore) {
-		GtkWidget *ValueComboBox = Filter->ValueWidget = gtk_combo_box_new_with_model(GTK_TREE_MODEL(Field->EnumStore));
-		GtkCellRenderer *FieldRenderer = gtk_cell_renderer_text_new();
-		gtk_cell_layout_pack_end(GTK_CELL_LAYOUT(ValueComboBox), FieldRenderer, TRUE);
-		gtk_cell_layout_add_attribute(GTK_CELL_LAYOUT(ValueComboBox), FieldRenderer, "text", 0);
-		g_signal_connect(G_OBJECT(ValueComboBox), "changed", G_CALLBACK(filter_enum_value_changed), Filter);
+		if (gtk_tree_model_iter_n_children(GTK_TREE_MODEL(Field->EnumStore), 0) < 100) {
+			GtkWidget *ValueComboBox = Filter->ValueWidget = gtk_combo_box_new_with_model(GTK_TREE_MODEL(Field->EnumStore));
+			GtkCellRenderer *FieldRenderer = gtk_cell_renderer_text_new();
+			gtk_cell_layout_pack_end(GTK_CELL_LAYOUT(ValueComboBox), FieldRenderer, TRUE);
+			gtk_cell_layout_add_attribute(GTK_CELL_LAYOUT(ValueComboBox), FieldRenderer, "text", 0);
+			g_signal_connect(G_OBJECT(ValueComboBox), "changed", G_CALLBACK(filter_enum_value_changed), Filter);
+		} else {
+			GtkWidget *ValueEntry = Filter->ValueWidget = gtk_entry_new();
+			GtkEntryCompletion *EntryCompletion = gtk_entry_completion_new();
+			gtk_entry_completion_set_model(EntryCompletion, GTK_TREE_MODEL(Field->EnumStore));
+			gtk_entry_completion_set_text_column(EntryCompletion, 0);
+			gtk_entry_set_completion(GTK_ENTRY(ValueEntry), EntryCompletion);
+			g_signal_connect(G_OBJECT(ValueEntry), "changed", G_CALLBACK(filter_enum_entry_changed), Filter);
+		}
 	} else {
 		GtkWidget *ValueSpinButton = Filter->ValueWidget = gtk_spin_button_new_with_range(Field->Range.Min, Field->Range.Max, (Field->Range.Max - Field->Range.Min) / 20.0);
 		g_signal_connect(G_OBJECT(ValueSpinButton), "value-changed", G_CALLBACK(filter_real_value_changed), Filter);
