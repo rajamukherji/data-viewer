@@ -1,54 +1,9 @@
-PLATFORM := defined("PLATFORM") or shell("uname"):trim
-DEBUG := defined("DEBUG")
+CFLAGS := old + ['-O2', '-g', pkgconfig("--cflags gtk+-3.0 gdk-pixbuf-2.0")]
+LDFLAGS := old + ['-g', '-lm', pkgconfig("--libs gtk+-3.0 gdk-pixbuf-2.0")]
 
-var pkgconfig := fun(Args) do
-	expr('pkg-config {Args}') => fun() shell("pkg-config", Args):trim
-end
-
-CFLAGS := ['-O3', '-g', pkgconfig("--cflags gtk+-3.0 gdk-pixbuf-2.0")]
-LDFLAGS := ['-g', '-lm', pkgconfig("--libs gtk+-3.0 gdk-pixbuf-2.0")]
-PREBUILDS := []
-
-c_compile := fun(Object) do
-	var Source := Object % "c"
-	execute('gcc -c {CFLAGS} -o{Object} {Source}')
-end
-
-c_includes := fun(Target) do
-	var Files := []
-	var Lines := shell('gcc -c {CFLAGS} -M -MG {Target:source}')
-	var Files := Lines:trim:replace(r"\\\n ", "") / r"[^\\]( +)"
-	Files:pop
-	for File in Files do
-		File := file(File:replace(r"\\ ", " "))
-	end
-	return Files
-end
-
-SourceTypes := {
-	"c" is [c_includes, c_compile]
-}
-
-c_program := fun(Executable, Objects, Libraries) do
-	Objects := Objects or []
-	Libraries := Libraries or []
-	var Sources := []
-	for Object in Objects do
-		for Extension, Functions in SourceTypes do
-			var Source := Object % Extension
-			if Source:exists then
-				Sources:put(Source)
-				var Scan := Source:scan("INCLUDES", :true)[PREBUILDS] => Functions[1]
-				Object[Source, Scan] => Functions[2]
-				exit
-			end
-		end
-	end
-	Executable[Objects, Libraries] => fun(Executable) do
-		execute('gcc', '-o', Executable, Objects, Libraries, LDFLAGS)
-		DEBUG or execute('strip', Executable)
-	end
-	DEFAULT[Executable]
+if defined("USE_GL") then
+	CFLAGS := old + ['-DUSE_GL']
+	LDFLAGS := old + ['-lepoxy']
 end
 
 file("libcsv.o") => fun(Object) do

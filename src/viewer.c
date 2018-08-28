@@ -7,6 +7,10 @@
 #include <gdk-pixbuf/gdk-pixbuf.h>
 #include "libcsv/csv.h"
 
+#ifdef USE_GL
+#include <epoxy/gl.h>
+#endif
+
 #define MAX_CACHED_IMAGES 1024
 #define MAX_VISIBLE_IMAGES 64
 #define POINT_COLOUR_CHROMA 0.5
@@ -62,14 +66,19 @@ struct viewer_t {
 	GtkWidget *MainWindow, *MainVPaned;
 	GtkLabel *NumVisibleLabel;
     GtkWidget *FilterWindow, *FiltersBox;
-	GtkWidget *DrawingArea, *PreviewWidget;
+	GtkWidget *DrawingArea;
+	GtkWidget *PreviewWidget;
 	GtkWidget *XComboBox, *YComboBox, *CComboBox, *EditFieldComboBox, *EditValueComboBox;
 	GtkListStore *ImagesStore, *ValuesStore;
 	GtkListStore *FieldsStore;
 	GtkListStore *OperatorsStore;
 	node_t *Root, *Nodes;
 	cairo_t *Cairo;
+#ifdef USE_GL
+	double *GLVertices, *GLColours;
+#else
 	cairo_surface_t *CachedBackground;
+#endif
 	node_t *CacheHead, *CacheTail;
 	field_t **Fields, *EditField;
 	filter_t *Filters;
@@ -78,6 +87,10 @@ struct viewer_t {
 	double PointSize, BoxSize, EditValue;
 	int NumNodes, NumFields, NumCachedImages, NumVisibleImages;
 	int XIndex, YIndex, CIndex;
+#ifdef USE_GL
+	int GLCount;
+	GLuint GLArrays[2], GLBuffers[2];
+#endif
 };
 
 static void add_node(node_t *Root, node_t *Node) {
@@ -90,7 +103,55 @@ static void add_node(node_t *Root, node_t *Node) {
 	}
 }
 
-static int foreach_node(node_t *Root, double X1, double Y1, double X2, double Y2, void *Data, node_callback_t *Callback) {
+typedef struct {
+	void *Data;
+	node_callback_t *Callback;
+	double X1, Y1, X2, Y2;
+} foreach_t;
+
+static void foreach_node2(node_t *Root, foreach_t *Foreach) {
+	// Bounds  = [Bounds]
+	if (!Root) {
+	} else if (Foreach->X2 < Root->X) {
+		if (Foreach->Y2 < Root->Y) {
+			foreach_node2(Root->Children[0], Foreach);
+		} else if (Foreach->Y1 > Root->Y) {
+			foreach_node2(Root->Children[2], Foreach);
+		} else {
+			foreach_node2(Root->Children[0], Foreach);
+			foreach_node2(Root->Children[2], Foreach);
+		}
+	} else if (Foreach->X1 > Root->X) {
+		if (Foreach->Y2 < Root->Y) {
+			foreach_node2(Root->Children[1], Foreach);
+		} else if (Foreach->Y1 > Root->Y) {
+			foreach_node2(Root->Children[3], Foreach);
+		} else {
+			foreach_node2(Root->Children[1], Foreach);
+			foreach_node2(Root->Children[3], Foreach);
+		}
+	} else {
+		if (Foreach->Y2 < Root->Y) {
+			foreach_node2(Root->Children[0], Foreach);
+			foreach_node2(Root->Children[1], Foreach);
+		} else if (Foreach->Y1 > Root->Y) {
+			foreach_node2(Root->Children[2], Foreach);
+			foreach_node2(Root->Children[3], Foreach);
+		} else {
+			Foreach->Callback(Foreach->Data, Root);
+			foreach_node2(Root->Children[0], Foreach);
+			foreach_node2(Root->Children[1], Foreach);
+			foreach_node2(Root->Children[2], Foreach);
+			foreach_node2(Root->Children[3], Foreach);
+		}
+	}
+}
+
+static inline int foreach_node(node_t *Root, double X1, double Y1, double X2, double Y2, void *Data, node_callback_t *Callback) {
+	foreach_t Foreach = {Data, Callback, X1, Y1, X2, Y2};
+	foreach_node2(Root, &Foreach);
+	return 0;
+/*
 	if (!Root) return 0;
 	if (X2 < Root->X) {
 		if (Y2 < Root->Y) {
@@ -124,6 +185,17 @@ static int foreach_node(node_t *Root, double X1, double Y1, double X2, double Y2
 				|| foreach_node(Root->Children[2], X1, Y1, X2, Y2, Data, Callback)
 				|| foreach_node(Root->Children[3], X1, Y1, X2, Y2, Data, Callback);
 		}
+	}
+*/
+}
+
+static void forall_nodes(node_t *Root, void *Data, node_callback_t *Callback) {
+	if (Root) {
+		Callback(Data, Root);
+		forall_nodes(Root->Children[0], Data, Callback);
+		forall_nodes(Root->Children[1], Data, Callback);
+		forall_nodes(Root->Children[2], Data, Callback);
+		forall_nodes(Root->Children[3], Data, Callback);
 	}
 }
 
@@ -360,7 +432,10 @@ static void viewer_open_file(viewer_t *Viewer, const char *CsvFileName) {
 		Field->PreviewColumn = 0;
 		Fields[I] = Field;
 	}
-
+#ifdef USE_GL
+	Viewer->GLVertices = (double *)malloc(NumNodes * 3 * 4 * sizeof(double));
+	Viewer->GLColours = (double *)malloc(NumNodes * 3 * 4 * sizeof(double));
+#endif
 	printf("Loading rows...\n");
 	fopen(CsvFileName, "r");
 	Loader->Nodes = Nodes;
@@ -544,15 +619,84 @@ static void edit_node_values(viewer_t *Viewer) {
 }
 
 static int redraw_point(viewer_t *Viewer, node_t *Node) {
+#ifdef USE_GL
+	double X = (Node->X - Viewer->Min.X) / (Viewer->Max.X - Viewer->Min.X);
+	double Y = (Node->Y - Viewer->Min.Y) / (Viewer->Max.Y - Viewer->Min.Y);
+	printf("Point at (%f, %f)\n", X, Y);
+	int Index = Viewer->GLCount;
+	Viewer->GLVertices[3 * Index + 0] = X - Viewer->PointSize / 2;
+	Viewer->GLVertices[3 * Index + 1] = Y - Viewer->PointSize / 2;
+	Viewer->GLVertices[3 * Index + 2] = 0.0;
+	Viewer->GLVertices[3 * Index + 3] = X + Viewer->PointSize / 2;
+	Viewer->GLVertices[3 * Index + 4] = Y - Viewer->PointSize / 2;
+	Viewer->GLVertices[3 * Index + 5] = 0.0;
+	Viewer->GLVertices[3 * Index + 6] = X + Viewer->PointSize / 2;
+	Viewer->GLVertices[3 * Index + 7] = Y + Viewer->PointSize / 2;
+	Viewer->GLVertices[3 * Index + 8] = 0.0;
+	Viewer->GLVertices[3 * Index + 9] = X - Viewer->PointSize / 2;
+	Viewer->GLVertices[3 * Index + 10] = Y + Viewer->PointSize / 2;
+	Viewer->GLVertices[3 * Index + 11] = 0.0;
+	Viewer->GLColours[3 * Index + 0] = Node->R;
+	Viewer->GLColours[3 * Index + 1] = Node->G;
+	Viewer->GLColours[3 * Index + 2] = Node->B;
+	Viewer->GLColours[3 * Index + 3] = Node->R;
+	Viewer->GLColours[3 * Index + 4] = Node->G;
+	Viewer->GLColours[3 * Index + 5] = Node->B;
+	Viewer->GLColours[3 * Index + 6] = Node->R;
+	Viewer->GLColours[3 * Index + 7] = Node->G;
+	Viewer->GLColours[3 * Index + 8] = Node->B;
+	Viewer->GLColours[3 * Index + 9] = Node->R;
+	Viewer->GLColours[3 * Index + 10] = Node->G;
+	Viewer->GLColours[3 * Index + 11] = Node->B;
+	Viewer->GLCount = Index + 4;
+#else
 	double X = Viewer->Scale.X * (Node->X - Viewer->Min.X);
 	double Y = Viewer->Scale.Y * (Node->Y - Viewer->Min.Y);
-	cairo_new_path(Viewer->Cairo);
-	cairo_rectangle(Viewer->Cairo, X - Viewer->PointSize / 2, Y - Viewer->PointSize / 2, Viewer->PointSize, Viewer->PointSize);
-	cairo_set_source_rgb(Viewer->Cairo, Node->R, Node->G, Node->B);
-	cairo_fill(Viewer->Cairo);
+	cairo_t *Cairo = Viewer->Cairo;
+	cairo_new_path(Cairo);
+	cairo_rectangle(Cairo, X - Viewer->PointSize / 2, Y - Viewer->PointSize / 2, Viewer->PointSize, Viewer->PointSize);
+	cairo_set_source_rgb(Cairo, Node->R, Node->G, Node->B);
+	cairo_fill(Cairo);
+#endif
 	return 0;
 }
 
+#ifdef USE_GL
+static gboolean render_viewer(GtkGLArea *Widget, GdkGLContext *Context, viewer_t *Viewer) {
+	puts("render_viewer");
+	guint Width = gtk_widget_get_allocated_width(Viewer->DrawingArea);
+	guint Height = gtk_widget_get_allocated_height(Viewer->DrawingArea);
+	//glViewport(0, 0, Width, Height);
+	//glMatrixMode(GL_PROJECTION);
+	//glLoadIdentity();
+	//glOrtho(0.0, Width, 0.0, Height, -1.0, 1.0);
+	//glMatrixMode(GL_MODELVIEW);
+	//glLoadIdentity();
+	//glClearColor(0.5, 0.5, 0.5, 1.0);
+	//glClear(GL_COLOR_BUFFER_BIT);
+	glBindBuffer(GL_ARRAY_BUFFER, Viewer->GLBuffers[0]);
+	glBufferData(GL_ARRAY_BUFFER, Viewer->GLCount * 3 * sizeof(double), Viewer->GLVertices, GL_STATIC_DRAW);
+	glEnableVertexAttribArray(0);
+	glBindBuffer(GL_ARRAY_BUFFER, Viewer->GLBuffers[0]);
+	glVertexAttribPointer(0, 3, GL_DOUBLE, GL_FALSE, 0, (void *)0);
+	glDrawArrays(GL_QUADS, 0, Viewer->GLCount);
+	glDisableVertexAttribArray(0);
+	glFinish();
+	return TRUE;
+}
+
+static void realize_viewer(GtkGLArea *Widget, viewer_t *Viewer) {
+	puts("realize_viewer");
+	guint Width = gtk_widget_get_allocated_width(Viewer->DrawingArea);
+	guint Height = gtk_widget_get_allocated_height(Viewer->DrawingArea);
+	gtk_gl_area_make_current(Widget);
+	//glViewport(0, 0, Width, Height);
+	//glEnableClientState(GL_COLOR_ARRAY);
+	//glEnableClientState(GL_VERTEX_ARRAY);
+	glGenVertexArrays(2, Viewer->GLArrays);
+	glGenBuffers(2, Viewer->GLBuffers);
+}
+#else
 static void redraw_viewer(GtkWidget *Widget, cairo_t *Cairo, viewer_t *Viewer) {
 	cairo_set_source_surface(Cairo, Viewer->CachedBackground, 0.0, 0.0);
 	cairo_paint(Cairo);
@@ -568,6 +712,7 @@ static void redraw_viewer(GtkWidget *Widget, cairo_t *Cairo, viewer_t *Viewer) {
 	cairo_set_source_rgba(Cairo, 0.5, 0.5, 1.0, 0.5);
 	cairo_fill(Cairo);
 }
+#endif
 
 static void zoom_viewer(viewer_t *Viewer, double X, double Y, double Zoom) {
 	double XMin = X - Zoom * (X - Viewer->Min.X);
@@ -618,6 +763,11 @@ static void pan_viewer(viewer_t *Viewer, double DeltaX, double DeltaY) {
 }
 
 static void redraw_viewer_background(viewer_t *Viewer) {
+#ifdef USE_GL
+	Viewer->GLCount = 0;
+	foreach_node(Viewer->Root, Viewer->Min.X, Viewer->Min.Y, Viewer->Max.X, Viewer->Max.Y, Viewer, (node_callback_t *)redraw_point);
+	printf("rendered %d points\n", Viewer->GLCount);
+#else
 	guint Width = cairo_image_surface_get_width(Viewer->CachedBackground);
 	guint Height = cairo_image_surface_get_height(Viewer->CachedBackground);
 	cairo_t *Cairo = cairo_create(Viewer->CachedBackground);
@@ -625,23 +775,24 @@ static void redraw_viewer_background(viewer_t *Viewer) {
 	cairo_rectangle(Cairo, 0.0, 0.0, Width, Height);
 	cairo_fill(Cairo);
 	Viewer->Cairo = Cairo;
+	clock_t Start = clock();
 	foreach_node(Viewer->Root, Viewer->Min.X, Viewer->Min.Y, Viewer->Max.X, Viewer->Max.Y, Viewer, (node_callback_t *)redraw_point);
+	printf("foreach_node took %d\n", clock() - Start);
 	Viewer->Cairo = 0;
 	cairo_destroy(Cairo);
+#endif
 }
 
 static void resize_viewer(GtkWidget *Widget, GdkRectangle *Allocation, viewer_t *Viewer) {
 	Viewer->Scale.X = Allocation->width / (Viewer->Max.X - Viewer->Min.X);
 	Viewer->Scale.Y = Allocation->height / (Viewer->Max.Y - Viewer->Min.Y);
+#ifdef USE_GL
+#else
 	if (Viewer->CachedBackground) {
 		cairo_surface_destroy(Viewer->CachedBackground);
 	}
-	/*double CacheWidth = (Viewer->DataMax.X - Viewer->DataMin.X) * Viewer->Scale.X;
-	double CacheHeight = (Viewer->DataMax.Y - Viewer->DataMin.Y) * Viewer->Scale.Y;
-	if (CacheWidth > 2 * Allocation->width) CacheWidth = 2 * Allocation->width;
-	if (CacheHeight > 2 * Allocation->height) CacheHeight = 2 * Allocation->height;
-	Viewer->CachedBackground = cairo_image_surface_create(CAIRO_FORMAT_RGB24, CacheWidth, CacheHeight);*/
 	Viewer->CachedBackground = cairo_image_surface_create(CAIRO_FORMAT_RGB24, Allocation->width, Allocation->height);
+#endif
 	redraw_viewer_background(Viewer);
 	//update_preview(Viewer);
 	gtk_widget_queue_draw(Widget);
@@ -734,7 +885,10 @@ static gboolean key_press_viewer(GtkWidget *Widget, GdkEventKey *Event, viewer_t
 		break;
 	}
 	case GDK_KEY_s: {
+#ifdef USE_GL
+#else
 		cairo_surface_write_to_png(Viewer->CachedBackground, "screenshot.png");
+#endif
 		break;
 	}
 	}
@@ -1289,9 +1443,16 @@ static GtkWidget *create_viewer_action_bar(viewer_t *Viewer) {
 
 static viewer_t *create_viewer(const char *CsvFileName) {
 	viewer_t *Viewer = (viewer_t *)malloc(sizeof(viewer_t));
-	Viewer->PointSize = 5.0;
+#ifdef USE_GL
+	Viewer->PointSize = 0.004;
+	Viewer->BoxSize = 0.04;
+	Viewer->GLVertices = 0;
+	Viewer->GLColours = 0;
+#else
+	Viewer->PointSize = 4.0;
 	Viewer->BoxSize = 40.0;
 	Viewer->CachedBackground = 0;
+#endif
 	Viewer->CacheHead = Viewer->CacheTail = 0;
 	Viewer->NumCachedImages = 0;
 	Viewer->EditField = 0;
@@ -1300,7 +1461,11 @@ static viewer_t *create_viewer(const char *CsvFileName) {
 	Viewer->FieldsStore = gtk_list_store_new(2, G_TYPE_STRING, G_TYPE_INT);
 
 	GtkWidget *MainWindow = Viewer->MainWindow = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+#ifdef USE_GL
+	Viewer->DrawingArea = gtk_gl_area_new();
+#else
 	Viewer->DrawingArea = gtk_drawing_area_new();
+#endif
 
 	GtkWidget *MainVBox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
 	gtk_container_add(GTK_CONTAINER(MainWindow), MainVBox);
@@ -1327,7 +1492,12 @@ static viewer_t *create_viewer(const char *CsvFileName) {
 	gtk_widget_add_events(Viewer->DrawingArea, GDK_BUTTON_PRESS_MASK);
 	gtk_widget_add_events(Viewer->DrawingArea, GDK_BUTTON_RELEASE_MASK);
 	gtk_widget_add_events(Viewer->DrawingArea, GDK_KEY_PRESS);
+#ifdef USE_GL
+	g_signal_connect(G_OBJECT(Viewer->DrawingArea), "render", G_CALLBACK(render_viewer), Viewer);
+	g_signal_connect(G_OBJECT(Viewer->DrawingArea), "realize", G_CALLBACK(realize_viewer), Viewer);
+#else
 	g_signal_connect(G_OBJECT(Viewer->DrawingArea), "draw", G_CALLBACK(redraw_viewer), Viewer);
+#endif
 	g_signal_connect(G_OBJECT(Viewer->DrawingArea), "size-allocate", G_CALLBACK(resize_viewer), Viewer);
 	g_signal_connect(G_OBJECT(Viewer->DrawingArea), "scroll-event", G_CALLBACK(scroll_viewer), Viewer);
 	g_signal_connect(G_OBJECT(Viewer->DrawingArea), "button-press-event", G_CALLBACK(button_press_viewer), Viewer);
