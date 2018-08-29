@@ -1,4 +1,4 @@
-file("libcsv"):exists or execute('cd {file("build.rabs"):dirname} && git submodule update --init')
+file("libcsv/csv.h"):exists or execute('cd {file("build.rabs"):dirname} && git submodule update --init')
 
 PLATFORM := defined("PLATFORM") or shell("uname"):trim
 DEBUG := defined("DEBUG")
