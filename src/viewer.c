@@ -90,6 +90,7 @@ struct viewer_t {
 #ifdef USE_GL
 	int GLCount;
 	GLuint GLArrays[2], GLBuffers[2];
+	GLuint GLProgram, GLPositionIndex;
 #endif
 };
 
@@ -622,20 +623,20 @@ static int redraw_point(viewer_t *Viewer, node_t *Node) {
 #ifdef USE_GL
 	double X = (Node->X - Viewer->Min.X) / (Viewer->Max.X - Viewer->Min.X);
 	double Y = (Node->Y - Viewer->Min.Y) / (Viewer->Max.Y - Viewer->Min.Y);
-	printf("Point at (%f, %f)\n", X, Y);
+	//printf("Point at (%f, %f)\n", X, Y);
 	int Index = Viewer->GLCount;
 	Viewer->GLVertices[3 * Index + 0] = X - Viewer->PointSize / 2;
 	Viewer->GLVertices[3 * Index + 1] = Y - Viewer->PointSize / 2;
-	Viewer->GLVertices[3 * Index + 2] = 0.0;
+	Viewer->GLVertices[3 * Index + 2] = ((float)rand()/(float)(RAND_MAX));
 	Viewer->GLVertices[3 * Index + 3] = X + Viewer->PointSize / 2;
 	Viewer->GLVertices[3 * Index + 4] = Y - Viewer->PointSize / 2;
-	Viewer->GLVertices[3 * Index + 5] = 0.0;
+	Viewer->GLVertices[3 * Index + 5] = ((float)rand()/(float)(RAND_MAX));
 	Viewer->GLVertices[3 * Index + 6] = X + Viewer->PointSize / 2;
 	Viewer->GLVertices[3 * Index + 7] = Y + Viewer->PointSize / 2;
-	Viewer->GLVertices[3 * Index + 8] = 0.0;
+	Viewer->GLVertices[3 * Index + 8] = ((float)rand()/(float)(RAND_MAX));
 	Viewer->GLVertices[3 * Index + 9] = X - Viewer->PointSize / 2;
 	Viewer->GLVertices[3 * Index + 10] = Y + Viewer->PointSize / 2;
-	Viewer->GLVertices[3 * Index + 11] = 0.0;
+	Viewer->GLVertices[3 * Index + 11] = ((float)rand()/(float)(RAND_MAX));
 	Viewer->GLColours[3 * Index + 0] = Node->R;
 	Viewer->GLColours[3 * Index + 1] = Node->G;
 	Viewer->GLColours[3 * Index + 2] = Node->B;
@@ -673,16 +674,87 @@ static gboolean render_viewer(GtkGLArea *Widget, GdkGLContext *Context, viewer_t
 	//glMatrixMode(GL_MODELVIEW);
 	//glLoadIdentity();
 	//glClearColor(0.5, 0.5, 0.5, 1.0);
-	//glClear(GL_COLOR_BUFFER_BIT);
+	glClear(GL_COLOR_BUFFER_BIT);
 	glBindBuffer(GL_ARRAY_BUFFER, Viewer->GLBuffers[0]);
 	glBufferData(GL_ARRAY_BUFFER, Viewer->GLCount * 3 * sizeof(double), Viewer->GLVertices, GL_STATIC_DRAW);
-	glEnableVertexAttribArray(0);
-	glBindBuffer(GL_ARRAY_BUFFER, Viewer->GLBuffers[0]);
-	glVertexAttribPointer(0, 3, GL_DOUBLE, GL_FALSE, 0, (void *)0);
+	glEnableVertexAttribArray(Viewer->GLPositionIndex);
+	glVertexAttribPointer(Viewer->GLPositionIndex, 3, GL_DOUBLE, GL_FALSE, 0, (void *)0);
+	glUseProgram(Viewer->GLProgram);
 	glDrawArrays(GL_QUADS, 0, Viewer->GLCount);
 	glDisableVertexAttribArray(0);
-	glFinish();
+	//glFinish();
 	return TRUE;
+}
+
+static void load_gl_shaders(viewer_t *Viewer) {
+	GLuint VertexShaderID = glCreateShader(GL_VERTEX_SHADER);
+	GLuint FragmentShaderID = glCreateShader(GL_FRAGMENT_SHADER);
+
+	GLint Result = GL_FALSE;
+	int InfoLogLength;
+
+	const char *VertexSource[] = {
+		"#version 330 core\n",
+		"layout(location = 0) in vec3 position;\n",
+		"void main() {\n",
+		"\tgl_Position.xyz = position;\n",
+		"\tgl_Position.w = 1.0;\n",
+		"}\n"
+	};
+	glShaderSource(VertexShaderID, sizeof(VertexSource) / sizeof(const char *), VertexSource, NULL);
+	glCompileShader(VertexShaderID);
+
+	glGetShaderiv(VertexShaderID, GL_COMPILE_STATUS, &Result);
+	if (Result) puts("vertex shader compile success!");
+	glGetShaderiv(VertexShaderID, GL_INFO_LOG_LENGTH, &InfoLogLength);
+	if (InfoLogLength > 0) {
+		char Message[InfoLogLength + 1];
+		glGetShaderInfoLog(VertexShaderID, InfoLogLength, NULL, Message);
+		puts(Message);
+	}
+
+	const char *FragmentSource[] = {
+		"#version 330 core\n",
+		"out vec3 color;\n"
+		"void main() {\n",
+		"\tcolor = vec3(1,0,0);\n",
+		"}\n"
+	};
+
+	glShaderSource(FragmentShaderID, sizeof(FragmentSource) / sizeof(const char *), FragmentSource, NULL);
+	glCompileShader(FragmentShaderID);
+
+	glGetShaderiv(FragmentShaderID, GL_COMPILE_STATUS, &Result);
+	if (Result) puts("fragment shader compile success!");
+	glGetShaderiv(FragmentShaderID, GL_INFO_LOG_LENGTH, &InfoLogLength);
+	if (InfoLogLength > 0) {
+		char Message[InfoLogLength + 1];
+		glGetShaderInfoLog(FragmentShaderID, InfoLogLength, NULL, Message);
+		puts(Message);
+	}
+
+	GLuint ProgramID = glCreateProgram();
+	glAttachShader(ProgramID, VertexShaderID);
+	glAttachShader(ProgramID, FragmentShaderID);
+	glLinkProgram(ProgramID);
+
+	glGetShaderiv(ProgramID, GL_LINK_STATUS, &Result);
+	if (Result) puts("program link success!");
+	glGetShaderiv(ProgramID, GL_INFO_LOG_LENGTH, &InfoLogLength);
+	if (InfoLogLength > 0) {
+		char Message[InfoLogLength + 1];
+		glGetShaderInfoLog(ProgramID, InfoLogLength, NULL, Message);
+		puts(Message);
+	}
+
+	glDetachShader(ProgramID, VertexShaderID);
+	glDetachShader(ProgramID, FragmentShaderID);
+
+	glDeleteShader(VertexShaderID);
+	glDeleteShader(FragmentShaderID);
+
+	Viewer->GLProgram = ProgramID;
+	Viewer->GLPositionIndex = glGetAttribLocation(ProgramID, "position");
 }
 
 static void realize_viewer(GtkGLArea *Widget, viewer_t *Viewer) {
@@ -695,6 +767,7 @@ static void realize_viewer(GtkGLArea *Widget, viewer_t *Viewer) {
 	//glEnableClientState(GL_VERTEX_ARRAY);
 	glGenVertexArrays(2, Viewer->GLArrays);
 	glGenBuffers(2, Viewer->GLBuffers);
+	load_gl_shaders(Viewer);
 }
 #else
 static void redraw_viewer(GtkWidget *Widget, cairo_t *Cairo, viewer_t *Viewer) {
@@ -1444,8 +1517,8 @@ static GtkWidget *create_viewer_action_bar(viewer_t *Viewer) {
 static viewer_t *create_viewer(const char *CsvFileName) {
 	viewer_t *Viewer = (viewer_t *)malloc(sizeof(viewer_t));
 #ifdef USE_GL
-	Viewer->PointSize = 0.004;
-	Viewer->BoxSize = 0.04;
+	Viewer->PointSize = 0.4;
+	Viewer->BoxSize = 4.0;
 	Viewer->GLVertices = 0;
 	Viewer->GLColours = 0;
 #else
