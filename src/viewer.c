@@ -90,7 +90,7 @@ struct viewer_t {
 #ifdef USE_GL
 	int GLCount;
 	GLuint GLArrays[2], GLBuffers[2];
-	GLuint GLProgram, GLPositionIndex, GLTransformLocation;
+	GLuint GLProgram, GLTransformLocation;
 #endif
 };
 
@@ -679,20 +679,38 @@ static gboolean render_viewer(GtkGLArea *Widget, GdkGLContext *Context, viewer_t
 	};
 
 	printf("Scale = %f, %f\n", Viewer->Scale.X, Viewer->Scale.Y);
+	printf("Width, Height = %d, %d\n", Width, Height);
+	printf("Range = (%f, %f) - (%f, %f)\n", Viewer->Min.X, Viewer->Min.Y, Viewer->Max.X, Viewer->Max.Y);
 
-	transform[0] = 1.0 / Viewer->Scale.X;
-	transform[5] = 1.0 / Viewer->Scale.Y;
+	transform[0] = 2.0 / Width;
+	transform[12] = -1.0;
+	transform[5] = 2.0 / Height;
+	transform[13] = -1.0;
+
+	for (int I = 0; I < Viewer->GLCount; ++I) {
+		printf("Drawing point at %f, %f\n",
+			Viewer->GLVertices[3 * I + 0] * transform[0],
+			Viewer->GLVertices[3 * I + 1] * transform[5]
+		);
+		break;
+	}
 
 	glBindBuffer(GL_ARRAY_BUFFER, Viewer->GLBuffers[0]);
 	glBufferData(GL_ARRAY_BUFFER, Viewer->GLCount * 3 * sizeof(float), Viewer->GLVertices, GL_STATIC_DRAW);
+	glBindBuffer(GL_ARRAY_BUFFER, Viewer->GLBuffers[1]);
+		glBufferData(GL_ARRAY_BUFFER, Viewer->GLCount * 3 * sizeof(float), Viewer->GLColours, GL_STATIC_DRAW);
 	glBindBuffer(GL_ARRAY_BUFFER, 0);
 
+	glClearColor(1.0, 1.0, 1.0, 1.0);
 	glClear(GL_COLOR_BUFFER_BIT);
 	glUseProgram(Viewer->GLProgram);
 	glUniformMatrix4fv(Viewer->GLTransformLocation, 1, GL_FALSE, transform);
-	glEnableVertexAttribArray(Viewer->GLPositionIndex);
+	glEnableVertexAttribArray(0);
 	glBindBuffer(GL_ARRAY_BUFFER, Viewer->GLBuffers[0]);
-	glVertexAttribPointer(Viewer->GLPositionIndex, 3, GL_FLOAT, GL_FALSE, 0, (void *)0);
+	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, (void *)0);
+	glEnableVertexAttribArray(1);
+	glBindBuffer(GL_ARRAY_BUFFER, Viewer->GLBuffers[1]);
+	glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 0, (void *)0);
 	glDrawArrays(GL_TRIANGLES, 0, Viewer->GLCount);
 	glDisableVertexAttribArray(0);
 	glBindBuffer(GL_ARRAY_BUFFER, 0);
@@ -711,9 +729,12 @@ static void load_gl_shaders(viewer_t *Viewer) {
 	const char *VertexSource[] = {
 		"#version 330\n",
 		"layout(location = 0) in vec3 position;\n",
+		"layout(location = 1) in vec3 color;\n",
+		"out vec3 fragmentColor;\n",
 		"uniform mat4 transform;\n",
 		"void main() {\n",
 		"\tgl_Position = transform * vec4(position, 1.0f);\n",
+		"\tfragmentColor = color;\n",
 		"}\n"
 	};
 	glShaderSource(VertexShaderID, sizeof(VertexSource) / sizeof(const char *), VertexSource, NULL);
@@ -730,9 +751,10 @@ static void load_gl_shaders(viewer_t *Viewer) {
 
 	const char *FragmentSource[] = {
 		"#version 330\n",
+		"in vec3 fragmentColor;\n",
 		"out vec3 color;\n"
 		"void main() {\n",
-		"\tcolor = vec3(1.0f,0.0f,0.0f);\n",
+		"\tcolor = fragmentColor;\n",
 		"}\n"
 	};
 
@@ -769,7 +791,6 @@ static void load_gl_shaders(viewer_t *Viewer) {
 	glDeleteShader(FragmentShaderID);
 
 	Viewer->GLProgram = ProgramID;
-	Viewer->GLPositionIndex = glGetAttribLocation(ProgramID, "position");
 	Viewer->GLTransformLocation = glGetUniformLocation(ProgramID, "transform");
 }
 
@@ -787,7 +808,7 @@ static void realize_viewer(GtkGLArea *Widget, viewer_t *Viewer) {
 	//glEnableClientState(GL_VERTEX_ARRAY);
 	glGenVertexArrays(1, Viewer->GLArrays);
 	glBindVertexArray(Viewer->GLArrays[0]);
-	glGenBuffers(1, Viewer->GLBuffers);
+	glGenBuffers(2, Viewer->GLBuffers);
 	load_gl_shaders(Viewer);
 }
 #else
@@ -1538,8 +1559,8 @@ static GtkWidget *create_viewer_action_bar(viewer_t *Viewer) {
 static viewer_t *create_viewer(const char *CsvFileName) {
 	viewer_t *Viewer = (viewer_t *)malloc(sizeof(viewer_t));
 #ifdef USE_GL
-	Viewer->PointSize = 0.004;
-	Viewer->BoxSize = 0.04;
+	Viewer->PointSize = 4.0;
+	Viewer->BoxSize = 40.0;
 	Viewer->GLVertices = 0;
 	Viewer->GLColours = 0;
 #else
