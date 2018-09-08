@@ -88,8 +88,8 @@ struct viewer_t {
 	int NumNodes, NumFields, NumCachedImages, NumVisibleImages;
 	int XIndex, YIndex, CIndex;
 #ifdef USE_GL
-	int GLCount;
-	GLuint GLArrays[2], GLBuffers[2];
+	int GLCount, GLReady;
+	GLuint GLArrays[2], GLBuffers[4];
 	GLuint GLProgram, GLTransformLocation;
 #endif
 };
@@ -435,7 +435,7 @@ static void viewer_open_file(viewer_t *Viewer, const char *CsvFileName) {
 	}
 #ifdef USE_GL
 	Viewer->GLVertices = (float *)malloc(NumNodes * 3 * 3 * sizeof(float));
-	Viewer->GLColours = (float *)malloc(NumNodes * 3 * 3 * sizeof(float));
+	Viewer->GLColours = (float *)malloc(NumNodes * 3 * 4 * sizeof(float));
 #endif
 	printf("Loading rows...\n");
 	fopen(CsvFileName, "r");
@@ -625,7 +625,7 @@ static int redraw_point(viewer_t *Viewer, node_t *Node) {
 	//double Y = (Node->Y - Viewer->Min.Y) / (Viewer->Max.Y - Viewer->Min.Y);
 	double X = Viewer->Scale.X * (Node->X - Viewer->Min.X);
 	double Y = Viewer->Scale.Y * (Node->Y - Viewer->Min.Y);
-	printf("Point at (%f, %f)\n", X, Y);
+	//printf("Point at (%f, %f)\n", X, Y);
 	int Index = Viewer->GLCount;
 	Viewer->GLVertices[3 * Index + 0] = X - Viewer->PointSize / 2;
 	Viewer->GLVertices[3 * Index + 1] = Y + Viewer->PointSize * 0.33;
@@ -636,15 +636,18 @@ static int redraw_point(viewer_t *Viewer, node_t *Node) {
 	Viewer->GLVertices[3 * Index + 6] = X + Viewer->PointSize / 2;
 	Viewer->GLVertices[3 * Index + 7] = Y + Viewer->PointSize * 0.33;
 	Viewer->GLVertices[3 * Index + 8] = 0.0;
-	Viewer->GLColours[3 * Index + 0] = Node->R;
-	Viewer->GLColours[3 * Index + 1] = Node->G;
-	Viewer->GLColours[3 * Index + 2] = Node->B;
-	Viewer->GLColours[3 * Index + 3] = Node->R;
-	Viewer->GLColours[3 * Index + 4] = Node->G;
-	Viewer->GLColours[3 * Index + 5] = Node->B;
-	Viewer->GLColours[3 * Index + 6] = Node->R;
-	Viewer->GLColours[3 * Index + 7] = Node->G;
-	Viewer->GLColours[3 * Index + 8] = Node->B;
+	Viewer->GLColours[4 * Index + 0] = Node->R;
+	Viewer->GLColours[4 * Index + 1] = Node->G;
+	Viewer->GLColours[4 * Index + 2] = Node->B;
+	Viewer->GLColours[4 * Index + 3] = 1.0;
+	Viewer->GLColours[4 * Index + 4] = Node->R;
+	Viewer->GLColours[4 * Index + 5] = Node->G;
+	Viewer->GLColours[4 * Index + 6] = Node->B;
+	Viewer->GLColours[4 * Index + 7] = 1.0;
+	Viewer->GLColours[4 * Index + 8] = Node->R;
+	Viewer->GLColours[4 * Index + 9] = Node->G;
+	Viewer->GLColours[4 * Index + 10] = Node->B;
+	Viewer->GLColours[4 * Index + 11] = 1.0;
 	Viewer->GLCount = Index + 3;
 #else
 	double X = Viewer->Scale.X * (Node->X - Viewer->Min.X);
@@ -684,36 +687,62 @@ static gboolean render_viewer(GtkGLArea *Widget, GdkGLContext *Context, viewer_t
 
 	transform[0] = 2.0 / Width;
 	transform[12] = -1.0;
-	transform[5] = 2.0 / Height;
-	transform[13] = -1.0;
-
-	for (int I = 0; I < Viewer->GLCount; ++I) {
-		printf("Drawing point at %f, %f\n",
-			Viewer->GLVertices[3 * I + 0] * transform[0],
-			Viewer->GLVertices[3 * I + 1] * transform[5]
-		);
-		break;
-	}
-
-	glBindBuffer(GL_ARRAY_BUFFER, Viewer->GLBuffers[0]);
-	glBufferData(GL_ARRAY_BUFFER, Viewer->GLCount * 3 * sizeof(float), Viewer->GLVertices, GL_STATIC_DRAW);
-	glBindBuffer(GL_ARRAY_BUFFER, Viewer->GLBuffers[1]);
-		glBufferData(GL_ARRAY_BUFFER, Viewer->GLCount * 3 * sizeof(float), Viewer->GLColours, GL_STATIC_DRAW);
-	glBindBuffer(GL_ARRAY_BUFFER, 0);
+	transform[5] = -2.0 / Height;
+	transform[13] = 1.0;
 
 	glClearColor(1.0, 1.0, 1.0, 1.0);
 	glClear(GL_COLOR_BUFFER_BIT);
 	glUseProgram(Viewer->GLProgram);
 	glUniformMatrix4fv(Viewer->GLTransformLocation, 1, GL_FALSE, transform);
+
+	glBindVertexArray(Viewer->GLArrays[0]);
 	glEnableVertexAttribArray(0);
 	glBindBuffer(GL_ARRAY_BUFFER, Viewer->GLBuffers[0]);
 	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, (void *)0);
 	glEnableVertexAttribArray(1);
 	glBindBuffer(GL_ARRAY_BUFFER, Viewer->GLBuffers[1]);
-	glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 0, (void *)0);
+	glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, 0, (void *)0);
 	glDrawArrays(GL_TRIANGLES, 0, Viewer->GLCount);
 	glDisableVertexAttribArray(0);
 	glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+	float BoxX1 = Viewer->Pointer.X - Viewer->BoxSize / 2;
+	float BoxY1 = Viewer->Pointer.Y - Viewer->BoxSize / 2;
+	float BoxX2 = Viewer->Pointer.X + Viewer->BoxSize / 2;
+	float BoxY2 = Viewer->Pointer.Y + Viewer->BoxSize / 2;
+
+	float BoxVertices[] = {
+		BoxX1, BoxY1, 0.1,
+		BoxX1, BoxY2, 0.1,
+		BoxX2, BoxY1, 0.1,
+		BoxX2, BoxY2, 0.1
+	};
+
+	float BoxColours[] = {
+		0.5, 0.5, 1.0, 0.5,
+		0.5, 0.5, 1.0, 0.5,
+		0.5, 0.5, 1.0, 0.5,
+		0.5, 0.5, 1.0, 0.5
+	};
+
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+	glBindVertexArray(Viewer->GLArrays[1]);
+	glEnableVertexAttribArray(0);
+	glBindBuffer(GL_ARRAY_BUFFER, Viewer->GLBuffers[2]);
+	glBufferData(GL_ARRAY_BUFFER, 4 * 3 * sizeof(float), BoxVertices, GL_STATIC_DRAW);
+	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, (void *)0);
+	glEnableVertexAttribArray(1);
+	glBindBuffer(GL_ARRAY_BUFFER, Viewer->GLBuffers[3]);
+	glBufferData(GL_ARRAY_BUFFER, 4 * 4 * sizeof(float), BoxColours, GL_STATIC_DRAW);
+	glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, 0, (void *)0);
+	glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+	glDisableVertexAttribArray(0);
+	glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+	glDisable(GL_BLEND);
+
 	glUseProgram(0);
 	glFlush();
 	return TRUE;
@@ -729,8 +758,8 @@ static void load_gl_shaders(viewer_t *Viewer) {
 	const char *VertexSource[] = {
 		"#version 330\n",
 		"layout(location = 0) in vec3 position;\n",
-		"layout(location = 1) in vec3 color;\n",
-		"out vec3 fragmentColor;\n",
+		"layout(location = 1) in vec4 color;\n",
+		"out vec4 fragmentColor;\n",
 		"uniform mat4 transform;\n",
 		"void main() {\n",
 		"\tgl_Position = transform * vec4(position, 1.0f);\n",
@@ -751,8 +780,8 @@ static void load_gl_shaders(viewer_t *Viewer) {
 
 	const char *FragmentSource[] = {
 		"#version 330\n",
-		"in vec3 fragmentColor;\n",
-		"out vec3 color;\n"
+		"in vec4 fragmentColor;\n",
+		"out vec4 color;\n"
 		"void main() {\n",
 		"\tcolor = fragmentColor;\n",
 		"}\n"
@@ -806,10 +835,13 @@ static void realize_viewer(GtkGLArea *Widget, viewer_t *Viewer) {
 	//glViewport(0, 0, Width, Height);
 	//glEnableClientState(GL_COLOR_ARRAY);
 	//glEnableClientState(GL_VERTEX_ARRAY);
-	glGenVertexArrays(1, Viewer->GLArrays);
+	glGenVertexArrays(2, Viewer->GLArrays);
 	glBindVertexArray(Viewer->GLArrays[0]);
 	glGenBuffers(2, Viewer->GLBuffers);
+	glBindVertexArray(Viewer->GLArrays[1]);
+	glGenBuffers(2, Viewer->GLBuffers + 2);
 	load_gl_shaders(Viewer);
+	Viewer->GLReady = 1;
 }
 #else
 static void redraw_viewer(GtkWidget *Widget, cairo_t *Cairo, viewer_t *Viewer) {
@@ -880,8 +912,18 @@ static void pan_viewer(viewer_t *Viewer, double DeltaX, double DeltaY) {
 static void redraw_viewer_background(viewer_t *Viewer) {
 #ifdef USE_GL
 	Viewer->GLCount = 0;
+	clock_t Start = clock();
 	foreach_node(Viewer->Root, Viewer->Min.X, Viewer->Min.Y, Viewer->Max.X, Viewer->Max.Y, Viewer, (node_callback_t *)redraw_point);
+	printf("foreach_node took %d\n", clock() - Start);
 	printf("rendered %d points\n", Viewer->GLCount);
+	if (Viewer->GLReady) {
+		gtk_gl_area_make_current(GTK_GL_AREA(Viewer->DrawingArea));
+		glBindBuffer(GL_ARRAY_BUFFER, Viewer->GLBuffers[0]);
+		glBufferData(GL_ARRAY_BUFFER, Viewer->GLCount * 3 * sizeof(float), Viewer->GLVertices, GL_STATIC_DRAW);
+		glBindBuffer(GL_ARRAY_BUFFER, Viewer->GLBuffers[1]);
+		glBufferData(GL_ARRAY_BUFFER, Viewer->GLCount * 4 * sizeof(float), Viewer->GLColours, GL_STATIC_DRAW);
+		glBindBuffer(GL_ARRAY_BUFFER, 0);
+	}
 #else
 	guint Width = cairo_image_surface_get_width(Viewer->CachedBackground);
 	guint Height = cairo_image_surface_get_height(Viewer->CachedBackground);
@@ -1559,10 +1601,11 @@ static GtkWidget *create_viewer_action_bar(viewer_t *Viewer) {
 static viewer_t *create_viewer(const char *CsvFileName) {
 	viewer_t *Viewer = (viewer_t *)malloc(sizeof(viewer_t));
 #ifdef USE_GL
-	Viewer->PointSize = 4.0;
+	Viewer->PointSize = 6.0;
 	Viewer->BoxSize = 40.0;
 	Viewer->GLVertices = 0;
 	Viewer->GLColours = 0;
+	Viewer->GLReady = 0;
 #else
 	Viewer->PointSize = 4.0;
 	Viewer->BoxSize = 40.0;
