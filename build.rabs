@@ -59,3 +59,10 @@ BIN_DIR:mkdir
 vmount("obj", "src")
 subdir("obj")
 
+defined("USE_GL") and scope("USE_GL";) do
+	USE_GL := 1
+	vmount("obj_gl", "src")
+	subdir("obj_gl")
+end
+
+
