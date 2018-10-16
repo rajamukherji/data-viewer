@@ -1,7 +1,5 @@
-/bin/*
-/obj/*
 /test/*
 /_minibuild_.db*
-/obj/
+/obj*/
 /bin/
 /build.rabs.db

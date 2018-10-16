@@ -45,9 +45,12 @@ struct field_t {
 	GHashTable *EnumHash;
 	GtkListStore *EnumStore;
 	const char **EnumNames;
-	range_t Range;
-	int PreviewIndex;
+	double *EnumValues;
 	GtkTreeViewColumn *PreviewColumn;
+	range_t Range;
+	int EnumSize;
+	int PreviewIndex;
+	int FilterGeneration;
 	double Values[];
 };
 
@@ -87,6 +90,7 @@ struct viewer_t {
 	double PointSize, BoxSize, EditValue;
 	int NumNodes, NumFields, NumCachedImages, NumVisibleImages;
 	int XIndex, YIndex, CIndex;
+	int FilterGeneration;
 #ifdef USE_GL
 	int GLCount, GLReady;
 	GLuint GLArrays[2], GLBuffers[4];
@@ -278,20 +282,48 @@ static inline void set_node_rgb(node_t *Node, double H) {
 	}
 }
 
+static void filter_enum_field(viewer_t *Viewer, field_t *Field) {
+	printf("filter_enum_field(%s)\n", Field->Name);
+	node_t *Node = Viewer->Nodes;
+	int NumNodes = Viewer->NumNodes;
+	double *EnumValues = Field->EnumValues;
+	memset(EnumValues, 0, Field->EnumSize * sizeof(double));
+	double Max = 0.0;
+	double *Value = Field->Values;
+	for (int I = NumNodes; --I >= 0;) {
+		if (!Node->Filtered) {
+			int Index = (int)Value[0];
+			if (Index && (EnumValues[Index] == 0.0)) {
+				Max += 1.0;
+				EnumValues[Index] = Max;
+			}
+		}
+		++Node;
+		++Value;
+	}
+	Field->Range.Max = Max;
+	printf("Field->Range.Max = %f\n", Max);
+	Field->FilterGeneration = Viewer->FilterGeneration;
+}
+
 static void set_viewer_colour_index(viewer_t *Viewer, int CIndex) {
 	Viewer->CIndex = CIndex;
 	int NumNodes = Viewer->NumNodes;
 	field_t *CField = Viewer->Fields[CIndex];
+	if (CField->FilterGeneration != Viewer->FilterGeneration) {
+		filter_enum_field(Viewer, CField);
+	}
 	double Min = CField->Range.Min;
 	double Range = CField->Range.Max - Min;
-	if (!CField->EnumStore) Range += 1.0;
-	if (Range <= 1.0e-6) Range = 1.0;
 	node_t *Node = Viewer->Nodes;
 	double *CValue = CField->Values;
 	if (CField->EnumStore) {
+		double *EnumValues = CField->EnumValues;
+		Range += 1.0;
 		for (int I = NumNodes; --I >= 0;) {
-			if (*CValue > 0.0) {
-				set_node_rgb(Node, 6.0 * (*CValue - Min) / Range);
+			double Value = EnumValues[(int)CValue[0]];
+			if (Value > 0.0) {
+				set_node_rgb(Node, 6.0 * (Value - Min) / Range);
 			} else {
 				Node->R = Node->G = Node->B = POINT_COLOUR_SATURATION;
 			}
@@ -299,6 +331,7 @@ static void set_viewer_colour_index(viewer_t *Viewer, int CIndex) {
 			++CValue;
 		}
 	} else {
+		if (Range <= 1.0e-6) Range = 1.0;
 		for (int I = NumNodes; --I >= 0;) {
 			set_node_rgb(Node, 6.0 * (*CValue - Min) / Range);
 			++Node;
@@ -335,22 +368,16 @@ static void load_nodes_field_callback(void *Text, size_t Size, csv_node_loader_t
 			insert:
 			if (Field->EnumHash) {
 				if (Size) {
-					char *EnumName = malloc(Size + 1);
-					memcpy(EnumName, Text, Size);
-					EnumName[Size] = 0;
-					gpointer *Ref = g_hash_table_lookup(Field->EnumHash, EnumName);
+					gpointer *Ref = g_hash_table_lookup(Field->EnumHash, Text);
 					if (Ref) {
 						Value = *(double *)Ref;
-						free(EnumName);
 					} else {
+						char *EnumName = malloc(Size + 1);
+						memcpy(EnumName, Text, Size);
+						EnumName[Size] = 0;
 						Ref = (void *)&Field->Values[Loader->Row - 1];
 						g_hash_table_insert(Field->EnumHash, EnumName, Ref);
 						Value = g_hash_table_size(Field->EnumHash);
-						const char **EnumNames = (const char **)malloc((Value + 1) * sizeof(const char *));
-						memcpy(EnumNames, Field->EnumNames, Value * sizeof(const char *));
-						EnumNames[(int)Value] = EnumName;
-						free(Field->EnumNames);
-						Field->EnumNames = EnumNames;
 					}
 				} else {
 					Value = 0.0;
@@ -366,8 +393,6 @@ static void load_nodes_field_callback(void *Text, size_t Size, csv_node_loader_t
 					}
 					Field->Range.Min = 0.0;
 					Field->EnumHash = g_hash_table_new(g_str_hash, g_str_equal);
-					Field->EnumNames = (const char **)malloc(sizeof(const char *));
-					Field->EnumNames[0] = "";
 					goto insert;
 				}
 			}
@@ -396,6 +421,10 @@ static void count_nodes_row_callback(int Char, csv_node_loader_t *Loader) {
 	Loader->Index = 0;
 	++Loader->Row;
 	if (Loader->Row % 10000 == 0) printf("Counted row %d\n", Loader->Row);
+}
+
+static void set_enum_name_fn(const char *Name, const double *Value, const char **Names) {
+	Names[(int)Value[0]] = Name;
 }
 
 static void viewer_open_file(viewer_t *Viewer, const char *CsvFileName) {
@@ -431,6 +460,7 @@ static void viewer_open_file(viewer_t *Viewer, const char *CsvFileName) {
 		Field->Range.Max = -INFINITY;
 		Field->PreviewIndex = -1;
 		Field->PreviewColumn = 0;
+		Field->FilterGeneration = 0;
 		Fields[I] = Field;
 	}
 #ifdef USE_GL
@@ -456,11 +486,16 @@ static void viewer_open_file(viewer_t *Viewer, const char *CsvFileName) {
 		field_t *Field = Fields[I];
 		gtk_list_store_insert_with_values(Viewer->FieldsStore, 0, -1, 0, Field->Name, 1, I, -1);
 		if (Field->EnumHash) {
+			int EnumSize = Field->EnumSize = g_hash_table_size(Field->EnumHash) + 1;
+			const char **EnumNames = (const char **)malloc(EnumSize * sizeof(const char *));
+			EnumNames[0] = "";
+			g_hash_table_foreach(Field->EnumHash, (void *)set_enum_name_fn, EnumNames);
+			Field->EnumNames = EnumNames;
 			GtkListStore *EnumStore = Field->EnumStore = gtk_list_store_new(2, G_TYPE_STRING, G_TYPE_DOUBLE);
-			int EnumSize = g_hash_table_size(Field->EnumHash) + 1;
 			for (int J = 0; J < EnumSize; ++J) {
 				gtk_list_store_insert_with_values(Field->EnumStore, 0, -1, 0, Field->EnumNames[J], 1, (double)(J + 1), -1);
 			}
+			Field->EnumValues = (double *)malloc(EnumSize * sizeof(double));
 		}
 	}
 
@@ -1299,6 +1334,8 @@ static void viewer_filter_nodes(viewer_t *Viewer) {
 			Filter->Operator(Viewer->NumNodes, Viewer->Nodes, Filter->Field->Values, Filter->Value);
 		}
 	}
+	++Viewer->FilterGeneration;
+	set_viewer_colour_index(Viewer, Viewer->CIndex);
 	set_viewer_indices(Viewer, Viewer->XIndex, Viewer->YIndex);
 	redraw_viewer_background(Viewer);
 	update_preview(Viewer);
@@ -1615,7 +1652,7 @@ static viewer_t *create_viewer(const char *CsvFileName) {
 	Viewer->NumCachedImages = 0;
 	Viewer->EditField = 0;
 	Viewer->Filters = 0;
-
+	Viewer->FilterGeneration = 1;
 	Viewer->FieldsStore = gtk_list_store_new(2, G_TYPE_STRING, G_TYPE_INT);
 
 	GtkWidget *MainWindow = Viewer->MainWindow = gtk_window_new(GTK_WINDOW_TOPLEVEL);
