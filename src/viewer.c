@@ -310,14 +310,14 @@ static void set_viewer_colour_index(viewer_t *Viewer, int CIndex) {
 	Viewer->CIndex = CIndex;
 	int NumNodes = Viewer->NumNodes;
 	field_t *CField = Viewer->Fields[CIndex];
-	if (CField->FilterGeneration != Viewer->FilterGeneration) {
-		filter_enum_field(Viewer, CField);
-	}
 	double Min = CField->Range.Min;
 	double Range = CField->Range.Max - Min;
 	node_t *Node = Viewer->Nodes;
 	double *CValue = CField->Values;
 	if (CField->EnumStore) {
+		if (CField->FilterGeneration != Viewer->FilterGeneration) {
+			filter_enum_field(Viewer, CField);
+		}
 		double *EnumValues = CField->EnumValues;
 		Range += 1.0;
 		for (int I = NumNodes; --I >= 0;) {
