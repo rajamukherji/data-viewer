@@ -51,6 +51,7 @@ struct field_t {
 	int EnumSize;
 	int PreviewIndex;
 	int FilterGeneration;
+	double Sum, Sum2, SD;
 	double Values[];
 };
 
@@ -332,6 +333,7 @@ static void set_viewer_colour_index(viewer_t *Viewer, int CIndex) {
 		}
 	} else {
 		if (Range <= 1.0e-6) Range = 1.0;
+		Range += CField->SD;
 		for (int I = NumNodes; --I >= 0;) {
 			set_node_rgb(Node, 6.0 * (*CValue - Min) / Range);
 			++Node;
@@ -399,6 +401,8 @@ static void load_nodes_field_callback(void *Text, size_t Size, csv_node_loader_t
 			Field->Values[Loader->Row - 1] = Value;
 			if (Field->Range.Min > Value) Field->Range.Min = Value;
 			if (Field->Range.Max < Value) Field->Range.Max = Value;
+			Field->Sum += Value;
+			Field->Sum2 += Value * Value;
 		}
 	}
 	++Loader->Index;
@@ -461,6 +465,7 @@ static void viewer_open_file(viewer_t *Viewer, const char *CsvFileName) {
 		Field->PreviewIndex = -1;
 		Field->PreviewColumn = 0;
 		Field->FilterGeneration = 0;
+		Field->Sum = Field->Sum2 = 0.0;
 		Fields[I] = Field;
 	}
 #ifdef USE_GL
@@ -496,6 +501,9 @@ static void viewer_open_file(viewer_t *Viewer, const char *CsvFileName) {
 				gtk_list_store_insert_with_values(Field->EnumStore, 0, -1, 0, Field->EnumNames[J], 1, (double)(J + 1), -1);
 			}
 			Field->EnumValues = (double *)malloc(EnumSize * sizeof(double));
+		} else {
+			double Mean = Field->Sum / Viewer->NumNodes;
+			Field->SD = sqrt((Field->Sum2 / Viewer->NumNodes) - Mean * Mean);
 		}
 	}
 
@@ -1194,6 +1202,8 @@ static void add_field_callback(const char *Name, viewer_t *Viewer, void *Data) {
 	Field->Range.Min = Field->Range.Max = 0;
 	Field->PreviewIndex = -1;
 	Field->PreviewColumn = 0;
+	Field->FilterGeneration = 0;
+	Field->Sum = Field->Sum2 = 0.0;
 	gtk_list_store_insert_with_values(Field->EnumStore, 0, -1, 0, "", 1, 0.0, -1);
 	memset(Field->Values, 0, Viewer->NumNodes * sizeof(double));
 	for (int I = 0; I < Viewer->NumFields; ++I) Fields[I] = Viewer->Fields[I];
