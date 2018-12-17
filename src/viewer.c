@@ -38,6 +38,7 @@ struct node_t {
 	node_t *CacheNext, *CachePrev;
 	double X, Y, R, G, B;
 	int Filtered;
+	int Timestamp;
 };
 
 struct field_t {
@@ -76,7 +77,8 @@ struct viewer_t {
 	GtkListStore *ImagesStore, *ValuesStore;
 	GtkListStore *FieldsStore;
 	GtkListStore *OperatorsStore;
-	node_t *Root, *Nodes;
+	node_t *Nodes;
+	node_t **XHead, **YHead;
 	cairo_t *Cairo;
 #ifdef USE_GL
 	float *GLVertices, *GLColours;
@@ -89,9 +91,9 @@ struct viewer_t {
 	int *Filtered;
 	point_t Min, Max, Scale, DataMin, DataMax, Pointer;
 	double PointSize, BoxSize, EditValue;
-	int NumNodes, NumFields, NumCachedImages, NumVisibleImages;
+	int NumNodes, NumVisibleNodes, NumFields, NumCachedImages, NumVisibleImages;
 	int XIndex, YIndex, CIndex;
-	int FilterGeneration;
+	int FilterGeneration, Timestamp;
 #ifdef USE_GL
 	int GLCount, GLReady;
 	GLuint GLArrays[2], GLBuffers[4];
@@ -99,110 +101,131 @@ struct viewer_t {
 #endif
 };
 
-static void add_node(node_t *Root, node_t *Node) {
-	int Index = (Node->Y >= Root->Y) * 2 + (Node->X >= Root->X);
-	node_t *Child = Root->Children[Index];
-	if (!Child) {
-		Root->Children[Index] = Node;
-	} else {
-		add_node(Child, Node);
-	}
-}
-
-typedef struct {
-	void *Data;
-	node_callback_t *Callback;
-	double X1, Y1, X2, Y2;
-} foreach_t;
-
-static void foreach_node2(node_t *Root, foreach_t *Foreach) {
-	// Bounds  = [Bounds]
-	if (!Root) {
-	} else if (Foreach->X2 < Root->X) {
-		if (Foreach->Y2 < Root->Y) {
-			foreach_node2(Root->Children[0], Foreach);
-		} else if (Foreach->Y1 > Root->Y) {
-			foreach_node2(Root->Children[2], Foreach);
+static inline int foreach_node(viewer_t *Viewer, double X1, double Y1, double X2, double Y2, void *Data, node_callback_t *Callback) {
+	if (Viewer->NumVisibleNodes <=0) return 0;
+	clock_t Start = clock();
+	printf("foreach_node:%d @ %d\n", __LINE__, clock() - Start);
+	int Min = 0;
+	int Max = Viewer->NumVisibleNodes;
+	node_t **Nodes = Viewer->XHead;
+	int Mid1 = (Min + Max) / 2;
+	while (Max - Min > 1) {
+		if (Nodes[Mid1]->X < X1) {
+			Min = Mid1;
+			Mid1 = (Mid1 + Max) / 2;
 		} else {
-			foreach_node2(Root->Children[0], Foreach);
-			foreach_node2(Root->Children[2], Foreach);
-		}
-	} else if (Foreach->X1 > Root->X) {
-		if (Foreach->Y2 < Root->Y) {
-			foreach_node2(Root->Children[1], Foreach);
-		} else if (Foreach->Y1 > Root->Y) {
-			foreach_node2(Root->Children[3], Foreach);
-		} else {
-			foreach_node2(Root->Children[1], Foreach);
-			foreach_node2(Root->Children[3], Foreach);
-		}
-	} else {
-		if (Foreach->Y2 < Root->Y) {
-			foreach_node2(Root->Children[0], Foreach);
-			foreach_node2(Root->Children[1], Foreach);
-		} else if (Foreach->Y1 > Root->Y) {
-			foreach_node2(Root->Children[2], Foreach);
-			foreach_node2(Root->Children[3], Foreach);
-		} else {
-			Foreach->Callback(Foreach->Data, Root);
-			foreach_node2(Root->Children[0], Foreach);
-			foreach_node2(Root->Children[1], Foreach);
-			foreach_node2(Root->Children[2], Foreach);
-			foreach_node2(Root->Children[3], Foreach);
+			Max = Mid1;
+			Mid1 = (Min + Mid1) / 2;
 		}
 	}
-}
-
-static inline int foreach_node(node_t *Root, double X1, double Y1, double X2, double Y2, void *Data, node_callback_t *Callback) {
-	foreach_t Foreach = {Data, Callback, X1, Y1, X2, Y2};
-	foreach_node2(Root, &Foreach);
+	Mid1 = Max;
+	Min = Mid1;
+	Max = Viewer->NumVisibleNodes;
+	int Mid2 = (Min + Max) / 2;
+	while (Max - Min > 1) {
+		if (Nodes[Mid2]->X <= X2) {
+			Min = Mid2;
+			Mid2 = (Mid2 + Max) / 2;
+		} else {
+			Max = Mid2;
+			Mid2 = (Min + Mid2) / 2;
+		}
+	}
+	Mid2 = Max;
+	int Timestamp = ++Viewer->Timestamp;
+	printf("foreach_node:%d @ %d\n", __LINE__, clock() - Start);
+	printf("Limits = (%f, %f) - (%f, %f)\n", X1, Y1, X2, Y2);
+	printf("\tXRange = [%d - %d], %f - %f\n", Mid1, Mid2, Nodes[Mid1]->X, Nodes[Mid2]->X);
+	for (int I = Mid1; I < Mid2; ++I) Nodes[I]->Timestamp = Timestamp;
+	printf("foreach_node:%d @ %d\n", __LINE__, clock() - Start);
+	Min = 0;
+	Max = Viewer->NumVisibleNodes;
+	Nodes = Viewer->YHead;
+	Mid1 = (Min + Max) / 2;
+	while (Max - Min > 1) {
+		if (Nodes[Mid1]->Y < Y1) {
+			Min = Mid1;
+			Mid1 = (Mid1 + Max) / 2;
+		} else {
+			Max = Mid1;
+			Mid1 = (Min + Mid1) / 2;
+		}
+	}
+	Mid1 = Max;
+	Min = Mid1;
+	Max = Viewer->NumVisibleNodes;
+	Mid2 = (Min + Max) / 2;
+	while (Max - Min > 1) {
+		if (Nodes[Mid2]->Y <= Y2) {
+			Min = Mid2;
+			Mid2 = (Mid2 + Max) / 2;
+		} else {
+			Max = Mid2;
+			Mid2 = (Min + Mid2) / 2;
+		}
+	}
+	Mid2 = Max;
+	printf("foreach_node:%d @ %d\n", __LINE__, clock() - Start);
+	printf("\tYRange = [%d - %d], %f - %f\n", Mid1, Mid2, Nodes[Mid1]->Y, Nodes[Mid2]->Y);
+	for (int I = Mid1; I < Mid2; ++I) if (Nodes[I]->Timestamp == Timestamp) {
+		Callback(Data, Nodes[I]);
+	}
+	printf("foreach_node:%d @ %d\n", __LINE__, clock() - Start);
 	return 0;
-/*
-	if (!Root) return 0;
-	if (X2 < Root->X) {
-		if (Y2 < Root->Y) {
-			return foreach_node(Root->Children[0], X1, Y1, X2, Y2, Data, Callback);
-		} else if (Y1 > Root->Y) {
-			return foreach_node(Root->Children[2], X1, Y1, X2, Y2, Data, Callback);
-		} else {
-			return foreach_node(Root->Children[0], X1, Y1, X2, Y2, Data, Callback)
-				|| foreach_node(Root->Children[2], X1, Y1, X2, Y2, Data, Callback);
-		}
-	} else if (X1 > Root->X) {
-		if (Y2 < Root->Y) {
-			return foreach_node(Root->Children[1], X1, Y1, X2, Y2, Data, Callback);
-		} else if (Y1 > Root->Y) {
-			return foreach_node(Root->Children[3], X1, Y1, X2, Y2, Data, Callback);
-		} else {
-			return foreach_node(Root->Children[1], X1, Y1, X2, Y2, Data, Callback)
-				|| foreach_node(Root->Children[3], X1, Y1, X2, Y2, Data, Callback);
-		}
-	} else {
-		if (Y2 < Root->Y) {
-			return foreach_node(Root->Children[0], X1, Y1, X2, Y2, Data, Callback)
-				|| foreach_node(Root->Children[1], X1, Y1, X2, Y2, Data, Callback);
-		} else if (Y1 > Root->Y) {
-			return foreach_node(Root->Children[2], X1, Y1, X2, Y2, Data, Callback)
-				|| foreach_node(Root->Children[3], X1, Y1, X2, Y2, Data, Callback);
-		} else {
-			return Callback(Data, Root)
-				|| foreach_node(Root->Children[0], X1, Y1, X2, Y2, Data, Callback)
-				|| foreach_node(Root->Children[1], X1, Y1, X2, Y2, Data, Callback)
-				|| foreach_node(Root->Children[2], X1, Y1, X2, Y2, Data, Callback)
-				|| foreach_node(Root->Children[3], X1, Y1, X2, Y2, Data, Callback);
-		}
-	}
-*/
 }
 
-static void forall_nodes(node_t *Root, void *Data, node_callback_t *Callback) {
-	if (Root) {
-		Callback(Data, Root);
-		forall_nodes(Root->Children[0], Data, Callback);
-		forall_nodes(Root->Children[1], Data, Callback);
-		forall_nodes(Root->Children[2], Data, Callback);
-		forall_nodes(Root->Children[3], Data, Callback);
+static void sort_nodes_x(node_t **Min, node_t **Max) {
+	if (Min >= Max) return;
+	node_t *Pivot = *Min;
+	node_t *Temp = *Max;
+	node_t **Mid1 = Min;
+	node_t **Mid2 = Max;
+	while (Mid1 < Mid2) {
+		if (Temp->X < Pivot->X) {
+			*(Mid1++) = Temp;
+			Temp = *Mid1;
+		} else {
+			*(Mid2--) = Temp;
+			Temp = *Mid2;
+		}
 	}
+	*Mid1 = Pivot;
+	sort_nodes_x(Min, Mid1 - 1);
+	sort_nodes_x(Mid1 + 1, Max);
+}
+
+static void sort_nodes_y(node_t **Min, node_t **Max) {
+	if (Min >= Max) return;
+	node_t *Pivot = *Min;
+	node_t *Temp = *Max;
+	node_t **Mid1 = Min;
+	node_t **Mid2 = Max;
+	while (Mid1 < Mid2) {
+		if (Temp->Y < Pivot->Y) {
+			*(Mid1++) = Temp;
+			Temp = *Mid1;
+		} else {
+			*(Mid2--) = Temp;
+			Temp = *Mid2;
+		}
+	}
+	*Mid1 = Pivot;
+	sort_nodes_y(Min, Mid1 - 1);
+	sort_nodes_y(Mid1 + 1, Max);
+}
+
+int compare_nodes_x(node_t **A, node_t **B) {
+	double Diff = A[0]->X - B[0]->X;
+	if (Diff < 0) return -1;
+	if (Diff > 0) return 1;
+	return 0;
+}
+
+int compare_nodes_y(node_t **A, node_t **B) {
+	double Diff = A[0]->Y - B[0]->Y;
+	if (Diff < 0) return -1;
+	if (Diff > 0) return 1;
+	return 0;
 }
 
 static void set_viewer_indices(viewer_t *Viewer, int XIndex, int YIndex) {
@@ -227,18 +250,21 @@ static void set_viewer_indices(viewer_t *Viewer, int XIndex, int YIndex) {
 	node_t *Root = 0;
 	Node = Viewer->Nodes;
 	int I = NumNodes;
+	node_t **XTail = Viewer->XHead;
+	node_t **YTail = Viewer->YHead;
 	while (--I >= 0) {
 		if (!Node->Filtered) {
-			Root = Node;
-			break;
+			*(XTail++) = Node;
+			*(YTail++) = Node;
 		}
 		++Node;
 	}
-	++Node;
-	Viewer->Root = Root;
-	while (--I >= 0) {
-		if (!Node->Filtered) add_node(Root, Node);
-		++Node;
+	int NumVisibleNodes = Viewer->NumVisibleNodes = (XTail - 1) - Viewer->XHead;
+	//sort_nodes_x(Viewer->XHead, XTail - 1);
+	//sort_nodes_y(Viewer->YHead, YTail - 1);
+	if (NumVisibleNodes > 1) {
+		qsort(Viewer->XHead, NumVisibleNodes, sizeof(node_t *), (void *)compare_nodes_x);
+		qsort(Viewer->YHead, NumVisibleNodes, sizeof(node_t *), (void *)compare_nodes_y);
 	}
 
 	double RangeX = XField->Range.Max - XField->Range.Min;
@@ -455,6 +481,8 @@ static void viewer_open_file(viewer_t *Viewer, const char *CsvFileName) {
 	int NumNodes = Viewer->NumNodes = Loader->Row - 1;
 	int NumFields = Viewer->NumFields;
 	node_t *Nodes = Viewer->Nodes = (node_t *)malloc(NumNodes * sizeof(node_t));
+	Viewer->XHead = (node_t **)malloc(NumNodes * sizeof(node_t *));
+	Viewer->YHead = (node_t **)malloc(NumNodes * sizeof(node_t *));
 	memset(Nodes, 0, NumNodes * sizeof(node_t));
 	field_t **Fields = Viewer->Fields = (field_t **)malloc(NumFields * sizeof(field_t *));
 	for (int I = 0; I < NumFields; ++I) {
@@ -535,7 +563,7 @@ static GdkPixbuf *get_node_pixbuf(viewer_t *Viewer, node_t *Node) {
 			++Viewer->NumCachedImages;
 		}
 		GError *Error = 0;
-		Node->Pixbuf = gdk_pixbuf_new_from_file_at_size(Node->FileName, 128, -1, &Error);
+		Node->Pixbuf = gdk_pixbuf_new_from_file_at_size(Node->FileName, 128, 192, &Error);
 		if (!Node->Pixbuf) {
 			guchar *Pixels = malloc(128 * 192 * 4);
 			cairo_surface_t *Surface = cairo_image_surface_create_for_data(Pixels, CAIRO_FORMAT_ARGB32, 128, 192, 128 * 4);
@@ -634,10 +662,12 @@ static void update_preview(viewer_t *Viewer) {
 	double Y2 = Viewer->Min.Y + (Viewer->Pointer.Y + Viewer->BoxSize / 2) / Viewer->Scale.Y;
 	if (Viewer->ImagesStore) {
 		gtk_list_store_clear(Viewer->ImagesStore);
-		foreach_node(Viewer->Root, X1, Y1, X2, Y2, Viewer, (node_callback_t *)draw_node_image);
+		printf("\n\n%s:%d\n", __FUNCTION__, __LINE__);
+		foreach_node(Viewer, X1, Y1, X2, Y2, Viewer, (node_callback_t *)draw_node_image);
 	} else if (Viewer->ValuesStore) {
 		gtk_list_store_clear(Viewer->ValuesStore);
-		foreach_node(Viewer->Root, X1, Y1, X2, Y2, Viewer, (node_callback_t *)draw_node_value);
+		printf("\n\n%s:%d\n", __FUNCTION__, __LINE__);
+		foreach_node(Viewer, X1, Y1, X2, Y2, Viewer, (node_callback_t *)draw_node_value);
 	}
 	char NumVisibleText[64];
 	sprintf(NumVisibleText, "%d points", Viewer->NumVisibleImages);
@@ -659,7 +689,9 @@ static void edit_node_values(viewer_t *Viewer) {
 	double Y1 = Viewer->Min.Y + (Viewer->Pointer.Y - Viewer->BoxSize / 2) / Viewer->Scale.Y;
 	double X2 = Viewer->Min.X + (Viewer->Pointer.X + Viewer->BoxSize / 2) / Viewer->Scale.X;
 	double Y2 = Viewer->Min.Y + (Viewer->Pointer.Y + Viewer->BoxSize / 2) / Viewer->Scale.Y;
-	foreach_node(Viewer->Root, X1, Y1, X2, Y2, Viewer, (node_callback_t *)edit_node_value);
+	printf("\n\n%s:%d\n", __FUNCTION__, __LINE__);
+	foreach_node(Viewer, X1, Y1, X2, Y2, Viewer, (node_callback_t *)edit_node_value);
+	++Viewer->FilterGeneration;
 }
 
 static int redraw_point(viewer_t *Viewer, node_t *Node) {
@@ -956,6 +988,7 @@ static void redraw_viewer_background(viewer_t *Viewer) {
 #ifdef USE_GL
 	Viewer->GLCount = 0;
 	clock_t Start = clock();
+	printf("\n\n%s:%d\n", __FUNCTION__, __LINE__);
 	foreach_node(Viewer->Root, Viewer->Min.X, Viewer->Min.Y, Viewer->Max.X, Viewer->Max.Y, Viewer, (node_callback_t *)redraw_point);
 	printf("foreach_node took %d\n", clock() - Start);
 	printf("rendered %d points\n", Viewer->GLCount);
@@ -976,7 +1009,8 @@ static void redraw_viewer_background(viewer_t *Viewer) {
 	cairo_fill(Cairo);
 	Viewer->Cairo = Cairo;
 	clock_t Start = clock();
-	foreach_node(Viewer->Root, Viewer->Min.X, Viewer->Min.Y, Viewer->Max.X, Viewer->Max.Y, Viewer, (node_callback_t *)redraw_point);
+	printf("\n\n%s:%d\n", __FUNCTION__, __LINE__);
+	foreach_node(Viewer, Viewer->Min.X, Viewer->Min.Y, Viewer->Max.X, Viewer->Max.Y, Viewer, (node_callback_t *)redraw_point);
 	printf("foreach_node took %d\n", clock() - Start);
 	Viewer->Cairo = 0;
 	cairo_destroy(Cairo);
@@ -1197,6 +1231,7 @@ static void add_field_callback(const char *Name, viewer_t *Viewer, void *Data) {
 	field_t *Field = (field_t *)malloc(sizeof(field_t) + Viewer->NumNodes * sizeof(double));
 	Field->EnumStore = gtk_list_store_new(2, G_TYPE_STRING, G_TYPE_DOUBLE);
 	Field->EnumNames = (const char **)malloc(sizeof(const char *));
+	Field->EnumValues = (double *)malloc(sizeof(double));
 	Field->EnumNames[0] = "";
 	Field->Name = Name;
 	Field->Range.Min = Field->Range.Max = 0;
@@ -1229,6 +1264,8 @@ static void add_value_callback(const char *Name, viewer_t *Viewer, void *Data) {
 	EnumNames[(int)Value] = Name;
 	free(Field->EnumNames);
 	Field->EnumNames = EnumNames;
+	free(Field->EnumValues);
+	Field->EnumValues = (double *)malloc((Value + 1) * sizeof(double));
 	Field->Range.Max = Value;
 	gtk_combo_box_set_active(GTK_COMBO_BOX(Viewer->EditValueComboBox), Value - 1);
 	if (Field == Viewer->Fields[Viewer->CIndex]) {
@@ -1286,7 +1323,7 @@ static void save_csv(GtkWidget *Button, viewer_t *Viewer) {
 
 static void filter_operator_equal(int Count, node_t *Node, double *Input, double Value) {
 	while (--Count >= 0) {
-		if (!Node->Filtered) if (Input[0] != Value) Node->Filtered = 1;
+		if (Input[0] != Value) Node->Filtered = 1;
 		++Node;
 		++Input;
 	}
@@ -1294,7 +1331,7 @@ static void filter_operator_equal(int Count, node_t *Node, double *Input, double
 
 static void filter_operator_not_equal(int Count, node_t *Node, double *Input, double Value) {
 	while (--Count >= 0) {
-		if (!Node->Filtered) if (Input[0] == Value) Node->Filtered = 1;
+		if (Input[0] == Value) Node->Filtered = 1;
 		++Node;
 		++Input;
 	}
@@ -1302,7 +1339,7 @@ static void filter_operator_not_equal(int Count, node_t *Node, double *Input, do
 
 static void filter_operator_less(int Count, node_t *Node, double *Input, double Value) {
 	while (--Count >= 0) {
-		if (!Node->Filtered) if (Input[0] >= Value) Node->Filtered = 1;
+		if (Input[0] >= Value) Node->Filtered = 1;
 		++Node;
 		++Input;
 	}
@@ -1310,7 +1347,7 @@ static void filter_operator_less(int Count, node_t *Node, double *Input, double 
 
 static void filter_operator_greater(int Count, node_t *Node, double *Input, double Value) {
 	while (--Count >= 0) {
-		if (!Node->Filtered) if (Input[0] <= Value) Node->Filtered = 1;
+		if (Input[0] <= Value) Node->Filtered = 1;
 		++Node;
 		++Input;
 	}
@@ -1318,7 +1355,7 @@ static void filter_operator_greater(int Count, node_t *Node, double *Input, doub
 
 static void filter_operator_less_or_equal(int Count, node_t *Node, double *Input, double Value) {
 	while (--Count >= 0) {
-		if (!Node->Filtered) if (Input[0] > Value) Node->Filtered = 1;
+		if (Input[0] > Value) Node->Filtered = 1;
 		++Node;
 		++Input;
 	}
@@ -1326,7 +1363,7 @@ static void filter_operator_less_or_equal(int Count, node_t *Node, double *Input
 
 static void filter_operator_greater_or_equal(int Count, node_t *Node, double *Input, double Value) {
 	while (--Count >= 0) {
-		if (!Node->Filtered) if (Input[0] < Value) Node->Filtered = 1;
+		if (Input[0] < Value) Node->Filtered = 1;
 		++Node;
 		++Input;
 	}
@@ -1335,6 +1372,8 @@ static void filter_operator_greater_or_equal(int Count, node_t *Node, double *In
 static void viewer_filter_nodes(viewer_t *Viewer) {
 	int NumNodes = Viewer->NumNodes;
 	node_t *Node = Viewer->Nodes;
+	point_t Min = Viewer->Min;
+	point_t Max = Viewer->Max;
 	for (int I = NumNodes; --I >= 0;) {
 		Node->Filtered = 0;
 		++Node;
