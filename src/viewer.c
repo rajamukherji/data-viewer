@@ -36,7 +36,12 @@ struct node_t {
 	const char *FileName;
 	GdkPixbuf *Pixbuf;
 	node_t *CacheNext, *CachePrev;
-	double X, Y, R, G, B;
+	double X, Y;
+#ifdef USE_GL
+	double R, G, B;
+#else
+	unsigned int Colour;
+#endif
 	int Filtered;
 	int Timestamp;
 };
@@ -84,6 +89,8 @@ struct viewer_t {
 	float *GLVertices, *GLColours;
 #else
 	cairo_surface_t *CachedBackground;
+	unsigned int *CachedPixels;
+	int CachedStride;
 #endif
 	node_t *CacheHead, *CacheTail;
 	field_t **Fields, *EditField;
@@ -282,31 +289,42 @@ static void set_viewer_indices(viewer_t *Viewer, int XIndex, int YIndex) {
 }
 
 static inline void set_node_rgb(node_t *Node, double H) {
+	double R, G, B;
 	if (H < 1.0) {
-		Node->R = POINT_COLOUR_VALUE;
-		Node->G = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 1.0);
-		Node->B = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
+		R = POINT_COLOUR_VALUE;
+		G = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 1.0);
+		B = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
 	} else if (H < 2.0) {
-		Node->R = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 1.0);
-		Node->G = POINT_COLOUR_VALUE;
-		Node->B = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
+		R = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 1.0);
+		G = POINT_COLOUR_VALUE;
+		B = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
 	} else if (H < 3.0) {
-		Node->R = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
-		Node->G = POINT_COLOUR_VALUE;
-		Node->B = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 3.0);
+		R = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
+		G = POINT_COLOUR_VALUE;
+		B = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 3.0);
 	} else if (H < 4.0) {
-		Node->R = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
-		Node->G = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 3.0);
-		Node->B = POINT_COLOUR_VALUE;
+		R = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
+		G = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 3.0);
+		B = POINT_COLOUR_VALUE;
 	} else if (H < 5.0) {
-		Node->R = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 5.0);
-		Node->G = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
-		Node->B = POINT_COLOUR_VALUE;
+		R = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 5.0);
+		G = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
+		B = POINT_COLOUR_VALUE;
 	} else {
-		Node->R = POINT_COLOUR_VALUE;
-		Node->G = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
-		Node->B = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 5.0);
+		R = POINT_COLOUR_VALUE;
+		G = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
+		B = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 5.0);
 	}
+#ifdef USE_GL
+	Node->R = R;
+	Node->G = G;
+	Node->B = B;
+#else
+	Node->Colour =
+		(((unsigned int)((R * 255) + 0.5)) << 16) +
+		(((unsigned int)((G * 255) + 0.5)) << 8) +
+		(((unsigned int)((B * 255) + 0.5)));
+#endif
 }
 
 static void filter_enum_field(viewer_t *Viewer, field_t *Field) {
@@ -352,7 +370,11 @@ static void set_viewer_colour_index(viewer_t *Viewer, int CIndex) {
 			if (Value > 0.0) {
 				set_node_rgb(Node, 6.0 * (Value - Min) / Range);
 			} else {
+#ifdef USE_GL
 				Node->R = Node->G = Node->B = POINT_COLOUR_SATURATION;
+#else
+				Node->Colour = 0x808080;
+#endif
 			}
 			++Node;
 			++CValue;
@@ -694,7 +716,7 @@ static void edit_node_values(viewer_t *Viewer) {
 	++Viewer->FilterGeneration;
 }
 
-static int redraw_point(viewer_t *Viewer, node_t *Node) {
+static inline int redraw_point(viewer_t *Viewer, node_t *Node) {
 #ifdef USE_GL
 	//double X = (Node->X - Viewer->Min.X) / (Viewer->Max.X - Viewer->Min.X);
 	//double Y = (Node->Y - Viewer->Min.Y) / (Viewer->Max.Y - Viewer->Min.Y);
@@ -727,11 +749,22 @@ static int redraw_point(viewer_t *Viewer, node_t *Node) {
 #else
 	double X = Viewer->Scale.X * (Node->X - Viewer->Min.X);
 	double Y = Viewer->Scale.Y * (Node->Y - Viewer->Min.Y);
-	cairo_t *Cairo = Viewer->Cairo;
+	int X0 = (X - Viewer->PointSize / 2) + 0.5;
+	int Y0 = (Y - Viewer->PointSize / 2) + 0.5;
+	int Stride = Viewer->CachedStride;
+	unsigned int *Pixels = Viewer->CachedPixels + X0;
+	Pixels = (unsigned int *)((char *)Pixels + Y0 * Stride);
+	unsigned int Colour = Node->Colour;
+	int PointSize = Viewer->PointSize;
+	for (int J = PointSize; --J >= 0;) {
+		for (int I = 0; I < PointSize; ++I) Pixels[I] = Colour;
+		Pixels = (unsigned int *)((char *)Pixels + Stride);
+	}
+	/*cairo_t *Cairo = Viewer->Cairo;
 	cairo_new_path(Cairo);
 	cairo_rectangle(Cairo, X - Viewer->PointSize / 2, Y - Viewer->PointSize / 2, Viewer->PointSize, Viewer->PointSize);
 	cairo_set_source_rgb(Cairo, Node->R, Node->G, Node->B);
-	cairo_fill(Cairo);
+	cairo_fill(Cairo);*/
 #endif
 	return 0;
 }
@@ -1025,7 +1058,19 @@ static void resize_viewer(GtkWidget *Widget, GdkRectangle *Allocation, viewer_t 
 	if (Viewer->CachedBackground) {
 		cairo_surface_destroy(Viewer->CachedBackground);
 	}
-	Viewer->CachedBackground = cairo_image_surface_create(CAIRO_FORMAT_RGB24, Allocation->width, Allocation->height);
+	int PointSize = Viewer->PointSize;
+	unsigned char *Pixels = malloc(4 * (Allocation->width + 2 * PointSize) * (Allocation->height + 2 * PointSize));
+	int Stride = (Allocation->width + 2 * PointSize) * sizeof(unsigned int);
+	Viewer->CachedBackground = cairo_image_surface_create_for_data(
+		Pixels + PointSize * Stride + PointSize * sizeof(int),
+		CAIRO_FORMAT_RGB24,
+		Allocation->width,
+		Allocation->height,
+		Stride
+	);
+	//cairo_image_surface_create(CAIRO_FORMAT_RGB24, Allocation->width, Allocation->height);
+	Viewer->CachedPixels = (unsigned int *)cairo_image_surface_get_data(Viewer->CachedBackground);
+	Viewer->CachedStride = cairo_image_surface_get_stride(Viewer->CachedBackground);
 #endif
 	redraw_viewer_background(Viewer);
 	//update_preview(Viewer);
