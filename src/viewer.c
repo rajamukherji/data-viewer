@@ -32,10 +32,13 @@ typedef struct {
 } range_t;
 
 struct node_t {
-	node_t *Children[4];
+	viewer_t *Viewer;
 	const char *FileName;
 	GdkPixbuf *Pixbuf;
 	node_t *CacheNext, *CachePrev;
+	node_t *LoadNext, *LoadPrev;
+	GCancellable *LoadCancel;
+	GInputStream *LoadStream;
 	double X, Y;
 #ifdef USE_GL
 	double R, G, B;
@@ -44,6 +47,7 @@ struct node_t {
 #endif
 	int Filtered;
 	int Timestamp;
+	int LoadGeneration;
 };
 
 struct field_t {
@@ -85,6 +89,7 @@ struct viewer_t {
 	node_t *Nodes;
 	node_t **XHead, **YHead;
 	cairo_t *Cairo;
+	node_t *LoadHead, *LoadTail;
 #ifdef USE_GL
 	float *GLVertices, *GLColours;
 #else
@@ -100,7 +105,7 @@ struct viewer_t {
 	double PointSize, BoxSize, EditValue;
 	int NumNodes, NumVisibleNodes, NumFields, NumCachedImages, NumVisibleImages;
 	int XIndex, YIndex, CIndex;
-	int FilterGeneration, Timestamp;
+	int FilterGeneration, LoadGeneration;
 #ifdef USE_GL
 	int GLCount, GLReady;
 	GLuint GLArrays[2], GLBuffers[4];
@@ -109,6 +114,7 @@ struct viewer_t {
 };
 
 static inline int foreach_node(viewer_t *Viewer, double X1, double Y1, double X2, double Y2, void *Data, node_callback_t *Callback) {
+	static int Timestamp = 0;
 	if (Viewer->NumVisibleNodes <=0) return 0;
 	clock_t Start = clock();
 	printf("foreach_node:%d @ %d\n", __LINE__, clock() - Start);
@@ -139,7 +145,7 @@ static inline int foreach_node(viewer_t *Viewer, double X1, double Y1, double X2
 		}
 	}
 	Mid2 = Max;
-	int Timestamp = ++Viewer->Timestamp;
+	++Timestamp;
 	printf("foreach_node:%d @ %d\n", __LINE__, clock() - Start);
 	printf("Limits = (%f, %f) - (%f, %f)\n", X1, Y1, X2, Y2);
 	printf("\tXRange = [%d - %d], %f - %f\n", Mid1, Mid2, Nodes[Mid1]->X, Nodes[Mid2]->X);
@@ -248,7 +254,6 @@ static void set_viewer_indices(viewer_t *Viewer, int XIndex, int YIndex) {
 	for (int I = NumNodes; --I >= 0;) {
 		Node->X = *XValue;
 		Node->Y = *YValue;
-		Node->Children[0] = Node->Children[1] = Node->Children[2] = Node->Children[3] = 0;
 		++Node;
 		++XValue;
 		++YValue;
@@ -506,6 +511,7 @@ static void viewer_open_file(viewer_t *Viewer, const char *CsvFileName) {
 	Viewer->XHead = (node_t **)malloc(NumNodes * sizeof(node_t *));
 	Viewer->YHead = (node_t **)malloc(NumNodes * sizeof(node_t *));
 	memset(Nodes, 0, NumNodes * sizeof(node_t));
+	for (int I = 0; I < NumNodes; ++I) Nodes[I].Viewer = Viewer;
 	field_t **Fields = Viewer->Fields = (field_t **)malloc(NumFields * sizeof(field_t *));
 	for (int I = 0; I < NumFields; ++I) {
 		field_t *Field = Fields[I] = (field_t *)malloc(sizeof(field_t) + NumNodes * sizeof(double));
@@ -612,11 +618,45 @@ static GdkPixbuf *get_node_pixbuf(viewer_t *Viewer, node_t *Node) {
 	return Node->Pixbuf;
 }
 
+static void draw_node_image_ready(GObject *Source, GAsyncResult *Result, node_t *Node) {
+	viewer_t *Viewer = Node->Viewer;
+	GError *Error;
+	g_input_stream_close(Node->LoadStream, 0, &Error);
+	GdkPixbuf *Pixbuf = gdk_pixbuf_new_from_stream_finish(Result, &Error);
+
+	if (!Pixbuf) {
+		guchar *Pixels = malloc(128 * 192 * 4);
+		cairo_surface_t *Surface = cairo_image_surface_create_for_data(Pixels, CAIRO_FORMAT_ARGB32, 128, 192, 128 * 4);
+		cairo_t *Cairo = cairo_create(Surface);
+		cairo_rectangle(Cairo, 0.0, 0.0, 128.0, 192.0);
+		cairo_set_source_rgb(Cairo,
+			(Node->X - Viewer->DataMin.X) / (Viewer->DataMax.X - Viewer->DataMin.X),
+			1.0,
+			(Node->Y - Viewer->DataMin.Y) / (Viewer->DataMax.Y - Viewer->DataMin.Y)
+		);
+		cairo_fill(Cairo);
+		cairo_destroy(Cairo);
+		cairo_surface_destroy(Surface);
+		Pixbuf = gdk_pixbuf_new_from_data(Pixels, GDK_COLORSPACE_RGB, TRUE, 8, 128, 192, 128 * 4, (void *)free, 0);
+	}
+	if (Node->LoadGeneration == Viewer->LoadGeneration) {
+		GdkPixbuf *Pixbuf = get_node_pixbuf(Viewer, Node);
+		gtk_list_store_insert_with_values(Viewer->ImagesStore, 0, -1, 0, Node->FileName, 1, Pixbuf, -1);
+	}
+}
+
 static int draw_node_image(viewer_t *Viewer, node_t *Node) {
 	++Viewer->NumVisibleImages;
 	if (Viewer->NumVisibleImages <= MAX_VISIBLE_IMAGES) {
-		GdkPixbuf *Pixbuf = get_node_pixbuf(Viewer, Node);
-		gtk_list_store_insert_with_values(Viewer->ImagesStore, 0, -1, 0, Node->FileName, 1, Pixbuf, -1);
+		if (Node->Pixbuf) {
+			gtk_list_store_insert_with_values(Viewer->ImagesStore, 0, -1, 0, Node->FileName, 1, Node->Pixbuf, -1);
+		} else if (!Node->LoadStream) {
+			Node->LoadGeneration = Viewer->LoadGeneration;
+		} else {
+			Node->LoadGeneration = Viewer->LoadGeneration;
+			// open Node->LoadStream
+			// load asynchronously useing draw_node_image_ready
+		}
 	}
 	return 0;
 }
@@ -683,6 +723,7 @@ static void update_preview(viewer_t *Viewer) {
 	double X2 = Viewer->Min.X + (Viewer->Pointer.X + Viewer->BoxSize / 2) / Viewer->Scale.X;
 	double Y2 = Viewer->Min.Y + (Viewer->Pointer.Y + Viewer->BoxSize / 2) / Viewer->Scale.Y;
 	if (Viewer->ImagesStore) {
+		++Viewer->LoadGeneration;
 		gtk_list_store_clear(Viewer->ImagesStore);
 		printf("\n\n%s:%d\n", __FUNCTION__, __LINE__);
 		foreach_node(Viewer, X1, Y1, X2, Y2, Viewer, (node_callback_t *)draw_node_image);
@@ -1022,7 +1063,7 @@ static void redraw_viewer_background(viewer_t *Viewer) {
 	Viewer->GLCount = 0;
 	clock_t Start = clock();
 	printf("\n\n%s:%d\n", __FUNCTION__, __LINE__);
-	foreach_node(Viewer->Root, Viewer->Min.X, Viewer->Min.Y, Viewer->Max.X, Viewer->Max.Y, Viewer, (node_callback_t *)redraw_point);
+	foreach_node(Viewer, Viewer->Min.X, Viewer->Min.Y, Viewer->Max.X, Viewer->Max.Y, Viewer, (node_callback_t *)redraw_point);
 	printf("foreach_node took %d\n", clock() - Start);
 	printf("rendered %d points\n", Viewer->GLCount);
 	if (Viewer->GLReady) {
@@ -1747,6 +1788,9 @@ static viewer_t *create_viewer(const char *CsvFileName) {
 	Viewer->EditField = 0;
 	Viewer->Filters = 0;
 	Viewer->FilterGeneration = 1;
+	Viewer->LoadHead = 0;
+	Viewer->LoadTail = 0;
+	Viewer->LoadGeneration = 0;
 	Viewer->FieldsStore = gtk_list_store_new(2, G_TYPE_STRING, G_TYPE_INT);
 
 	GtkWidget *MainWindow = Viewer->MainWindow = gtk_window_new(GTK_WINDOW_TOPLEVEL);
