@@ -35,7 +35,6 @@ struct node_t {
 	viewer_t *Viewer;
 	const char *FileName;
 	GdkPixbuf *Pixbuf;
-	node_t *CacheNext, *CachePrev;
 	node_t *LoadNext, *LoadPrev;
 	GCancellable *LoadCancel;
 	GInputStream *LoadStream;
@@ -55,7 +54,7 @@ struct field_t {
 	GHashTable *EnumHash;
 	GtkListStore *EnumStore;
 	const char **EnumNames;
-	double *EnumValues;
+	int *EnumValues;
 	GtkTreeViewColumn *PreviewColumn;
 	range_t Range;
 	int EnumSize;
@@ -89,7 +88,7 @@ struct viewer_t {
 	node_t *Nodes;
 	node_t **XHead, **YHead;
 	cairo_t *Cairo;
-	node_t *LoadHead, *LoadTail;
+	node_t **LoadCache;
 #ifdef USE_GL
 	float *GLVertices, *GLColours;
 #else
@@ -106,6 +105,7 @@ struct viewer_t {
 	int NumNodes, NumVisibleNodes, NumFields, NumCachedImages, NumVisibleImages;
 	int XIndex, YIndex, CIndex;
 	int FilterGeneration, LoadGeneration;
+	int LoadCacheIndex;
 #ifdef USE_GL
 	int GLCount, GLReady;
 	GLuint GLArrays[2], GLBuffers[4];
@@ -326,6 +326,7 @@ static inline void set_node_rgb(node_t *Node, double H) {
 	Node->B = B;
 #else
 	Node->Colour =
+		(((unsigned int)255) << 24) +
 		(((unsigned int)((R * 255) + 0.5)) << 16) +
 		(((unsigned int)((G * 255) + 0.5)) << 8) +
 		(((unsigned int)((B * 255) + 0.5)));
@@ -336,17 +337,14 @@ static void filter_enum_field(viewer_t *Viewer, field_t *Field) {
 	printf("filter_enum_field(%s)\n", Field->Name);
 	node_t *Node = Viewer->Nodes;
 	int NumNodes = Viewer->NumNodes;
-	double *EnumValues = Field->EnumValues;
-	memset(EnumValues, 0, Field->EnumSize * sizeof(double));
-	double Max = 0.0;
+	int *EnumValues = Field->EnumValues;
+	memset(EnumValues, 0, Field->EnumSize * sizeof(int));
+	int Max = 0;
 	double *Value = Field->Values;
 	for (int I = NumNodes; --I >= 0;) {
 		if (!Node->Filtered) {
 			int Index = (int)Value[0];
-			if (Index && (EnumValues[Index] == 0.0)) {
-				Max += 1.0;
-				EnumValues[Index] = Max;
-			}
+			if (Index && !EnumValues[Index]) EnumValues[Index] = ++Max;
 		}
 		++Node;
 		++Value;
@@ -360,31 +358,31 @@ static void set_viewer_colour_index(viewer_t *Viewer, int CIndex) {
 	Viewer->CIndex = CIndex;
 	int NumNodes = Viewer->NumNodes;
 	field_t *CField = Viewer->Fields[CIndex];
-	double Min = CField->Range.Min;
-	double Range = CField->Range.Max - Min;
 	node_t *Node = Viewer->Nodes;
 	double *CValue = CField->Values;
 	if (CField->EnumStore) {
 		if (CField->FilterGeneration != Viewer->FilterGeneration) {
 			filter_enum_field(Viewer, CField);
 		}
-		double *EnumValues = CField->EnumValues;
-		Range += 1.0;
+		int *EnumValues = CField->EnumValues;
+		double Range = CField->Range.Max + 1;
 		for (int I = NumNodes; --I >= 0;) {
-			double Value = EnumValues[(int)CValue[0]];
+			int Value = EnumValues[(int)CValue[0]];
 			if (Value > 0.0) {
-				set_node_rgb(Node, 6.0 * (Value - Min) / Range);
+				set_node_rgb(Node, 6.0 * Value / Range);
 			} else {
 #ifdef USE_GL
 				Node->R = Node->G = Node->B = POINT_COLOUR_SATURATION;
 #else
-				Node->Colour = 0x808080;
+				Node->Colour = 0xFF808080;
 #endif
 			}
 			++Node;
 			++CValue;
 		}
 	} else {
+		double Min = CField->Range.Min;
+		double Range = CField->Range.Max - Min;
 		if (Range <= 1.0e-6) Range = 1.0;
 		Range += CField->SD;
 		for (int I = NumNodes; --I >= 0;) {
@@ -556,7 +554,7 @@ static void viewer_open_file(viewer_t *Viewer, const char *CsvFileName) {
 			for (int J = 0; J < EnumSize; ++J) {
 				gtk_list_store_insert_with_values(Field->EnumStore, 0, -1, 0, Field->EnumNames[J], 1, (double)(J + 1), -1);
 			}
-			Field->EnumValues = (double *)malloc(EnumSize * sizeof(double));
+			Field->EnumValues = (int *)malloc(EnumSize * sizeof(int));
 		} else {
 			double Mean = Field->Sum / Viewer->NumNodes;
 			Field->SD = sqrt((Field->Sum2 / Viewer->NumNodes) - Mean * Mean);
@@ -567,64 +565,16 @@ static void viewer_open_file(viewer_t *Viewer, const char *CsvFileName) {
 	set_viewer_colour_index(Viewer, Viewer->NumFields - 1);
 }
 
-static GdkPixbuf *get_node_pixbuf(viewer_t *Viewer, node_t *Node) {
-	if (Node->Pixbuf) {
-		if (Node->CachePrev) {
-			Node->CachePrev->CacheNext = Node->CacheNext;
-		} else {
-			Viewer->CacheHead = Node->CacheNext;
-		}
-		if (Node->CacheNext) {
-			Node->CacheNext->CachePrev = Node->CachePrev;
-		} else {
-			Viewer->CacheTail = Node->CachePrev;
-		}
-		Node->CacheNext = Node->CachePrev = 0;
-	} else {
-		if (Viewer->NumCachedImages == MAX_CACHED_IMAGES) {
-			node_t *LRU = Viewer->CacheHead;
-			Viewer->CacheHead = LRU->CacheNext;
-			Viewer->CacheHead->CachePrev = 0;
-			g_object_unref(LRU->Pixbuf);
-			LRU->Pixbuf = 0;
-		} else {
-			++Viewer->NumCachedImages;
-		}
-		GError *Error = 0;
-		Node->Pixbuf = gdk_pixbuf_new_from_file_at_size(Node->FileName, 128, 192, &Error);
-		if (!Node->Pixbuf) {
-			guchar *Pixels = malloc(128 * 192 * 4);
-			cairo_surface_t *Surface = cairo_image_surface_create_for_data(Pixels, CAIRO_FORMAT_ARGB32, 128, 192, 128 * 4);
-			cairo_t *Cairo = cairo_create(Surface);
-			cairo_rectangle(Cairo, 0.0, 0.0, 128.0, 192.0);
-			cairo_set_source_rgb(Cairo,
-				(Node->X - Viewer->DataMin.X) / (Viewer->DataMax.X - Viewer->DataMin.X),
-				1.0,
-				(Node->Y - Viewer->DataMin.Y) / (Viewer->DataMax.Y - Viewer->DataMin.Y)
-			);
-			cairo_fill(Cairo);
-			cairo_destroy(Cairo);
-			cairo_surface_destroy(Surface);
-			Node->Pixbuf = gdk_pixbuf_new_from_data(Pixels, GDK_COLORSPACE_RGB, TRUE, 8, 128, 192, 128 * 4, (void *)free, 0);
-		}
-	}
-	if (Viewer->CacheTail) {
-		Node->CachePrev = Viewer->CacheTail;
-		Viewer->CacheTail->CacheNext = Node;
-		Viewer->CacheTail = Node;
-	} else {
-		Viewer->CacheHead = Viewer->CacheTail = Node;
-	}
-	return Node->Pixbuf;
-}
-
-static void draw_node_image_ready(GObject *Source, GAsyncResult *Result, node_t *Node) {
+static void draw_node_image_loaded(GObject *Source, GAsyncResult *Result, node_t *Node) {
 	viewer_t *Viewer = Node->Viewer;
-	GError *Error;
-	g_input_stream_close(Node->LoadStream, 0, &Error);
-	GdkPixbuf *Pixbuf = gdk_pixbuf_new_from_stream_finish(Result, &Error);
-
-	if (!Pixbuf) {
+	g_input_stream_close(Node->LoadStream, 0, 0);
+	Node->LoadStream = 0;
+	gboolean Cancelled = g_cancellable_is_cancelled(Node->LoadCancel);
+	g_object_unref(G_OBJECT(Node->LoadCancel));
+	Node->LoadCancel = 0;
+	if (Cancelled) return;
+	Node->Pixbuf = gdk_pixbuf_new_from_stream_finish(Result, 0);
+	if (!Node->Pixbuf) {
 		guchar *Pixels = malloc(128 * 192 * 4);
 		cairo_surface_t *Surface = cairo_image_surface_create_for_data(Pixels, CAIRO_FORMAT_ARGB32, 128, 192, 128 * 4);
 		cairo_t *Cairo = cairo_create(Surface);
@@ -637,25 +587,63 @@ static void draw_node_image_ready(GObject *Source, GAsyncResult *Result, node_t 
 		cairo_fill(Cairo);
 		cairo_destroy(Cairo);
 		cairo_surface_destroy(Surface);
-		Pixbuf = gdk_pixbuf_new_from_data(Pixels, GDK_COLORSPACE_RGB, TRUE, 8, 128, 192, 128 * 4, (void *)free, 0);
+		Node->Pixbuf = gdk_pixbuf_new_from_data(Pixels, GDK_COLORSPACE_RGB, TRUE, 8, 128, 192, 128 * 4, (void *)free, 0);
 	}
 	if (Node->LoadGeneration == Viewer->LoadGeneration) {
-		GdkPixbuf *Pixbuf = get_node_pixbuf(Viewer, Node);
-		gtk_list_store_insert_with_values(Viewer->ImagesStore, 0, -1, 0, Node->FileName, 1, Pixbuf, -1);
+		gtk_list_store_insert_with_values(Viewer->ImagesStore, 0, -1, 0, Node->FileName, 1, Node->Pixbuf, -1);
 	}
 }
 
 static int draw_node_image(viewer_t *Viewer, node_t *Node) {
 	++Viewer->NumVisibleImages;
 	if (Viewer->NumVisibleImages <= MAX_VISIBLE_IMAGES) {
+		Node->LoadGeneration = Viewer->LoadGeneration;
 		if (Node->Pixbuf) {
 			gtk_list_store_insert_with_values(Viewer->ImagesStore, 0, -1, 0, Node->FileName, 1, Node->Pixbuf, -1);
 		} else if (!Node->LoadStream) {
-			Node->LoadGeneration = Viewer->LoadGeneration;
-		} else {
-			Node->LoadGeneration = Viewer->LoadGeneration;
-			// open Node->LoadStream
-			// load asynchronously useing draw_node_image_ready
+			int Index = Viewer->LoadCacheIndex;
+			node_t **Cache = Viewer->LoadCache;
+			while (Cache[Index] && (Cache[Index]->LoadGeneration == Viewer->LoadGeneration)) {
+				Index = (Index + 1) % MAX_CACHED_IMAGES;
+			}
+			if (Cache[Index]) {
+				node_t *OldNode = Cache[Index];
+				if (OldNode->Pixbuf) {
+					g_object_unref(G_OBJECT(OldNode->Pixbuf));
+					OldNode->Pixbuf = 0;
+				} else if (OldNode->LoadCancel) {
+					g_cancellable_cancel(OldNode->LoadCancel);
+				}
+			}
+			Cache[Index] = Node;
+			Viewer->LoadCacheIndex = Index;
+			GFile *File = g_file_new_for_path(Node->FileName);
+			if ((Node->LoadStream = G_INPUT_STREAM(g_file_read(File, 0, 0)))) {
+				Node->LoadCancel = g_cancellable_new();
+				gdk_pixbuf_new_from_stream_at_scale_async(
+					Node->LoadStream,
+					128, 192, TRUE,
+					Node->LoadCancel,
+					(void *)draw_node_image_loaded,
+					Node
+				);
+			} else {
+				guchar *Pixels = malloc(128 * 192 * 4);
+				cairo_surface_t *Surface = cairo_image_surface_create_for_data(Pixels, CAIRO_FORMAT_ARGB32, 128, 192, 128 * 4);
+				cairo_t *Cairo = cairo_create(Surface);
+				cairo_rectangle(Cairo, 0.0, 0.0, 128.0, 192.0);
+				cairo_set_source_rgb(Cairo,
+					(Node->X - Viewer->DataMin.X) / (Viewer->DataMax.X - Viewer->DataMin.X),
+					1.0,
+					(Node->Y - Viewer->DataMin.Y) / (Viewer->DataMax.Y - Viewer->DataMin.Y)
+				);
+				cairo_fill(Cairo);
+				cairo_destroy(Cairo);
+				cairo_surface_destroy(Surface);
+				Node->Pixbuf = gdk_pixbuf_new_from_data(Pixels, GDK_COLORSPACE_RGB, TRUE, 8, 128, 192, 128 * 4, (void *)free, 0);
+				gtk_list_store_insert_with_values(Viewer->ImagesStore, 0, -1, 0, Node->FileName, 1, Node->Pixbuf, -1);
+			}
+			g_object_unref(G_OBJECT(File));
 		}
 	}
 	return 0;
@@ -754,7 +742,10 @@ static void edit_node_values(viewer_t *Viewer) {
 	double Y2 = Viewer->Min.Y + (Viewer->Pointer.Y + Viewer->BoxSize / 2) / Viewer->Scale.Y;
 	printf("\n\n%s:%d\n", __FUNCTION__, __LINE__);
 	foreach_node(Viewer, X1, Y1, X2, Y2, Viewer, (node_callback_t *)edit_node_value);
-	++Viewer->FilterGeneration;
+	if (Viewer->EditField == Viewer->Fields[Viewer->CIndex]) {
+		++Viewer->FilterGeneration;
+		set_viewer_colour_index(Viewer, Viewer->CIndex);
+	}
 }
 
 static inline int redraw_point(viewer_t *Viewer, node_t *Node) {
@@ -1104,7 +1095,7 @@ static void resize_viewer(GtkWidget *Widget, GdkRectangle *Allocation, viewer_t 
 	int Stride = (Allocation->width + 2 * PointSize) * sizeof(unsigned int);
 	Viewer->CachedBackground = cairo_image_surface_create_for_data(
 		Pixels + PointSize * Stride + PointSize * sizeof(int),
-		CAIRO_FORMAT_RGB24,
+		CAIRO_FORMAT_ARGB32,
 		Allocation->width,
 		Allocation->height,
 		Stride
@@ -1230,6 +1221,7 @@ static void y_field_changed(GtkComboBox *Widget, viewer_t *Viewer) {
 }
 
 static void c_field_changed(GtkComboBox *Widget, viewer_t *Viewer) {
+	++Viewer->FilterGeneration;
 	set_viewer_colour_index(Viewer, gtk_combo_box_get_active(Widget));
 	redraw_viewer_background(Viewer);
 	update_preview(Viewer);
@@ -1317,10 +1309,10 @@ static void add_field_callback(const char *Name, viewer_t *Viewer, void *Data) {
 	field_t *Field = (field_t *)malloc(sizeof(field_t) + Viewer->NumNodes * sizeof(double));
 	Field->EnumStore = gtk_list_store_new(2, G_TYPE_STRING, G_TYPE_DOUBLE);
 	Field->EnumNames = (const char **)malloc(sizeof(const char *));
-	Field->EnumValues = (double *)malloc(sizeof(double));
+	Field->EnumValues = (int *)malloc(sizeof(int));
 	Field->EnumNames[0] = "";
+	Field->EnumSize = 1;
 	Field->Name = Name;
-	Field->Range.Min = Field->Range.Max = 0;
 	Field->PreviewIndex = -1;
 	Field->PreviewColumn = 0;
 	Field->FilterGeneration = 0;
@@ -1351,10 +1343,11 @@ static void add_value_callback(const char *Name, viewer_t *Viewer, void *Data) {
 	free(Field->EnumNames);
 	Field->EnumNames = EnumNames;
 	free(Field->EnumValues);
-	Field->EnumValues = (double *)malloc((Value + 1) * sizeof(double));
-	Field->Range.Max = Value;
-	gtk_combo_box_set_active(GTK_COMBO_BOX(Viewer->EditValueComboBox), Value - 1);
+	Field->EnumSize = Value + 1;
+	Field->EnumValues = (int *)malloc(Field->EnumSize * sizeof(int));
+	gtk_combo_box_set_active(GTK_COMBO_BOX(Viewer->EditValueComboBox), Value);
 	if (Field == Viewer->Fields[Viewer->CIndex]) {
+		++Viewer->FilterGeneration;
 		set_viewer_colour_index(Viewer, Viewer->CIndex);
 		redraw_viewer_background(Viewer);
 		gtk_widget_queue_draw(Viewer->DrawingArea);
@@ -1788,9 +1781,9 @@ static viewer_t *create_viewer(const char *CsvFileName) {
 	Viewer->EditField = 0;
 	Viewer->Filters = 0;
 	Viewer->FilterGeneration = 1;
-	Viewer->LoadHead = 0;
-	Viewer->LoadTail = 0;
 	Viewer->LoadGeneration = 0;
+	Viewer->LoadCache = (node_t **)calloc(MAX_CACHED_IMAGES, sizeof(node_t *));
+	Viewer->LoadCacheIndex = 0;
 	Viewer->FieldsStore = gtk_list_store_new(2, G_TYPE_STRING, G_TYPE_INT);
 
 	GtkWidget *MainWindow = Viewer->MainWindow = gtk_window_new(GTK_WINDOW_TOPLEVEL);
