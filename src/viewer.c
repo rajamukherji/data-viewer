@@ -13,11 +13,13 @@
 
 #define MAX_CACHED_IMAGES 1024
 #define MAX_VISIBLE_IMAGES 64
+#define BATCH_SORT_SIZE (1 << 10)
 #define POINT_COLOUR_CHROMA 0.5
 #define POINT_COLOUR_SATURATION 0.7
 #define POINT_COLOUR_VALUE 0.9
 
 typedef struct node_t node_t;
+typedef struct node_batch_t node_batch_t;
 typedef int node_callback_t(void *Data, node_t *Node);
 typedef struct field_t field_t;
 typedef struct filter_t filter_t;
@@ -47,6 +49,12 @@ struct node_t {
 	int Filtered;
 	int Timestamp;
 	int LoadGeneration;
+};
+
+struct node_batch_t {
+	node_t **Nodes;
+	double XMin, XMax;
+	int NumNodes;
 };
 
 struct field_t {
@@ -82,11 +90,13 @@ struct viewer_t {
 	GtkWidget *DrawingArea;
 	GtkWidget *PreviewWidget;
 	GtkWidget *XComboBox, *YComboBox, *CComboBox, *EditFieldComboBox, *EditValueComboBox;
+	GdkCursor *Cursor;
 	GtkListStore *ImagesStore, *ValuesStore;
 	GtkListStore *FieldsStore;
 	GtkListStore *OperatorsStore;
 	node_t *Nodes;
-	node_t **XHead, **YHead;
+	node_t **Sorted, **SortBuffer;
+	node_batch_t *SortedBatches;
 	cairo_t *Cairo;
 	node_t **LoadCache;
 #ifdef USE_GL
@@ -102,7 +112,7 @@ struct viewer_t {
 	int *Filtered;
 	point_t Min, Max, Scale, DataMin, DataMax, Pointer;
 	double PointSize, BoxSize, EditValue;
-	int NumNodes, NumVisibleNodes, NumFields, NumCachedImages, NumVisibleImages;
+	int NumNodes, NumBatches, NumFields, NumCachedImages, NumVisibleImages;
 	int XIndex, YIndex, CIndex;
 	int FilterGeneration, LoadGeneration;
 	int LoadCacheIndex;
@@ -113,133 +123,174 @@ struct viewer_t {
 #endif
 };
 
-static inline int foreach_node(viewer_t *Viewer, double X1, double Y1, double X2, double Y2, void *Data, node_callback_t *Callback) {
-	static int Timestamp = 0;
-	if (Viewer->NumVisibleNodes <=0) return 0;
+static inline void foreach_node_y(viewer_t *Viewer, double X1, double Y1, double X2, double Y2, void *Data, node_callback_t *Callback, node_batch_t *Batch) {
+	int Min = 0;
+	int Max = Batch->NumNodes - 1;
+	node_t **Nodes = Batch->Nodes;
+	if (Nodes[Min]->Y > Y2) return;
+	if (Nodes[Max]->Y < Y1) return;
+	int Mid1;
+	if (Nodes[Min]->Y >= Y1) {
+		Mid1 = Min;
+	} else {
+		do {
+			Mid1 = (Min + Max) / 2;
+			if (Nodes[Mid1]->Y < Y1) {
+				Min = ++Mid1;
+			} else {
+				Max = Mid1;
+			}
+		} while (Min < Max);
+	}
+	Min = Mid1;
+	Max = Batch->NumNodes - 1;
+	int Mid2;
+	if (Nodes[Max]->Y <= Y2) {
+		Mid2 = Max;
+	} else {
+		do {
+			Mid2 = (Min + Max + 1) / 2;
+			if (Nodes[Mid2]->Y > Y2) {
+				Max = --Mid2;
+			} else {
+				Min = Mid2;
+			}
+		} while (Min < Max);
+	}
+#ifdef DEBUG
+	printf("\tYRange = [%d - %d], %f - %f\n", Mid1, Mid2, Nodes[Mid1]->Y, Nodes[Mid2]->Y);
+#endif
+	if (Batch->XMin >= X1) {
+		if (Batch->XMax <= X2) {
+			for (int I = Mid1; I <= Mid2; ++I) Callback(Data, Nodes[I]);
+		} else {
+			for (int I = Mid1; I <= Mid2; ++I) {
+				if (Nodes[I]->X <= X2) Callback(Data, Nodes[I]);
+			}
+		}
+	} else if (Batch->XMax <= X2) {
+		for (int I = Mid1; I <= Mid2; ++I) {
+			if (Nodes[I]->X >= X1) Callback(Data, Nodes[I]);
+		}
+	} else {
+		for (int I = Mid1; I <= Mid2; ++I) {
+			if (Nodes[I]->X >= X1) if (Nodes[I]->X <= X2) Callback(Data, Nodes[I]);
+		}
+	}
+}
+
+static inline void foreach_node(viewer_t *Viewer, double X1, double Y1, double X2, double Y2, void *Data, node_callback_t *Callback) {
+	if (Viewer->NumBatches <=0) return;
 	clock_t Start = clock();
 	printf("foreach_node:%d @ %d\n", __LINE__, clock() - Start);
 	int Min = 0;
-	int Max = Viewer->NumVisibleNodes;
-	node_t **Nodes = Viewer->XHead;
-	int Mid1 = (Min + Max) / 2;
-	while (Max - Min > 1) {
-		if (Nodes[Mid1]->X < X1) {
-			Min = Mid1;
-			Mid1 = (Mid1 + Max) / 2;
-		} else {
-			Max = Mid1;
-			Mid1 = (Min + Mid1) / 2;
-		}
+	int Max = Viewer->NumBatches - 1;
+	node_batch_t *Batches = Viewer->SortedBatches;
+	if (Batches[Min].XMin > X2) return;
+	if (Batches[Max].XMax < X1) return;
+	int Mid1;
+	if (Batches[Min].XMin >= X1) {
+		Mid1 = Min;
+	} else {
+		do {
+			Mid1 = (Min + Max) / 2;
+			if (Batches[Mid1].XMax < X1) {
+				Min = Mid1 + 1;
+			} else if (Batches[Mid1].XMin < X1) {
+				break;
+			} else {
+				Max = Mid1 - 1;
+			}
+		} while (Min <= Max);
 	}
-	Mid1 = Max;
 	Min = Mid1;
-	Max = Viewer->NumVisibleNodes;
-	int Mid2 = (Min + Max) / 2;
-	while (Max - Min > 1) {
-		if (Nodes[Mid2]->X <= X2) {
-			Min = Mid2;
-			Mid2 = (Mid2 + Max) / 2;
-		} else {
-			Max = Mid2;
-			Mid2 = (Min + Mid2) / 2;
-		}
+	Max = Viewer->NumBatches - 1;
+	int Mid2;
+	if (Batches[Max].XMax <= X2) {
+		Mid2 = Max;
+	} else {
+		do {
+			Mid2 = (Min + Max + 1) / 2;
+			if (Batches[Mid2].XMin > X2) {
+				Max = Mid2 - 1;
+			} else if (Batches[Mid2].XMax > X2) {
+				break;
+			} else {
+				Min = Mid2 + 1;
+			}
+		} while (Min <= Max);
 	}
-	Mid2 = Max;
-	++Timestamp;
 	printf("foreach_node:%d @ %d\n", __LINE__, clock() - Start);
 	printf("Limits = (%f, %f) - (%f, %f)\n", X1, Y1, X2, Y2);
-	printf("\tXRange = [%d - %d], %f - %f\n", Mid1, Mid2, Nodes[Mid1]->X, Nodes[Mid2]->X);
-	for (int I = Mid1; I < Mid2; ++I) Nodes[I]->Timestamp = Timestamp;
-	printf("foreach_node:%d @ %d\n", __LINE__, clock() - Start);
-	Min = 0;
-	Max = Viewer->NumVisibleNodes;
-	Nodes = Viewer->YHead;
-	Mid1 = (Min + Max) / 2;
-	while (Max - Min > 1) {
-		if (Nodes[Mid1]->Y < Y1) {
-			Min = Mid1;
-			Mid1 = (Mid1 + Max) / 2;
-		} else {
-			Max = Mid1;
-			Mid1 = (Min + Mid1) / 2;
-		}
-	}
-	Mid1 = Max;
-	Min = Mid1;
-	Max = Viewer->NumVisibleNodes;
-	Mid2 = (Min + Max) / 2;
-	while (Max - Min > 1) {
-		if (Nodes[Mid2]->Y <= Y2) {
-			Min = Mid2;
-			Mid2 = (Mid2 + Max) / 2;
-		} else {
-			Max = Mid2;
-			Mid2 = (Min + Mid2) / 2;
-		}
-	}
-	Mid2 = Max;
-	printf("foreach_node:%d @ %d\n", __LINE__, clock() - Start);
-	printf("\tYRange = [%d - %d], %f - %f\n", Mid1, Mid2, Nodes[Mid1]->Y, Nodes[Mid2]->Y);
-	for (int I = Mid1; I < Mid2; ++I) if (Nodes[I]->Timestamp == Timestamp) {
-		Callback(Data, Nodes[I]);
+	printf("\tXRange = [%d - %d], %f - %f\n", Mid1, Mid2, Batches[Mid1].XMin, Batches[Mid2].XMax);
+	for (int I = Mid1; I <= Mid2; ++I) {
+		foreach_node_y(Viewer, X1, Y1, X2, Y2, Data, Callback, &Batches[I]);
 	}
 	printf("foreach_node:%d @ %d\n", __LINE__, clock() - Start);
-	return 0;
 }
 
-static void sort_nodes_x(node_t **Min, node_t **Max) {
-	if (Min >= Max) return;
-	node_t *Pivot = *Min;
-	node_t *Temp = *Max;
-	node_t **Mid1 = Min;
-	node_t **Mid2 = Max;
-	while (Mid1 < Mid2) {
-		if (Temp->X < Pivot->X) {
-			*(Mid1++) = Temp;
-			Temp = *Mid1;
+static void merge_sort_x(node_t **Start, node_t **End, node_t **Buffer) {
+	node_t **Mid = Start + (End - Start) / 2;
+	if (Mid - Start > 1) merge_sort_x(Start, Mid, Buffer);
+	if (End - Mid > 1) merge_sort_x(Mid, End, Buffer);
+	node_t **A = Start;
+	node_t **B = Mid;
+	node_t **C = Buffer;
+	double XA = A[0]->X;
+	double XB = B[0]->X;
+	for (;;) {
+		if (XA <= XB) {
+			*C++ = *A++;
+			if (A < Mid) {
+				XA = A[0]->X;
+			} else {
+				memcpy(C, B, (End - B) * sizeof(node_t *));
+				break;
+			}
 		} else {
-			*(Mid2--) = Temp;
-			Temp = *Mid2;
+			*C++ = *B++;
+			if (B < End) {
+				XB = B[0]->X;
+			} else {
+				memcpy(C, A, (Mid - A) * sizeof(node_t *));
+				break;
+			}
 		}
 	}
-	*Mid1 = Pivot;
-	sort_nodes_x(Min, Mid1 - 1);
-	sort_nodes_x(Mid1 + 1, Max);
+	memcpy(Start, Buffer, (End - Start) * sizeof(node_t *));
 }
 
-static void sort_nodes_y(node_t **Min, node_t **Max) {
-	if (Min >= Max) return;
-	node_t *Pivot = *Min;
-	node_t *Temp = *Max;
-	node_t **Mid1 = Min;
-	node_t **Mid2 = Max;
-	while (Mid1 < Mid2) {
-		if (Temp->Y < Pivot->Y) {
-			*(Mid1++) = Temp;
-			Temp = *Mid1;
+static void merge_sort_y(node_t **Start, node_t **End, node_t **Buffer) {
+	node_t **Mid = Start + (End - Start) / 2;
+	if (Mid - Start > 1) merge_sort_y(Start, Mid, Buffer);
+	if (End - Mid > 1) merge_sort_y(Mid, End, Buffer);
+	node_t **A = Start;
+	node_t **B = Mid;
+	node_t **C = Buffer;
+	double YA = A[0]->Y;
+	double YB = B[0]->Y;
+	for (;;) {
+		if (YA <= YB) {
+			*C++ = *A++;
+			if (A < Mid) {
+				YA = A[0]->Y;
+			} else {
+				memcpy(C, B, (End - B) * sizeof(node_t *));
+				break;
+			}
 		} else {
-			*(Mid2--) = Temp;
-			Temp = *Mid2;
+			*C++ = *B++;
+			if (B < End) {
+				YB = B[0]->Y;
+			} else {
+				memcpy(C, A, (Mid - A) * sizeof(node_t *));
+				break;
+			}
 		}
 	}
-	*Mid1 = Pivot;
-	sort_nodes_y(Min, Mid1 - 1);
-	sort_nodes_y(Mid1 + 1, Max);
+	memcpy(Start, Buffer, (End - Start) * sizeof(node_t *));
 }
 
-int compare_nodes_x(node_t **A, node_t **B) {
-	double Diff = A[0]->X - B[0]->X;
-	if (Diff < 0) return -1;
-	if (Diff > 0) return 1;
-	return 0;
-}
-
-int compare_nodes_y(node_t **A, node_t **B) {
-	double Diff = A[0]->Y - B[0]->Y;
-	if (Diff < 0) return -1;
-	if (Diff > 0) return 1;
-	return 0;
-}
 
 static void set_viewer_indices(viewer_t *Viewer, int XIndex, int YIndex) {
 	Viewer->XIndex = XIndex;
@@ -262,21 +313,37 @@ static void set_viewer_indices(viewer_t *Viewer, int XIndex, int YIndex) {
 	node_t *Root = 0;
 	Node = Viewer->Nodes;
 	int I = NumNodes;
-	node_t **XTail = Viewer->XHead;
-	node_t **YTail = Viewer->YHead;
+	node_t **Sorted = Viewer->Sorted, **Tail = Sorted;
 	while (--I >= 0) {
-		if (!Node->Filtered) {
-			*(XTail++) = Node;
-			*(YTail++) = Node;
-		}
+		if (!Node->Filtered) *(Tail++) = Node;
 		++Node;
 	}
-	int NumVisibleNodes = Viewer->NumVisibleNodes = (XTail - 1) - Viewer->XHead;
-	//sort_nodes_x(Viewer->XHead, XTail - 1);
-	//sort_nodes_y(Viewer->YHead, YTail - 1);
-	if (NumVisibleNodes > 1) {
-		qsort(Viewer->XHead, NumVisibleNodes, sizeof(node_t *), (void *)compare_nodes_x);
-		qsort(Viewer->YHead, NumVisibleNodes, sizeof(node_t *), (void *)compare_nodes_y);
+	int NumVisibleNodes = Tail - Sorted;
+	if (NumVisibleNodes) {
+		clock_t Start = clock();
+		merge_sort_x(Sorted, Tail, Viewer->SortBuffer);
+		printf("merge_sort_x:%d @ %d\n", __LINE__, clock() - Start);
+		node_batch_t *Batch = Viewer->SortedBatches;
+		int LastBatch = (NumVisibleNodes - 1) & -BATCH_SORT_SIZE;
+		printf("NumVisibleNodes = %d, LastBatch = %d\n", NumVisibleNodes, LastBatch);
+		for (int I = 0; I < LastBatch; I += BATCH_SORT_SIZE) {
+			Batch->XMin = Sorted[0]->X;
+			Batch->XMax = Sorted[BATCH_SORT_SIZE - 1]->X;
+			Batch->Nodes = Sorted;
+			Batch->NumNodes = BATCH_SORT_SIZE;
+			merge_sort_y(Sorted, Sorted + BATCH_SORT_SIZE, Viewer->SortBuffer);
+			Sorted += BATCH_SORT_SIZE;
+			++Batch;
+		}
+		Batch->XMin = Sorted[0]->X;
+		Batch->XMax = Tail[-1]->X;
+		Batch->Nodes = Sorted;
+		Batch->NumNodes = Tail - Sorted;
+		merge_sort_y(Sorted, Tail, Viewer->SortBuffer);
+		printf("merge_sort_y:%d @ %d\n", __LINE__, clock() - Start);
+		Viewer->NumBatches = (Batch - Viewer->SortedBatches) + 1;
+	} else {
+		Viewer->NumBatches = 0;
 	}
 
 	double RangeX = XField->Range.Max - XField->Range.Min;
@@ -506,8 +573,9 @@ static void viewer_open_file(viewer_t *Viewer, const char *CsvFileName) {
 	int NumNodes = Viewer->NumNodes = Loader->Row - 1;
 	int NumFields = Viewer->NumFields;
 	node_t *Nodes = Viewer->Nodes = (node_t *)malloc(NumNodes * sizeof(node_t));
-	Viewer->XHead = (node_t **)malloc(NumNodes * sizeof(node_t *));
-	Viewer->YHead = (node_t **)malloc(NumNodes * sizeof(node_t *));
+	Viewer->Sorted = (node_t **)malloc(NumNodes * sizeof(node_t *));
+	Viewer->SortBuffer = (node_t **)malloc(NumNodes * sizeof(node_t *));
+	Viewer->SortedBatches = (node_batch_t *)malloc((NumNodes / BATCH_SORT_SIZE + 1) * sizeof(node_batch_t));
 	memset(Nodes, 0, NumNodes * sizeof(node_t));
 	for (int I = 0; I < NumNodes; ++I) Nodes[I].Viewer = Viewer;
 	field_t **Fields = Viewer->Fields = (field_t **)malloc(NumFields * sizeof(field_t *));
@@ -963,7 +1031,7 @@ static void load_gl_shaders(viewer_t *Viewer) {
 	Viewer->GLTransformLocation = glGetUniformLocation(ProgramID, "transform");
 }
 
-static void realize_viewer(GtkGLArea *Widget, viewer_t *Viewer) {
+static void realize_viewer_gl(GtkGLArea *Widget, viewer_t *Viewer) {
 	puts("realize_viewer");
 	guint Width = gtk_widget_get_allocated_width(Viewer->DrawingArea);
 	guint Height = gtk_widget_get_allocated_height(Viewer->DrawingArea);
@@ -984,10 +1052,14 @@ static void realize_viewer(GtkGLArea *Widget, viewer_t *Viewer) {
 	Viewer->GLReady = 1;
 }
 #else
+static void realize_viewer(GtkWidget *Widget, viewer_t *Viewer) {
+	gdk_window_set_cursor(gtk_widget_get_window(Viewer->DrawingArea), Viewer->Cursor);
+}
+
 static void redraw_viewer(GtkWidget *Widget, cairo_t *Cairo, viewer_t *Viewer) {
 	cairo_set_source_surface(Cairo, Viewer->CachedBackground, 0.0, 0.0);
 	cairo_paint(Cairo);
-	cairo_new_path(Cairo);
+	/*cairo_new_path(Cairo);
 	cairo_rectangle(Cairo,
 		Viewer->Pointer.X - Viewer->BoxSize / 2,
 		Viewer->Pointer.Y - Viewer->BoxSize / 2,
@@ -997,7 +1069,7 @@ static void redraw_viewer(GtkWidget *Widget, cairo_t *Cairo, viewer_t *Viewer) {
 	cairo_set_source_rgb(Cairo, 0.5, 0.5, 1.0);
 	cairo_stroke_preserve(Cairo);
 	cairo_set_source_rgba(Cairo, 0.5, 0.5, 1.0, 0.5);
-	cairo_fill(Cairo);
+	cairo_fill(Cairo);*/
 }
 #endif
 
@@ -1143,11 +1215,15 @@ static gboolean motion_notify_viewer(GtkWidget *Widget, GdkEventMotion *Event, v
 		double DeltaY = (Viewer->Pointer.Y - Event->y) / Viewer->Scale.Y;
 		pan_viewer(Viewer, DeltaX, DeltaY);
 		redraw_viewer_background(Viewer);
+		Viewer->Pointer.X = Event->x;
+		Viewer->Pointer.Y = Event->y;
+		gtk_widget_queue_draw(Widget);
+	} else {
+		Viewer->Pointer.X = Event->x;
+		Viewer->Pointer.Y = Event->y;
+		update_preview(Viewer);
+		//gtk_widget_queue_draw(Widget);
 	}
-	Viewer->Pointer.X = Event->x;
-	Viewer->Pointer.Y = Event->y;
-	update_preview(Viewer);
-	gtk_widget_queue_draw(Widget);
 	return FALSE;
 }
 
@@ -1804,6 +1880,16 @@ static viewer_t *create_viewer(const char *CsvFileName) {
 
 	gtk_paned_pack1(GTK_PANED(Viewer->MainVPaned), Viewer->DrawingArea, TRUE, TRUE);
 
+	cairo_surface_t *CursorSurface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, Viewer->BoxSize, Viewer->BoxSize);
+	cairo_t *CursorCairo = cairo_create(CursorSurface);
+	cairo_new_path(CursorCairo);
+	cairo_rectangle(CursorCairo, 0.0, 0.0, Viewer->BoxSize, Viewer->BoxSize);
+	cairo_set_source_rgb(CursorCairo, 0.5, 0.5, 1.0);
+	cairo_stroke_preserve(CursorCairo);
+	cairo_set_source_rgba(CursorCairo, 0.5, 0.5, 1.0, 0.5);
+	cairo_fill(CursorCairo);
+	Viewer->Cursor = gdk_cursor_new_from_surface(gdk_display_get_default(), CursorSurface, Viewer->BoxSize / 2.0, Viewer->BoxSize / 2.0);
+
 	Viewer->ImagesStore = gtk_list_store_new(2, G_TYPE_STRING, GDK_TYPE_PIXBUF);
 	GtkWidget *ImagesScrolledArea = Viewer->PreviewWidget = gtk_scrolled_window_new(0, 0);
 	GtkWidget *ImagesView = gtk_icon_view_new_with_model(GTK_TREE_MODEL(Viewer->ImagesStore));
@@ -1820,9 +1906,10 @@ static viewer_t *create_viewer(const char *CsvFileName) {
 	gtk_widget_add_events(Viewer->DrawingArea, GDK_KEY_PRESS);
 #ifdef USE_GL
 	g_signal_connect(G_OBJECT(Viewer->DrawingArea), "render", G_CALLBACK(render_viewer), Viewer);
-	g_signal_connect(G_OBJECT(Viewer->DrawingArea), "realize", G_CALLBACK(realize_viewer), Viewer);
+	g_signal_connect(G_OBJECT(Viewer->DrawingArea), "realize", G_CALLBACK(realize_viewer_gl), Viewer);
 #else
 	g_signal_connect(G_OBJECT(Viewer->DrawingArea), "draw", G_CALLBACK(redraw_viewer), Viewer);
+	g_signal_connect(G_OBJECT(Viewer->DrawingArea), "realize", G_CALLBACK(realize_viewer), Viewer);
 #endif
 	g_signal_connect(G_OBJECT(Viewer->DrawingArea), "size-allocate", G_CALLBACK(resize_viewer), Viewer);
 	g_signal_connect(G_OBJECT(Viewer->DrawingArea), "scroll-event", G_CALLBACK(scroll_viewer), Viewer);

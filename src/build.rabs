@@ -1,5 +1,11 @@
-CFLAGS := old + ['-O2', '-g', '-pthread', pkgconfig("--cflags gtk+-3.0 gdk-pixbuf-2.0")]
+CFLAGS := old + ['-g', '-pthread', pkgconfig("--cflags gtk+-3.0 gdk-pixbuf-2.0")]
 LDFLAGS := old + ['-g', '-lm', '-pthread', pkgconfig("--libs gtk+-3.0 gdk-pixbuf-2.0")]
+
+if DEBUG then
+	CFLAGS := old + ["-DDEBUG"]
+else
+	CFLAGS := old + ["-O3"]
+end
 
 file("libcsv.o") => fun(Object) do
 	var Source := file("libcsv/libcsv.c")

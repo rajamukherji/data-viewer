@@ -10,7 +10,7 @@ VAR random <- Random.New():__seed;
 VAR file <- File.Open("test.csv", File.Flag.Write + File.Flag.Text);
 file:write('\"Filename\",\"X\",\"Y\",\"Z\",\"W\"\n');
 VAR i;
-EVERY i <- 1:to(100000) DO (
+EVERY i <- 1:to(1000000) DO (
 	VAR filename <- 'node{i}';
 	VAR x <- random:generate(Real.T, 1.0) * 20.0 - 10.0;
 	VAR y <- random:generate(Real.T, 1.0) * 20.0 - 10.0;
