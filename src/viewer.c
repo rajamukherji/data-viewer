@@ -116,6 +116,7 @@ struct viewer_t {
 	int XIndex, YIndex, CIndex;
 	int FilterGeneration, LoadGeneration;
 	int LoadCacheIndex;
+	int ImagePrefixLength;
 #ifdef USE_GL
 	int GLCount, GLReady;
 	GLuint GLArrays[2], GLBuffers[4];
@@ -291,28 +292,9 @@ static void merge_sort_y(node_t **Start, node_t **End, node_t **Buffer) {
 	memcpy(Start, Buffer, (End - Start) * sizeof(node_t *));
 }
 
-
-static void set_viewer_indices(viewer_t *Viewer, int XIndex, int YIndex) {
-	Viewer->XIndex = XIndex;
-	Viewer->YIndex = YIndex;
-	int NumNodes = Viewer->NumNodes;
-	field_t *XField = Viewer->Fields[XIndex];
-	field_t *YField = Viewer->Fields[YIndex];
-
+static void update_batches(viewer_t *Viewer) {
 	node_t *Node = Viewer->Nodes;
-	double *XValue = XField->Values;
-	double *YValue = YField->Values;
-	for (int I = NumNodes; --I >= 0;) {
-		Node->X = *XValue;
-		Node->Y = *YValue;
-		++Node;
-		++XValue;
-		++YValue;
-	}
-
-	node_t *Root = 0;
-	Node = Viewer->Nodes;
-	int I = NumNodes;
+	int I = Viewer->NumNodes;
 	node_t **Sorted = Viewer->Sorted, **Tail = Sorted;
 	while (--I >= 0) {
 		if (!Node->Filtered) *(Tail++) = Node;
@@ -345,7 +327,26 @@ static void set_viewer_indices(viewer_t *Viewer, int XIndex, int YIndex) {
 	} else {
 		Viewer->NumBatches = 0;
 	}
+}
 
+static void set_viewer_indices(viewer_t *Viewer, int XIndex, int YIndex) {
+	Viewer->XIndex = XIndex;
+	Viewer->YIndex = YIndex;
+	int NumNodes = Viewer->NumNodes;
+	field_t *XField = Viewer->Fields[XIndex];
+	field_t *YField = Viewer->Fields[YIndex];
+
+	node_t *Node = Viewer->Nodes;
+	double *XValue = XField->Values;
+	double *YValue = YField->Values;
+	for (int I = NumNodes; --I >= 0;) {
+		Node->X = *XValue;
+		Node->Y = *YValue;
+		++Node;
+		++XValue;
+		++YValue;
+	}
+	update_batches(Viewer);
 	double RangeX = XField->Range.Max - XField->Range.Min;
 	double RangeY = YField->Range.Max - YField->Range.Min;
 	Viewer->DataMin.X = XField->Range.Min - RangeX * 0.01;
@@ -464,7 +465,8 @@ typedef struct {
 	viewer_t *Viewer;
 	field_t **Fields;
 	node_t *Nodes;
-	int Index, Row;
+	const char *ImagePrefix;
+	int Index, Row, ImagePrefixLength;
 } csv_node_loader_t;
 
 static void load_nodes_field_callback(void *Text, size_t Size, csv_node_loader_t *Loader) {
@@ -477,9 +479,18 @@ static void load_nodes_field_callback(void *Text, size_t Size, csv_node_loader_t
 		}
 	} else {
 		if (!Loader->Index) {
-			char *FileName = malloc(Size + 1);
-			memcpy(FileName, Text, Size);
-			FileName[Size] = 0;
+			char *FileName;
+			int Length;
+			if (Loader->ImagePrefixLength) {
+				Length = Loader->ImagePrefixLength + Size;
+				FileName = malloc(Length + 1);
+				memcpy(stpcpy(FileName, Loader->ImagePrefix), Text, Size);
+			} else {
+				Length = Size;
+				FileName = malloc(Length + 1);
+				memcpy(FileName, Text, Size);
+			}
+			FileName[Length] = 0;
 			Loader->Nodes[Loader->Row - 1].FileName = FileName;
 		} else {
 			int Index = Loader->Index - 1;
@@ -549,8 +560,9 @@ static void set_enum_name_fn(const char *Name, const double *Value, const char *
 	Names[(int)Value[0]] = Name;
 }
 
-static void viewer_open_file(viewer_t *Viewer, const char *CsvFileName) {
-	csv_node_loader_t Loader[1] = {{Viewer, 0, 0, 0, 0}};
+static void viewer_open_file(viewer_t *Viewer, const char *CsvFileName, const char *ImagePrefix) {
+	Viewer->ImagePrefixLength = ImagePrefix ? strlen(ImagePrefix) : 0;
+	csv_node_loader_t Loader[1] = {{Viewer, 0, 0, ImagePrefix, 0, 0, Viewer->ImagePrefixLength}};
 	char Buffer[4096];
 	struct csv_parser Parser[1];
 
@@ -1201,6 +1213,8 @@ static gboolean button_press_viewer(GtkWidget *Widget, GdkEventButton *Event, vi
 		Viewer->Pointer.Y = Event->y;
 		return FALSE;
 	} else if (Event->button == 3) {
+		Viewer->Pointer.X = Event->x;
+		Viewer->Pointer.Y = Event->y;
 		edit_node_values(Viewer);
 		redraw_viewer_background(Viewer);
 		gtk_widget_queue_draw(Widget);
@@ -1444,6 +1458,10 @@ static void save_csv(GtkWidget *Button, viewer_t *Viewer) {
 		0
 	);
 	if (gtk_dialog_run(GTK_DIALOG(FileChooser)) == GTK_RESPONSE_ACCEPT) {
+		GtkWidget *ProgressBar = gtk_progress_bar_new();
+		gtk_progress_bar_set_show_text(GTK_PROGRESS_BAR(ProgressBar), TRUE);
+		gtk_widget_show_all(ProgressBar);
+		gtk_file_chooser_set_extra_widget(GTK_FILE_CHOOSER(FileChooser), ProgressBar);
 		char *FileName = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(FileChooser));
 		FILE *File = fopen(FileName, "wb");
 		g_free(FileName);
@@ -1457,8 +1475,10 @@ static void save_csv(GtkWidget *Button, viewer_t *Viewer) {
 			csv_fwrite(File, Fields[I]->Name, strlen(Fields[I]->Name));
 		}
 		fputc('\n', File);
+		int ImagePrefixLength = Viewer->ImagePrefixLength;
+		char ProgressText[64];
 		for (int J = 0; J < NumNodes; ++J) {
-			csv_fwrite(File, Nodes[J].FileName, strlen(Nodes[J].FileName));
+			csv_fwrite(File, Nodes[J].FileName + ImagePrefixLength, strlen(Nodes[J].FileName + ImagePrefixLength));
 			for (int I = 0; I < NumFields; ++I) {
 				fputc(',', File);
 				field_t *Field = Fields[I];
@@ -1470,8 +1490,17 @@ static void save_csv(GtkWidget *Button, viewer_t *Viewer) {
 				}
 			}
 			fputc('\n', File);
+			if (J % 10000 == 0) {
+				sprintf(ProgressText, "%d / %d rows", J, NumNodes);
+				gtk_progress_bar_set_text(GTK_PROGRESS_BAR(ProgressBar), ProgressText);
+				gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(ProgressBar), (double)J / NumNodes);
+				while (gtk_events_pending()) gtk_main_iteration();
+			}
 		}
 		fclose(File);
+		sprintf(ProgressText, "%d / %d rows", NumNodes, NumNodes);
+		gtk_progress_bar_set_text(GTK_PROGRESS_BAR(ProgressBar), ProgressText);
+		gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(ProgressBar), 1.0);
 	}
 	gtk_widget_destroy(FileChooser);
 }
@@ -1527,8 +1556,6 @@ static void filter_operator_greater_or_equal(int Count, node_t *Node, double *In
 static void viewer_filter_nodes(viewer_t *Viewer) {
 	int NumNodes = Viewer->NumNodes;
 	node_t *Node = Viewer->Nodes;
-	point_t Min = Viewer->Min;
-	point_t Max = Viewer->Max;
 	for (int I = NumNodes; --I >= 0;) {
 		Node->Filtered = 0;
 		++Node;
@@ -1540,7 +1567,8 @@ static void viewer_filter_nodes(viewer_t *Viewer) {
 	}
 	++Viewer->FilterGeneration;
 	set_viewer_colour_index(Viewer, Viewer->CIndex);
-	set_viewer_indices(Viewer, Viewer->XIndex, Viewer->YIndex);
+	//set_viewer_indices(Viewer, Viewer->XIndex, Viewer->YIndex);
+	update_batches(Viewer);
 	redraw_viewer_background(Viewer);
 	update_preview(Viewer);
 	gtk_widget_queue_draw(Viewer->DrawingArea);
@@ -1839,7 +1867,7 @@ static GtkWidget *create_viewer_action_bar(viewer_t *Viewer) {
 	return GTK_WIDGET(ActionBar);
 }
 
-static viewer_t *create_viewer(const char *CsvFileName) {
+static viewer_t *create_viewer(int Argc, char *Argv[]) {
 	viewer_t *Viewer = (viewer_t *)malloc(sizeof(viewer_t));
 #ifdef USE_GL
 	Viewer->PointSize = 6.0;
@@ -1919,7 +1947,27 @@ static viewer_t *create_viewer(const char *CsvFileName) {
 	g_signal_connect(G_OBJECT(Viewer->MainWindow), "destroy", G_CALLBACK(gtk_main_quit), 0);
 
 
-	viewer_open_file(Viewer, CsvFileName);
+	const char *CsvFileName = 0;
+	const char *ImagePrefix = 0;
+	for (int I = 1; I < Argc; ++I) {
+		if (Argv[I][0] == '-') {
+			if (Argv[I][1] == 'p') {
+				if (++I >= Argc) {
+					puts("Missing image path");
+					exit(1);
+				}
+				ImagePrefix = Argv[I];
+			}
+		} else {
+			CsvFileName = Argv[I];
+		}
+	}
+
+	if (!CsvFileName) {
+		puts("Missing CSV file name");
+		exit(1);
+	}
+	viewer_open_file(Viewer, CsvFileName, ImagePrefix);
 
 	gtk_window_resize(GTK_WINDOW(Viewer->MainWindow), 640, 480);
 	gtk_paned_set_position(GTK_PANED(Viewer->MainVPaned), 320);
@@ -1933,7 +1981,7 @@ static viewer_t *create_viewer(const char *CsvFileName) {
 
 int main(int Argc, char *Argv[]) {
 	gtk_init(&Argc, &Argv);
-	viewer_t *Viewer = create_viewer(Argv[1]);
+	viewer_t *Viewer = create_viewer(Argc, Argv);
 	gtk_main();
 	return 0;
 }
