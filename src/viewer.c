@@ -40,6 +40,7 @@ struct node_t {
 	node_t *LoadNext, *LoadPrev;
 	GCancellable *LoadCancel;
 	GInputStream *LoadStream;
+	GFile *File;
 	double X, Y;
 #ifdef USE_GL
 	double R, G, B;
@@ -116,7 +117,6 @@ struct viewer_t {
 	int XIndex, YIndex, CIndex;
 	int FilterGeneration, LoadGeneration;
 	int LoadCacheIndex;
-	int ImagePrefixLength;
 #ifdef USE_GL
 	int GLCount, GLReady;
 	GLuint GLArrays[2], GLBuffers[4];
@@ -479,19 +479,23 @@ static void load_nodes_field_callback(void *Text, size_t Size, csv_node_loader_t
 		}
 	} else {
 		if (!Loader->Index) {
-			char *FileName;
+			char *FileName, *FilePath;
 			int Length;
+			FileName = malloc(Size + 1);
+			memcpy(FileName, Text, Size);
 			if (Loader->ImagePrefixLength) {
 				Length = Loader->ImagePrefixLength + Size;
-				FileName = malloc(Length + 1);
-				memcpy(stpcpy(FileName, Loader->ImagePrefix), Text, Size);
+				FilePath = malloc(Length + 1);
+				memcpy(stpcpy(FilePath, Loader->ImagePrefix), Text, Size);
 			} else {
 				Length = Size;
-				FileName = malloc(Length + 1);
-				memcpy(FileName, Text, Size);
+				FilePath = malloc(Length + 1);
+				memcpy(FilePath, Text, Size);
 			}
 			FileName[Length] = 0;
 			Loader->Nodes[Loader->Row - 1].FileName = FileName;
+			Loader->Nodes[Loader->Row - 1].File = g_file_new_for_path(FilePath);
+			free(FilePath);
 		} else {
 			int Index = Loader->Index - 1;
 			field_t *Field = Loader->Fields[Index];
@@ -561,8 +565,8 @@ static void set_enum_name_fn(const char *Name, const double *Value, const char *
 }
 
 static void viewer_open_file(viewer_t *Viewer, const char *CsvFileName, const char *ImagePrefix) {
-	Viewer->ImagePrefixLength = ImagePrefix ? strlen(ImagePrefix) : 0;
-	csv_node_loader_t Loader[1] = {{Viewer, 0, 0, ImagePrefix, 0, 0, Viewer->ImagePrefixLength}};
+	int ImagePrefixLength = ImagePrefix ? strlen(ImagePrefix) : 0;
+	csv_node_loader_t Loader[1] = {{Viewer, 0, 0, ImagePrefix, 0, 0, ImagePrefixLength}};
 	char Buffer[4096];
 	struct csv_parser Parser[1];
 
@@ -674,6 +678,19 @@ static void draw_node_image_loaded(GObject *Source, GAsyncResult *Result, node_t
 	}
 }
 
+static void draw_node_file_opened(GObject *Source, GAsyncResult *Result, node_t *Node) {
+	GFileInputStream *InputStream = g_file_read_finish(Node->File, Result, 0);
+	if (InputStream) {
+		gdk_pixbuf_new_from_stream_at_scale_async(
+			G_INPUT_STREAM(InputStream),
+			128, 192, TRUE,
+			Node->LoadCancel,
+			(void *)draw_node_image_loaded,
+			Node
+		);
+	}
+}
+
 static int draw_node_image(viewer_t *Viewer, node_t *Node) {
 	++Viewer->NumVisibleImages;
 	if (Viewer->NumVisibleImages <= MAX_VISIBLE_IMAGES) {
@@ -696,9 +713,8 @@ static int draw_node_image(viewer_t *Viewer, node_t *Node) {
 				}
 			}
 			Cache[Index] = Node;
-			Viewer->LoadCacheIndex = Index;
-			GFile *File = g_file_new_for_path(Node->FileName);
-			if ((Node->LoadStream = G_INPUT_STREAM(g_file_read(File, 0, 0)))) {
+			Viewer->LoadCacheIndex = (Index + 1) % MAX_CACHED_IMAGES;
+			if ((Node->LoadStream = G_INPUT_STREAM(g_file_read(Node->File, 0, 0)))) {
 				Node->LoadCancel = g_cancellable_new();
 				gdk_pixbuf_new_from_stream_at_scale_async(
 					Node->LoadStream,
@@ -723,7 +739,6 @@ static int draw_node_image(viewer_t *Viewer, node_t *Node) {
 				Node->Pixbuf = gdk_pixbuf_new_from_data(Pixels, GDK_COLORSPACE_RGB, TRUE, 8, 128, 192, 128 * 4, (void *)free, 0);
 				gtk_list_store_insert_with_values(Viewer->ImagesStore, 0, -1, 0, Node->FileName, 1, Node->Pixbuf, -1);
 			}
-			g_object_unref(G_OBJECT(File));
 		}
 	}
 	return 0;
@@ -1475,10 +1490,9 @@ static void save_csv(GtkWidget *Button, viewer_t *Viewer) {
 			csv_fwrite(File, Fields[I]->Name, strlen(Fields[I]->Name));
 		}
 		fputc('\n', File);
-		int ImagePrefixLength = Viewer->ImagePrefixLength;
 		char ProgressText[64];
 		for (int J = 0; J < NumNodes; ++J) {
-			csv_fwrite(File, Nodes[J].FileName + ImagePrefixLength, strlen(Nodes[J].FileName + ImagePrefixLength));
+			csv_fwrite(File, Nodes[J].FileName, strlen(Nodes[J].FileName));
 			for (int I = 0; I < NumFields; ++I) {
 				fputc(',', File);
 				field_t *Field = Fields[I];
