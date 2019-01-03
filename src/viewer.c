@@ -34,6 +34,7 @@ typedef struct {
 } range_t;
 
 struct node_t {
+	node_t *Children[2];
 	viewer_t *Viewer;
 	const char *FileName;
 	GdkPixbuf *Pixbuf;
@@ -95,7 +96,7 @@ struct viewer_t {
 	GtkListStore *ImagesStore, *ValuesStore;
 	GtkListStore *FieldsStore;
 	GtkListStore *OperatorsStore;
-	node_t *Nodes;
+	node_t *Nodes, *Root;
 	node_t **Sorted, **SortBuffer;
 	node_batch_t *SortedBatches;
 	cairo_t *Cairo;
@@ -180,7 +181,7 @@ static inline void foreach_node_y(viewer_t *Viewer, double X1, double Y1, double
 	}
 }
 
-static inline void foreach_node(viewer_t *Viewer, double X1, double Y1, double X2, double Y2, void *Data, node_callback_t *Callback) {
+static inline void foreach_node_batches(viewer_t *Viewer, double X1, double Y1, double X2, double Y2, void *Data, node_callback_t *Callback) {
 	if (Viewer->NumBatches <=0) return;
 	clock_t Start = clock();
 	printf("foreach_node:%d @ %d\n", __LINE__, clock() - Start);
@@ -227,6 +228,49 @@ static inline void foreach_node(viewer_t *Viewer, double X1, double Y1, double X
 	for (int I = Mid1; I <= Mid2; ++I) {
 		foreach_node_y(Viewer, X1, Y1, X2, Y2, Data, Callback, &Batches[I]);
 	}
+	printf("foreach_node:%d @ %d\n", __LINE__, clock() - Start);
+}
+
+typedef struct node_foreach_t {
+	void *Data;
+	node_callback_t *Callback;
+	double X1, Y1, X2, Y2;
+} node_foreach_t;
+
+static void foreach_node_tree_x(node_foreach_t *Foreach, node_t *Node);
+
+static void foreach_node_tree_y(node_foreach_t *Foreach, node_t *Node) {
+	if (Foreach->Y2 < Node->Y) {
+		if (Node->Children[0]) foreach_node_tree_x(Foreach, Node->Children[0]);
+	} else if (Foreach->Y1 > Node->Y) {
+		if (Node->Children[1]) foreach_node_tree_x(Foreach, Node->Children[1]);
+	} else {
+		if (Foreach->X1 <= Node->X && Foreach->X2 >= Node->X) {
+			Foreach->Callback(Foreach->Data, Node);
+		}
+		if (Node->Children[0]) foreach_node_tree_x(Foreach, Node->Children[0]);
+		if (Node->Children[1]) foreach_node_tree_x(Foreach, Node->Children[1]);
+	}
+}
+
+static void foreach_node_tree_x(node_foreach_t *Foreach, node_t *Node) {
+	if (Foreach->X2 < Node->X) {
+		if (Node->Children[0]) foreach_node_tree_y(Foreach, Node->Children[0]);
+	} else if (Foreach->X1 > Node->X) {
+		if (Node->Children[1]) foreach_node_tree_y(Foreach, Node->Children[1]);
+	} else {
+		if (Foreach->Y1 <= Node->Y && Foreach->Y2 >= Node->Y) {
+			Foreach->Callback(Foreach->Data, Node);
+		}
+		if (Node->Children[0]) foreach_node_tree_y(Foreach, Node->Children[0]);
+		if (Node->Children[1]) foreach_node_tree_y(Foreach, Node->Children[1]);
+	}
+}
+
+static inline void foreach_node(viewer_t *Viewer, double X1, double Y1, double X2, double Y2, void *Data, node_callback_t *Callback) {
+	node_foreach_t Foreach = {Data, Callback, X1, Y1, X2, Y2};
+	clock_t Start = clock();
+	if (Viewer->Root) foreach_node_tree_x(&Foreach, Viewer->Root);
 	printf("foreach_node:%d @ %d\n", __LINE__, clock() - Start);
 }
 
@@ -292,6 +336,58 @@ static void merge_sort_y(node_t **Start, node_t **End, node_t **Buffer) {
 	memcpy(Start, Buffer, (End - Start) * sizeof(node_t *));
 }
 
+static node_t *create_node_tree_x(node_t **Start, node_t **End, node_t **Buffer);
+
+static node_t *create_node_tree_y(node_t **Start, node_t **End, node_t **Buffer) {
+	if (Start == End) {
+		return 0;
+	} else if (Start + 1 == End) {
+		Start[0]->Children[0] = 0;
+		Start[0]->Children[1] = 0;
+		return Start[0];
+	} else {
+		merge_sort_y(Start, End, Buffer);
+		node_t **Mid = Start + (End - Start) / 2;
+		Mid[0]->Children[0] = create_node_tree_x(Start, Mid - 1, Buffer);
+		Mid[0]->Children[1] = create_node_tree_x(Mid + 1, End, Buffer);
+		return Mid[0];
+	}
+}
+
+static node_t *create_node_tree_x(node_t **Start, node_t **End, node_t **Buffer) {
+	if (Start == End) {
+		return 0;
+	} else if (Start + 1 == End) {
+		Start[0]->Children[0] = 0;
+		Start[0]->Children[1] = 0;
+		return Start[0];
+	} else {
+		merge_sort_x(Start, End, Buffer);
+		node_t **Mid = Start + (End - Start) / 2;
+		Mid[0]->Children[0] = create_node_tree_y(Start, Mid - 1, Buffer);
+		Mid[0]->Children[1] = create_node_tree_y(Mid + 1, End, Buffer);
+		return Mid[0];
+	}
+}
+
+static void update_node_tree(viewer_t *Viewer) {
+	node_t *Node = Viewer->Nodes;
+	int I = Viewer->NumNodes;
+	node_t **Sorted = Viewer->Sorted, **Tail = Sorted;
+	while (--I >= 0) {
+		if (!Node->Filtered) *(Tail++) = Node;
+		++Node;
+	}
+	int NumVisibleNodes = Tail - Sorted;
+	if (NumVisibleNodes) {
+		clock_t Start = clock();
+		Viewer->Root = create_node_tree_x(Sorted, Tail, Viewer->SortBuffer);
+		printf("update_node_tree:%d @ %d\n", __LINE__, clock() - Start);
+	} else {
+		Viewer->Root = 0;
+	}
+}
+
 static void update_batches(viewer_t *Viewer) {
 	node_t *Node = Viewer->Nodes;
 	int I = Viewer->NumNodes;
@@ -346,7 +442,8 @@ static void set_viewer_indices(viewer_t *Viewer, int XIndex, int YIndex) {
 		++XValue;
 		++YValue;
 	}
-	update_batches(Viewer);
+	//update_batches(Viewer);
+	update_node_tree(Viewer);
 	double RangeX = XField->Range.Max - XField->Range.Min;
 	double RangeY = YField->Range.Max - YField->Range.Min;
 	Viewer->DataMin.X = XField->Range.Min - RangeX * 0.01;
@@ -480,22 +577,20 @@ static void load_nodes_field_callback(void *Text, size_t Size, csv_node_loader_t
 	} else {
 		if (!Loader->Index) {
 			char *FileName, *FilePath;
-			int Length;
 			FileName = malloc(Size + 1);
 			memcpy(FileName, Text, Size);
+			FileName[Size] = 0;
 			if (Loader->ImagePrefixLength) {
-				Length = Loader->ImagePrefixLength + Size;
+				int Length = Loader->ImagePrefixLength + Size;
 				FilePath = malloc(Length + 1);
 				memcpy(stpcpy(FilePath, Loader->ImagePrefix), Text, Size);
+				FilePath[Length] = 0;
 			} else {
-				Length = Size;
-				FilePath = malloc(Length + 1);
-				memcpy(FilePath, Text, Size);
+				FilePath = FileName;
 			}
-			FileName[Length] = 0;
 			Loader->Nodes[Loader->Row - 1].FileName = FileName;
 			Loader->Nodes[Loader->Row - 1].File = g_file_new_for_path(FilePath);
-			free(FilePath);
+			if (FilePath != FileName) free(FilePath);
 		} else {
 			int Index = Loader->Index - 1;
 			field_t *Field = Loader->Fields[Index];
@@ -652,6 +747,7 @@ static void viewer_open_file(viewer_t *Viewer, const char *CsvFileName, const ch
 static void draw_node_image_loaded(GObject *Source, GAsyncResult *Result, node_t *Node) {
 	viewer_t *Viewer = Node->Viewer;
 	g_input_stream_close(Node->LoadStream, 0, 0);
+	g_object_unref(G_OBJECT(Node->LoadStream));
 	Node->LoadStream = 0;
 	gboolean Cancelled = g_cancellable_is_cancelled(Node->LoadCancel);
 	g_object_unref(G_OBJECT(Node->LoadCancel));
@@ -659,6 +755,7 @@ static void draw_node_image_loaded(GObject *Source, GAsyncResult *Result, node_t
 	if (Cancelled) return;
 	Node->Pixbuf = gdk_pixbuf_new_from_stream_finish(Result, 0);
 	if (!Node->Pixbuf) {
+		printf("Generating image %s (image read error)\n", Node->FileName);
 		guchar *Pixels = malloc(128 * 192 * 4);
 		cairo_surface_t *Surface = cairo_image_surface_create_for_data(Pixels, CAIRO_FORMAT_ARGB32, 128, 192, 128 * 4);
 		cairo_t *Cairo = cairo_create(Surface);
@@ -679,15 +776,40 @@ static void draw_node_image_loaded(GObject *Source, GAsyncResult *Result, node_t
 }
 
 static void draw_node_file_opened(GObject *Source, GAsyncResult *Result, node_t *Node) {
+	gboolean Cancelled = g_cancellable_is_cancelled(Node->LoadCancel);
+	if (Cancelled) {
+		g_object_unref(G_OBJECT(Node->LoadCancel));
+		Node->LoadCancel = 0;
+		return;
+	}
 	GFileInputStream *InputStream = g_file_read_finish(Node->File, Result, 0);
 	if (InputStream) {
+		Node->LoadStream = G_INPUT_STREAM(InputStream);
 		gdk_pixbuf_new_from_stream_at_scale_async(
-			G_INPUT_STREAM(InputStream),
+			Node->LoadStream,
 			128, 192, TRUE,
 			Node->LoadCancel,
 			(void *)draw_node_image_loaded,
 			Node
 		);
+	} else {
+		g_object_unref(G_OBJECT(Node->LoadCancel));
+		Node->LoadCancel = 0;
+		viewer_t *Viewer = Node->Viewer;
+		guchar *Pixels = malloc(128 * 192 * 4);
+		cairo_surface_t *Surface = cairo_image_surface_create_for_data(Pixels, CAIRO_FORMAT_ARGB32, 128, 192, 128 * 4);
+		cairo_t *Cairo = cairo_create(Surface);
+		cairo_rectangle(Cairo, 0.0, 0.0, 128.0, 192.0);
+		cairo_set_source_rgb(Cairo,
+			(Node->X - Viewer->DataMin.X) / (Viewer->DataMax.X - Viewer->DataMin.X),
+			1.0,
+			(Node->Y - Viewer->DataMin.Y) / (Viewer->DataMax.Y - Viewer->DataMin.Y)
+		);
+		cairo_fill(Cairo);
+		cairo_destroy(Cairo);
+		cairo_surface_destroy(Surface);
+		Node->Pixbuf = gdk_pixbuf_new_from_data(Pixels, GDK_COLORSPACE_RGB, TRUE, 8, 128, 192, 128 * 4, (void *)free, 0);
+		gtk_list_store_insert_with_values(Viewer->ImagesStore, 0, -1, 0, Node->FileName, 1, Node->Pixbuf, -1);
 	}
 }
 
@@ -697,7 +819,7 @@ static int draw_node_image(viewer_t *Viewer, node_t *Node) {
 		Node->LoadGeneration = Viewer->LoadGeneration;
 		if (Node->Pixbuf) {
 			gtk_list_store_insert_with_values(Viewer->ImagesStore, 0, -1, 0, Node->FileName, 1, Node->Pixbuf, -1);
-		} else if (!Node->LoadStream) {
+		} else if (!Node->LoadCancel) {
 			int Index = Viewer->LoadCacheIndex;
 			node_t **Cache = Viewer->LoadCache;
 			while (Cache[Index] && (Cache[Index]->LoadGeneration == Viewer->LoadGeneration)) {
@@ -714,31 +836,8 @@ static int draw_node_image(viewer_t *Viewer, node_t *Node) {
 			}
 			Cache[Index] = Node;
 			Viewer->LoadCacheIndex = (Index + 1) % MAX_CACHED_IMAGES;
-			if ((Node->LoadStream = G_INPUT_STREAM(g_file_read(Node->File, 0, 0)))) {
-				Node->LoadCancel = g_cancellable_new();
-				gdk_pixbuf_new_from_stream_at_scale_async(
-					Node->LoadStream,
-					128, 192, TRUE,
-					Node->LoadCancel,
-					(void *)draw_node_image_loaded,
-					Node
-				);
-			} else {
-				guchar *Pixels = malloc(128 * 192 * 4);
-				cairo_surface_t *Surface = cairo_image_surface_create_for_data(Pixels, CAIRO_FORMAT_ARGB32, 128, 192, 128 * 4);
-				cairo_t *Cairo = cairo_create(Surface);
-				cairo_rectangle(Cairo, 0.0, 0.0, 128.0, 192.0);
-				cairo_set_source_rgb(Cairo,
-					(Node->X - Viewer->DataMin.X) / (Viewer->DataMax.X - Viewer->DataMin.X),
-					1.0,
-					(Node->Y - Viewer->DataMin.Y) / (Viewer->DataMax.Y - Viewer->DataMin.Y)
-				);
-				cairo_fill(Cairo);
-				cairo_destroy(Cairo);
-				cairo_surface_destroy(Surface);
-				Node->Pixbuf = gdk_pixbuf_new_from_data(Pixels, GDK_COLORSPACE_RGB, TRUE, 8, 128, 192, 128 * 4, (void *)free, 0);
-				gtk_list_store_insert_with_values(Viewer->ImagesStore, 0, -1, 0, Node->FileName, 1, Node->Pixbuf, -1);
-			}
+			Node->LoadCancel = g_cancellable_new();
+			g_file_read_async(Node->File, G_PRIORITY_DEFAULT, Node->LoadCancel, (void *)draw_node_file_opened, Node);
 		}
 	}
 	return 0;
@@ -1190,10 +1289,11 @@ static void resize_viewer(GtkWidget *Widget, GdkRectangle *Allocation, viewer_t 
 		cairo_surface_destroy(Viewer->CachedBackground);
 	}
 	int PointSize = Viewer->PointSize;
-	unsigned char *Pixels = malloc(4 * (Allocation->width + 2 * PointSize) * (Allocation->height + 2 * PointSize));
-	int Stride = (Allocation->width + 2 * PointSize) * sizeof(unsigned int);
+	int BufferSize = PointSize + 2;
+	unsigned char *Pixels = malloc((Allocation->width + 2 * BufferSize) * (Allocation->height + 2 * BufferSize) * sizeof(int));
+	int Stride = (Allocation->width + 2 * BufferSize) * sizeof(unsigned int);
 	Viewer->CachedBackground = cairo_image_surface_create_for_data(
-		Pixels + PointSize * Stride + PointSize * sizeof(int),
+		Pixels + BufferSize * Stride + BufferSize * sizeof(int),
 		CAIRO_FORMAT_ARGB32,
 		Allocation->width,
 		Allocation->height,
