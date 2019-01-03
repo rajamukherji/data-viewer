@@ -89,13 +89,14 @@ struct viewer_t {
 	GtkWidget *MainWindow, *MainVPaned;
 	GtkLabel *NumVisibleLabel;
     GtkWidget *FilterWindow, *FiltersBox;
-	GtkWidget *DrawingArea;
+	GtkWidget *DrawingArea, *ImagesView;
 	GtkWidget *PreviewWidget;
 	GtkWidget *XComboBox, *YComboBox, *CComboBox, *EditFieldComboBox, *EditValueComboBox;
 	GdkCursor *Cursor;
 	GtkListStore *ImagesStore, *ValuesStore;
 	GtkListStore *FieldsStore;
 	GtkListStore *OperatorsStore;
+	GtkClipboard *Clipboard;
 	node_t *Nodes, *Root;
 	node_t **Sorted, **SortBuffer;
 	node_batch_t *SortedBatches;
@@ -1326,20 +1327,22 @@ static gboolean button_press_viewer(GtkWidget *Widget, GdkEventButton *Event, vi
 	if (Event->button == 1) {
 		Viewer->Pointer.X = Event->x;
 		Viewer->Pointer.Y = Event->y;
-		return FALSE;
+		update_preview(Viewer);
+	} else if (Event->button == 2) {
+		Viewer->Pointer.X = Event->x;
+		Viewer->Pointer.Y = Event->y;
 	} else if (Event->button == 3) {
 		Viewer->Pointer.X = Event->x;
 		Viewer->Pointer.Y = Event->y;
 		edit_node_values(Viewer);
 		redraw_viewer_background(Viewer);
 		gtk_widget_queue_draw(Widget);
-		return FALSE;
 	}
-	return TRUE;
+	return FALSE;
 }
 
 static gboolean motion_notify_viewer(GtkWidget *Widget, GdkEventMotion *Event, viewer_t *Viewer) {
-	if (Event->state & GDK_BUTTON1_MASK) {
+	if (Event->state & GDK_BUTTON2_MASK) {
 		double DeltaX = (Viewer->Pointer.X - Event->x) / Viewer->Scale.X;
 		double DeltaY = (Viewer->Pointer.Y - Event->y) / Viewer->Scale.Y;
 		pan_viewer(Viewer, DeltaX, DeltaY);
@@ -1347,57 +1350,36 @@ static gboolean motion_notify_viewer(GtkWidget *Widget, GdkEventMotion *Event, v
 		Viewer->Pointer.X = Event->x;
 		Viewer->Pointer.Y = Event->y;
 		gtk_widget_queue_draw(Widget);
-	} else {
+	} else if (Event->state & GDK_BUTTON1_MASK) {
 		Viewer->Pointer.X = Event->x;
 		Viewer->Pointer.Y = Event->y;
 		update_preview(Viewer);
-		//gtk_widget_queue_draw(Widget);
 	}
 	return FALSE;
 }
 
+static void images_selected_foreach(GtkIconView *ImagesView, GtkTreePath *Path, viewer_t *Viewer) {
+	GtkTreeIter Iter[1];
+	gtk_tree_model_get_iter(GTK_TREE_MODEL(Viewer->ImagesStore), Iter, Path);
+	const char *Value = 0;
+	gtk_tree_model_get(GTK_TREE_MODEL(Viewer->ImagesStore), Iter, 0, &Value, -1);
+	gtk_clipboard_set_text(Viewer->Clipboard, Value, -1);
+	g_free((void *)Value);
+}
+
 static gboolean key_press_viewer(GtkWidget *Widget, GdkEventKey *Event, viewer_t *Viewer) {
 	switch (Event->keyval) {
-	case GDK_KEY_x: {
-		set_viewer_indices(Viewer, (Viewer->XIndex + 1) % Viewer->NumFields, Viewer->YIndex);
-		redraw_viewer_background(Viewer);
-		update_preview(Viewer);
-		gtk_widget_queue_draw(Widget);
-		break;
-	}
-	case GDK_KEY_X: {
-		set_viewer_indices(Viewer, (Viewer->XIndex + Viewer->NumFields - 1) % Viewer->NumFields, Viewer->YIndex);
-		redraw_viewer_background(Viewer);
-		update_preview(Viewer);
-		gtk_widget_queue_draw(Widget);
-		break;
-	}
-	case GDK_KEY_y: {
-		set_viewer_indices(Viewer, Viewer->XIndex, (Viewer->YIndex + 1) % Viewer->NumFields);
-		redraw_viewer_background(Viewer);
-		update_preview(Viewer);
-		gtk_widget_queue_draw(Widget);
-		break;
-	}
-	case GDK_KEY_Y: {
-		set_viewer_indices(Viewer, Viewer->XIndex, (Viewer->YIndex + Viewer->NumFields - 1) % Viewer->NumFields);
-		redraw_viewer_background(Viewer);
-		update_preview(Viewer);
-		gtk_widget_queue_draw(Widget);
-		break;
-	}
 	case GDK_KEY_c: {
-		set_viewer_colour_index(Viewer, (Viewer->CIndex + 1) % Viewer->NumFields);
-		redraw_viewer_background(Viewer);
-		update_preview(Viewer);
-		gtk_widget_queue_draw(Widget);
-		break;
-	}
-	case GDK_KEY_C: {
-		set_viewer_colour_index(Viewer, (Viewer->CIndex + Viewer->NumFields - 1) % Viewer->NumFields);
-		redraw_viewer_background(Viewer);
-		update_preview(Viewer);
-		gtk_widget_queue_draw(Widget);
+		if (Event->state & GDK_CONTROL_MASK) {
+			if (Viewer->ImagesStore) {
+				gtk_icon_view_selected_foreach(
+					GTK_ICON_VIEW(Viewer->ImagesView),
+					(void *)images_selected_foreach,
+					Viewer
+				);
+			}
+			return FALSE;
+		}
 		break;
 	}
 	case GDK_KEY_s: {
@@ -1682,7 +1664,8 @@ static void viewer_filter_nodes(viewer_t *Viewer) {
 	++Viewer->FilterGeneration;
 	set_viewer_colour_index(Viewer, Viewer->CIndex);
 	//set_viewer_indices(Viewer, Viewer->XIndex, Viewer->YIndex);
-	update_batches(Viewer);
+	//update_batches(Viewer);
+	update_node_tree(Viewer);
 	redraw_viewer_background(Viewer);
 	update_preview(Viewer);
 	gtk_widget_queue_draw(Viewer->DrawingArea);
@@ -2011,6 +1994,7 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 	Viewer->DrawingArea = gtk_drawing_area_new();
 #endif
 
+	Viewer->Clipboard = gtk_clipboard_get(GDK_SELECTION_CLIPBOARD);
 	GtkWidget *MainVBox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
 	gtk_container_add(GTK_CONTAINER(MainWindow), MainVBox);
 
@@ -2034,18 +2018,18 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 
 	Viewer->ImagesStore = gtk_list_store_new(2, G_TYPE_STRING, GDK_TYPE_PIXBUF);
 	GtkWidget *ImagesScrolledArea = Viewer->PreviewWidget = gtk_scrolled_window_new(0, 0);
-	GtkWidget *ImagesView = gtk_icon_view_new_with_model(GTK_TREE_MODEL(Viewer->ImagesStore));
-	gtk_icon_view_set_text_column(GTK_ICON_VIEW(ImagesView), 0);
-	gtk_icon_view_set_pixbuf_column(GTK_ICON_VIEW(ImagesView), 1);
-	gtk_icon_view_set_item_width(GTK_ICON_VIEW(ImagesView), 72);
-	gtk_container_add(GTK_CONTAINER(ImagesScrolledArea), ImagesView);
+	Viewer->ImagesView = gtk_icon_view_new_with_model(GTK_TREE_MODEL(Viewer->ImagesStore));
+	gtk_icon_view_set_text_column(GTK_ICON_VIEW(Viewer->ImagesView), 0);
+	gtk_icon_view_set_pixbuf_column(GTK_ICON_VIEW(Viewer->ImagesView), 1);
+	gtk_icon_view_set_item_width(GTK_ICON_VIEW(Viewer->ImagesView), 72);
+	gtk_container_add(GTK_CONTAINER(ImagesScrolledArea), Viewer->ImagesView);
 	gtk_paned_pack2(GTK_PANED(Viewer->MainVPaned), ImagesScrolledArea, TRUE, TRUE);
 
 	gtk_widget_add_events(Viewer->DrawingArea, GDK_SCROLL_MASK);
 	gtk_widget_add_events(Viewer->DrawingArea, GDK_POINTER_MOTION_MASK);
 	gtk_widget_add_events(Viewer->DrawingArea, GDK_BUTTON_PRESS_MASK);
 	gtk_widget_add_events(Viewer->DrawingArea, GDK_BUTTON_RELEASE_MASK);
-	gtk_widget_add_events(Viewer->DrawingArea, GDK_KEY_PRESS);
+	//gtk_widget_add_events(Viewer->DrawingArea, GDK_KEY_PRESS);
 #ifdef USE_GL
 	g_signal_connect(G_OBJECT(Viewer->DrawingArea), "render", G_CALLBACK(render_viewer), Viewer);
 	g_signal_connect(G_OBJECT(Viewer->DrawingArea), "realize", G_CALLBACK(realize_viewer_gl), Viewer);
@@ -2057,9 +2041,8 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 	g_signal_connect(G_OBJECT(Viewer->DrawingArea), "scroll-event", G_CALLBACK(scroll_viewer), Viewer);
 	g_signal_connect(G_OBJECT(Viewer->DrawingArea), "button-press-event", G_CALLBACK(button_press_viewer), Viewer);
 	g_signal_connect(G_OBJECT(Viewer->DrawingArea), "motion-notify-event", G_CALLBACK(motion_notify_viewer), Viewer);
-	g_signal_connect(G_OBJECT(Viewer->DrawingArea), "key-press-event", G_CALLBACK(key_press_viewer), Viewer);
+	g_signal_connect(G_OBJECT(Viewer->MainWindow), "key-press-event", G_CALLBACK(key_press_viewer), Viewer);
 	g_signal_connect(G_OBJECT(Viewer->MainWindow), "destroy", G_CALLBACK(gtk_main_quit), 0);
-
 
 	const char *CsvFileName = 0;
 	const char *ImagePrefix = 0;
