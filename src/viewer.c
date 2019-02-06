@@ -185,7 +185,7 @@ static inline void foreach_node_y(viewer_t *Viewer, double X1, double Y1, double
 static inline void foreach_node_batches(viewer_t *Viewer, double X1, double Y1, double X2, double Y2, void *Data, node_callback_t *Callback) {
 	if (Viewer->NumBatches <=0) return;
 	clock_t Start = clock();
-	printf("foreach_node:%d @ %d\n", __LINE__, clock() - Start);
+	printf("foreach_node:%d @ %lu\n", __LINE__, clock() - Start);
 	int Min = 0;
 	int Max = Viewer->NumBatches - 1;
 	node_batch_t *Batches = Viewer->SortedBatches;
@@ -223,13 +223,13 @@ static inline void foreach_node_batches(viewer_t *Viewer, double X1, double Y1, 
 			}
 		} while (Min <= Max);
 	}
-	printf("foreach_node:%d @ %d\n", __LINE__, clock() - Start);
+	printf("foreach_node:%d @ %lu\n", __LINE__, clock() - Start);
 	printf("Limits = (%f, %f) - (%f, %f)\n", X1, Y1, X2, Y2);
 	printf("\tXRange = [%d - %d], %f - %f\n", Mid1, Mid2, Batches[Mid1].XMin, Batches[Mid2].XMax);
 	for (int I = Mid1; I <= Mid2; ++I) {
 		foreach_node_y(Viewer, X1, Y1, X2, Y2, Data, Callback, &Batches[I]);
 	}
-	printf("foreach_node:%d @ %d\n", __LINE__, clock() - Start);
+	printf("foreach_node:%d @ %lu\n", __LINE__, clock() - Start);
 }
 
 typedef struct node_foreach_t {
@@ -272,7 +272,7 @@ static inline void foreach_node(viewer_t *Viewer, double X1, double Y1, double X
 	node_foreach_t Foreach = {Data, Callback, X1, Y1, X2, Y2};
 	clock_t Start = clock();
 	if (Viewer->Root) foreach_node_tree_x(&Foreach, Viewer->Root);
-	printf("foreach_node:%d @ %d\n", __LINE__, clock() - Start);
+	printf("foreach_node:%d @ %lu\n", __LINE__, clock() - Start);
 }
 
 static void merge_sort_x(node_t **Start, node_t **End, node_t **Buffer) {
@@ -383,7 +383,7 @@ static void update_node_tree(viewer_t *Viewer) {
 	if (NumVisibleNodes) {
 		clock_t Start = clock();
 		Viewer->Root = create_node_tree_x(Sorted, Tail, Viewer->SortBuffer);
-		printf("update_node_tree:%d @ %d\n", __LINE__, clock() - Start);
+		printf("update_node_tree:%d @ %lu\n", __LINE__, clock() - Start);
 	} else {
 		Viewer->Root = 0;
 	}
@@ -401,7 +401,7 @@ static void update_batches(viewer_t *Viewer) {
 	if (NumVisibleNodes) {
 		clock_t Start = clock();
 		merge_sort_x(Sorted, Tail, Viewer->SortBuffer);
-		printf("merge_sort_x:%d @ %d\n", __LINE__, clock() - Start);
+		printf("merge_sort_x:%d @ %lu\n", __LINE__, clock() - Start);
 		node_batch_t *Batch = Viewer->SortedBatches;
 		int LastBatch = (NumVisibleNodes - 1) & -BATCH_SORT_SIZE;
 		printf("NumVisibleNodes = %d, LastBatch = %d\n", NumVisibleNodes, LastBatch);
@@ -419,7 +419,7 @@ static void update_batches(viewer_t *Viewer) {
 		Batch->Nodes = Sorted;
 		Batch->NumNodes = Tail - Sorted;
 		merge_sort_y(Sorted, Tail, Viewer->SortBuffer);
-		printf("merge_sort_y:%d @ %d\n", __LINE__, clock() - Start);
+		printf("merge_sort_y:%d @ %lu\n", __LINE__, clock() - Start);
 		Viewer->NumBatches = (Batch - Viewer->SortedBatches) + 1;
 	} else {
 		Viewer->NumBatches = 0;
@@ -516,7 +516,7 @@ static void filter_enum_field(viewer_t *Viewer, field_t *Field) {
 		++Value;
 	}
 	Field->Range.Max = Max;
-	printf("Field->Range.Max = %f\n", Max);
+	printf("Field->Range.Max = %d\n", Max);
 	Field->FilterGeneration = Viewer->FilterGeneration;
 }
 
@@ -1275,7 +1275,7 @@ static void redraw_viewer_background(viewer_t *Viewer) {
 	clock_t Start = clock();
 	printf("\n\n%s:%d\n", __FUNCTION__, __LINE__);
 	foreach_node(Viewer, Viewer->Min.X, Viewer->Min.Y, Viewer->Max.X, Viewer->Max.Y, Viewer, (node_callback_t *)redraw_point);
-	printf("foreach_node took %d\n", clock() - Start);
+	printf("foreach_node took %lu\n", clock() - Start);
 	Viewer->Cairo = 0;
 	cairo_destroy(Cairo);
 #endif
@@ -1552,7 +1552,7 @@ static void save_csv(GtkWidget *Button, viewer_t *Viewer) {
 		GTK_FILE_CHOOSER_ACTION_SAVE,
 		"Cancel", GTK_RESPONSE_CANCEL,
 		"Save", GTK_RESPONSE_ACCEPT,
-		0
+		NULL
 	);
 	if (gtk_dialog_run(GTK_DIALOG(FileChooser)) == GTK_RESPONSE_ACCEPT) {
 		GtkWidget *ProgressBar = gtk_progress_bar_new();
