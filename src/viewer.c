@@ -119,6 +119,7 @@ struct viewer_t {
 	int XIndex, YIndex, CIndex;
 	int FilterGeneration, LoadGeneration;
 	int LoadCacheIndex;
+	int ShowBox;
 #ifdef USE_GL
 	int GLCount, GLReady;
 	GLuint GLArrays[2], GLBuffers[4];
@@ -1186,17 +1187,19 @@ static void realize_viewer(GtkWidget *Widget, viewer_t *Viewer) {
 static void redraw_viewer(GtkWidget *Widget, cairo_t *Cairo, viewer_t *Viewer) {
 	cairo_set_source_surface(Cairo, Viewer->CachedBackground, 0.0, 0.0);
 	cairo_paint(Cairo);
-	/*cairo_new_path(Cairo);
-	cairo_rectangle(Cairo,
-		Viewer->Pointer.X - Viewer->BoxSize / 2,
-		Viewer->Pointer.Y - Viewer->BoxSize / 2,
-		Viewer->BoxSize,
-		Viewer->BoxSize
-	);
-	cairo_set_source_rgb(Cairo, 0.5, 0.5, 1.0);
-	cairo_stroke_preserve(Cairo);
-	cairo_set_source_rgba(Cairo, 0.5, 0.5, 1.0, 0.5);
-	cairo_fill(Cairo);*/
+	if (Viewer->ShowBox) {
+		cairo_new_path(Cairo);
+		cairo_rectangle(Cairo,
+			Viewer->Pointer.X - Viewer->BoxSize / 2,
+			Viewer->Pointer.Y - Viewer->BoxSize / 2,
+			Viewer->BoxSize,
+			Viewer->BoxSize
+		);
+		cairo_set_source_rgb(Cairo, 1.0, 1.0, 0.5);
+		cairo_stroke_preserve(Cairo);
+		cairo_set_source_rgba(Cairo, 1.0, 1.0, 0.5, 0.5);
+		cairo_fill(Cairo);
+	}
 }
 #endif
 
@@ -1328,6 +1331,8 @@ static gboolean button_press_viewer(GtkWidget *Widget, GdkEventButton *Event, vi
 		Viewer->Pointer.X = Event->x;
 		Viewer->Pointer.Y = Event->y;
 		update_preview(Viewer);
+		Viewer->ShowBox = 0;
+		gtk_widget_queue_draw(Widget);
 	} else if (Event->button == 2) {
 		Viewer->Pointer.X = Event->x;
 		Viewer->Pointer.Y = Event->y;
@@ -1336,6 +1341,14 @@ static gboolean button_press_viewer(GtkWidget *Widget, GdkEventButton *Event, vi
 		Viewer->Pointer.Y = Event->y;
 		edit_node_values(Viewer);
 		redraw_viewer_background(Viewer);
+		gtk_widget_queue_draw(Widget);
+	}
+	return FALSE;
+}
+
+static gboolean button_release_viewer(GtkWidget *Widget, GdkEventButton *Event, viewer_t *Viewer) {
+	if (Event->button == 1) {
+		Viewer->ShowBox = 1;
 		gtk_widget_queue_draw(Widget);
 	}
 	return FALSE;
@@ -1368,6 +1381,7 @@ static void images_selected_foreach(GtkIconView *ImagesView, GtkTreePath *Path, 
 }
 
 static gboolean key_press_viewer(GtkWidget *Widget, GdkEventKey *Event, viewer_t *Viewer) {
+	printf("key_press_viewer()\n");
 	switch (Event->keyval) {
 	case GDK_KEY_c: {
 		if (Event->state & GDK_CONTROL_MASK) {
@@ -1809,10 +1823,14 @@ static void show_filter_window(GtkButton *Widget, viewer_t *Viewer) {
 
 static void view_images_clicked(GtkWidget *Button, viewer_t *Viewer) {
 	if (Viewer->ValuesStore) {
-		gtk_container_remove(GTK_CONTAINER(Viewer->MainVPaned), Viewer->PreviewWidget);
 		g_object_unref(G_OBJECT(Viewer->ValuesStore));
 		Viewer->ValuesStore = 0;
 	}
+	if (Viewer->ImagesStore) {
+		g_object_unref(G_OBJECT(Viewer->ImagesStore));
+		Viewer->ImagesStore = 0;
+	}
+	gtk_container_remove(GTK_CONTAINER(Viewer->MainVPaned), Viewer->PreviewWidget);
 	Viewer->ImagesStore = gtk_list_store_new(2, G_TYPE_STRING, GDK_TYPE_PIXBUF);
 	GtkWidget *ImagesScrolledArea = Viewer->PreviewWidget = gtk_scrolled_window_new(0, 0);
 	GtkWidget *ImagesView = gtk_icon_view_new_with_model(GTK_TREE_MODEL(Viewer->ImagesStore));
@@ -1822,6 +1840,8 @@ static void view_images_clicked(GtkWidget *Button, viewer_t *Viewer) {
 	gtk_container_add(GTK_CONTAINER(ImagesScrolledArea), ImagesView);
 	gtk_paned_pack2(GTK_PANED(Viewer->MainVPaned), ImagesScrolledArea, TRUE, TRUE);
 	gtk_widget_show_all(ImagesScrolledArea);
+
+	update_preview(Viewer);
 }
 
 static void data_column_remove_clicked(GtkWidget *Button, field_t *Field) {
@@ -1832,12 +1852,15 @@ static void data_column_remove_clicked(GtkWidget *Button, field_t *Field) {
 }
 
 static void view_data_clicked(GtkWidget *Button, viewer_t *Viewer) {
+	if (Viewer->ValuesStore) {
+		g_object_unref(G_OBJECT(Viewer->ValuesStore));
+		Viewer->ValuesStore = 0;
+	}
 	if (Viewer->ImagesStore) {
-		gtk_container_remove(GTK_CONTAINER(Viewer->MainVPaned), Viewer->PreviewWidget);
 		g_object_unref(G_OBJECT(Viewer->ImagesStore));
 		Viewer->ImagesStore = 0;
 	}
-
+	gtk_container_remove(GTK_CONTAINER(Viewer->MainVPaned), Viewer->PreviewWidget);
 	int NumFields = Viewer->NumFields;
 	GType Types[NumFields * 2 - 2];
 	for (int I = 1; I < NumFields; ++I) {
@@ -1876,6 +1899,8 @@ static void view_data_clicked(GtkWidget *Button, viewer_t *Viewer) {
 	gtk_container_add(GTK_CONTAINER(ValuesScrolledArea), ValuesView);
 	gtk_paned_pack2(GTK_PANED(Viewer->MainVPaned), ValuesScrolledArea, TRUE, TRUE);
 	gtk_widget_show_all(ValuesScrolledArea);
+
+	update_preview(Viewer);
 }
 
 static GtkWidget *create_viewer_action_bar(viewer_t *Viewer) {
@@ -1905,8 +1930,11 @@ static GtkWidget *create_viewer_action_bar(viewer_t *Viewer) {
 	g_signal_connect(G_OBJECT(YComboBox), "changed", G_CALLBACK(y_field_changed), Viewer);
 	g_signal_connect(G_OBJECT(CComboBox), "changed", G_CALLBACK(c_field_changed), Viewer);
 
+	gtk_action_bar_pack_start(ActionBar, gtk_label_new("X"));
 	gtk_action_bar_pack_start(ActionBar, XComboBox);
+	gtk_action_bar_pack_start(ActionBar, gtk_label_new("Y"));
 	gtk_action_bar_pack_start(ActionBar, YComboBox);
+	gtk_action_bar_pack_start(ActionBar, gtk_label_new("Colour"));
 	gtk_action_bar_pack_start(ActionBar, CComboBox);
 
 
@@ -1923,14 +1951,16 @@ static GtkWidget *create_viewer_action_bar(viewer_t *Viewer) {
 	g_signal_connect(G_OBJECT(EditValueComboBox), "changed", G_CALLBACK(edit_value_changed), Viewer);
 
 	GtkWidget *AddFieldButton = gtk_button_new_with_label("Add Field");
-	gtk_button_set_image(GTK_BUTTON(AddFieldButton), gtk_image_new_from_icon_name("list-add", GTK_ICON_SIZE_BUTTON));
+	gtk_button_set_image(GTK_BUTTON(AddFieldButton), gtk_image_new_from_icon_name("list-add-symbolic", GTK_ICON_SIZE_BUTTON));
 
 	GtkWidget *AddValueButton = gtk_button_new_with_label("Add Value");
-	gtk_button_set_image(GTK_BUTTON(AddValueButton), gtk_image_new_from_icon_name("list-add", GTK_ICON_SIZE_BUTTON));
+	gtk_button_set_image(GTK_BUTTON(AddValueButton), gtk_image_new_from_icon_name("list-add-symbolic", GTK_ICON_SIZE_BUTTON));
 
+	gtk_action_bar_pack_start(ActionBar, gtk_label_new("Edit"));
 	gtk_action_bar_pack_start(ActionBar, EditFieldComboBox);
 	gtk_action_bar_pack_start(ActionBar, AddFieldButton);
 
+	gtk_action_bar_pack_start(ActionBar, gtk_label_new("Value"));
 	gtk_action_bar_pack_start(ActionBar, EditValueComboBox);
 	gtk_action_bar_pack_start(ActionBar, AddValueButton);
 
@@ -1985,6 +2015,7 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 	Viewer->LoadGeneration = 0;
 	Viewer->LoadCache = (node_t **)calloc(MAX_CACHED_IMAGES, sizeof(node_t *));
 	Viewer->LoadCacheIndex = 0;
+	Viewer->ShowBox = 0;
 	Viewer->FieldsStore = gtk_list_store_new(2, G_TYPE_STRING, G_TYPE_INT);
 
 	GtkWidget *MainWindow = Viewer->MainWindow = gtk_window_new(GTK_WINDOW_TOPLEVEL);
@@ -2017,6 +2048,7 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 	Viewer->Cursor = gdk_cursor_new_from_surface(gdk_display_get_default(), CursorSurface, Viewer->BoxSize / 2.0, Viewer->BoxSize / 2.0);
 
 	Viewer->ImagesStore = gtk_list_store_new(2, G_TYPE_STRING, GDK_TYPE_PIXBUF);
+	Viewer->ValuesStore = 0;
 	GtkWidget *ImagesScrolledArea = Viewer->PreviewWidget = gtk_scrolled_window_new(0, 0);
 	Viewer->ImagesView = gtk_icon_view_new_with_model(GTK_TREE_MODEL(Viewer->ImagesStore));
 	gtk_icon_view_set_text_column(GTK_ICON_VIEW(Viewer->ImagesView), 0);
@@ -2040,6 +2072,7 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 	g_signal_connect(G_OBJECT(Viewer->DrawingArea), "size-allocate", G_CALLBACK(resize_viewer), Viewer);
 	g_signal_connect(G_OBJECT(Viewer->DrawingArea), "scroll-event", G_CALLBACK(scroll_viewer), Viewer);
 	g_signal_connect(G_OBJECT(Viewer->DrawingArea), "button-press-event", G_CALLBACK(button_press_viewer), Viewer);
+	g_signal_connect(G_OBJECT(Viewer->DrawingArea), "button-release-event", G_CALLBACK(button_release_viewer), Viewer);
 	g_signal_connect(G_OBJECT(Viewer->DrawingArea), "motion-notify-event", G_CALLBACK(motion_notify_viewer), Viewer);
 	g_signal_connect(G_OBJECT(Viewer->MainWindow), "key-press-event", G_CALLBACK(key_press_viewer), Viewer);
 	g_signal_connect(G_OBJECT(Viewer->MainWindow), "destroy", G_CALLBACK(gtk_main_quit), 0);
