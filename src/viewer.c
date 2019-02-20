@@ -115,7 +115,7 @@ struct viewer_t {
 	int *Filtered;
 	point_t Min, Max, Scale, DataMin, DataMax, Pointer;
 	double PointSize, BoxSize, EditValue;
-	int NumNodes, NumBatches, NumFields, NumCachedImages, NumVisibleImages;
+	int NumNodes, NumBatches, NumFields, NumCachedImages, NumVisibleImages, NumUpdatedNodes;
 	int XIndex, YIndex, CIndex;
 	int FilterGeneration, LoadGeneration;
 	int LoadCacheIndex;
@@ -350,7 +350,7 @@ static node_t *create_node_tree_y(node_t **Start, node_t **End, node_t **Buffer)
 	} else {
 		merge_sort_y(Start, End, Buffer);
 		node_t **Mid = Start + (End - Start) / 2;
-		Mid[0]->Children[0] = create_node_tree_x(Start, Mid - 1, Buffer);
+		Mid[0]->Children[0] = create_node_tree_x(Start, Mid, Buffer);
 		Mid[0]->Children[1] = create_node_tree_x(Mid + 1, End, Buffer);
 		return Mid[0];
 	}
@@ -366,7 +366,7 @@ static node_t *create_node_tree_x(node_t **Start, node_t **End, node_t **Buffer)
 	} else {
 		merge_sort_x(Start, End, Buffer);
 		node_t **Mid = Start + (End - Start) / 2;
-		Mid[0]->Children[0] = create_node_tree_y(Start, Mid - 1, Buffer);
+		Mid[0]->Children[0] = create_node_tree_y(Start, Mid, Buffer);
 		Mid[0]->Children[1] = create_node_tree_y(Mid + 1, End, Buffer);
 		return Mid[0];
 	}
@@ -923,6 +923,7 @@ static void update_preview(viewer_t *Viewer) {
 
 static int edit_node_value(viewer_t *Viewer, node_t *Node) {
 	field_t *Field = Viewer->EditField;
+	++Viewer->NumUpdatedNodes;
 	double Value = Field->Values[Node - Viewer->Nodes] = Viewer->EditValue;
 	if (Field == Viewer->Fields[Viewer->CIndex]) {
 		set_node_rgb(Node, 6.0 * (Value - Field->Range.Min) / (Field->Range.Max - Field->Range.Min));
@@ -930,8 +931,11 @@ static int edit_node_value(viewer_t *Viewer, node_t *Node) {
 	return 0;
 }
 
+static void viewer_filter_nodes(viewer_t *Viewer);
+
 static void edit_node_values(viewer_t *Viewer) {
 	if (!Viewer->EditField) return;
+	Viewer->NumUpdatedNodes = 0;
 	double X1 = Viewer->Min.X + (Viewer->Pointer.X - Viewer->BoxSize / 2) / Viewer->Scale.X;
 	double Y1 = Viewer->Min.Y + (Viewer->Pointer.Y - Viewer->BoxSize / 2) / Viewer->Scale.Y;
 	double X2 = Viewer->Min.X + (Viewer->Pointer.X + Viewer->BoxSize / 2) / Viewer->Scale.X;
@@ -942,6 +946,10 @@ static void edit_node_values(viewer_t *Viewer) {
 		++Viewer->FilterGeneration;
 		set_viewer_colour_index(Viewer, Viewer->CIndex);
 	}
+	char NumVisibleText[64];
+	sprintf(NumVisibleText, "%d updates", Viewer->NumUpdatedNodes);
+	gtk_label_set_text(Viewer->NumVisibleLabel, NumVisibleText);
+	viewer_filter_nodes(Viewer);
 }
 
 static inline int redraw_point(viewer_t *Viewer, node_t *Node) {
