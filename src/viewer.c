@@ -13,13 +13,11 @@
 
 #define MAX_CACHED_IMAGES 1024
 #define MAX_VISIBLE_IMAGES 64
-#define BATCH_SORT_SIZE (1 << 10)
 #define POINT_COLOUR_CHROMA 0.5
 #define POINT_COLOUR_SATURATION 0.7
 #define POINT_COLOUR_VALUE 0.9
 
 typedef struct node_t node_t;
-typedef struct node_batch_t node_batch_t;
 typedef int node_callback_t(void *Data, node_t *Node);
 typedef struct field_t field_t;
 typedef struct filter_t filter_t;
@@ -52,12 +50,6 @@ struct node_t {
 	int Filtered;
 	int Timestamp;
 	int LoadGeneration;
-};
-
-struct node_batch_t {
-	node_t **Nodes;
-	double XMin, XMax;
-	int NumNodes;
 };
 
 struct field_t {
@@ -101,7 +93,6 @@ struct viewer_t {
 	node_t *Nodes, *Root;
 	node_t **Sorted, **SortBuffer;
 	node_t **SortedX, **SortedY;
-	node_batch_t *SortedBatches;
 	cairo_t *Cairo;
 	node_t **LoadCache;
 #ifdef USE_GL
@@ -114,10 +105,9 @@ struct viewer_t {
 	node_t *CacheHead, *CacheTail;
 	field_t **Fields, *EditField;
 	filter_t *Filters;
-	int *Filtered;
 	point_t Min, Max, Scale, DataMin, DataMax, Pointer;
 	double PointSize, BoxSize, EditValue;
-	int NumNodes, NumBatches, NumFields, NumCachedImages, NumVisibleImages, NumUpdatedNodes;
+	int NumNodes, NumFields, NumCached, NumFiltered, NumVisible, NumUpdated;
 	int XIndex, YIndex, CIndex;
 	int FilterGeneration, LoadGeneration;
 	int LoadCacheIndex;
@@ -234,7 +224,7 @@ static void merge_sort_y(node_t **Start, node_t **End, node_t **Buffer) {
 	memcpy(Start, Buffer, (End - Start) * sizeof(node_t *));
 }
 
-static node_t *create_node_tree_x(node_t **Start, node_t **End, node_t **Buffer);
+/*static node_t *create_node_tree_x(node_t **Start, node_t **End, node_t **Buffer);
 
 static node_t *create_node_tree_y(node_t **Start, node_t **End, node_t **Buffer) {
 	if (Start == End) {
@@ -283,101 +273,196 @@ static void update_node_tree(viewer_t *Viewer) {
 	} else {
 		Viewer->Root = 0;
 	}
-}
+}*/
 
-static node_t *create_node_tree2_x(viewer_t *Viewer, int Start, int End);
+static void split_node_list_y(node_t *Root, node_t *HeadX, node_t *HeadY1, int Count);
 
-static node_t *create_node_tree2_y(viewer_t *Viewer, int Start, int End) {
-	if (Start == End) {
-		return 0;
-	} else if (Start + 1 == End) {
-		node_t *Node = Viewer->SortedY[Start];
-		Node->Children[0] = 0;
-		Node->Children[1] = 0;
-		return Node;
-	} else {
-		int Mid = Start + (End - Start) / 2;
-		node_t *Node = Viewer->SortedY[Mid];
-		int MidIndex = Node->YIndex;
-		// Split Viewer->SortedX by Mid
-		node_t **A = Viewer->SortBuffer + Start;
-		node_t **B = Viewer->SortBuffer + Mid + 1;
-		node_t **P = Viewer->SortedX + Start;
-		for (int I = End - Start; --I >= 0; ++P) {
-			node_t *Node2 = *P;
-			if (Node2 == Node) {
-				Viewer->SortBuffer[Mid] = Node2;
-			} else if (Node2->YIndex < MidIndex) {
-				*A++ = Node2;
+static void split_node_list_x(node_t *Root, node_t *HeadX1, node_t *HeadY, int Count) {
+	int RootIndex = Root->XIndex;
+	node_t *HeadY1 = 0, *HeadY2 = 0;
+	node_t **SlotY1 = &HeadY1, **SlotY2 = &HeadY2;
+	node_t *Root1 = 0, *Root2 = 0;
+	int Split1 = Count >> 2, Split2 = (Count - (Count >> 1) - 1) >> 1;
+	int Count1 = 0, Count2 = 0;
+	for (node_t *Node = HeadY; Node; Node = Node->Children[1]) {
+		if (Node->XIndex < RootIndex) {
+			if (--Split1 == 0) {
+				SlotY1[0] = 0;
+				Root1 = Node;
 			} else {
-				*B++ = Node2;
+				SlotY1[0] = Node;
 			}
-		}
-		memcpy(Viewer->SortedX + Start, Viewer->SortBuffer + Start, (End - Start) * sizeof(node_t *));
-		Node->Children[0] = create_node_tree2_x(Viewer, Start, Mid);
-		Node->Children[1] = create_node_tree2_x(Viewer, Mid + 1, End);
-		return Node;
-	}
-}
-
-static node_t *create_node_tree2_x(viewer_t *Viewer, int Start, int End) {
-	if (Start == End) {
-		return 0;
-	} else if (Start + 1 == End) {
-		node_t *Node = Viewer->SortedX[Start];
-		Node->Children[0] = 0;
-		Node->Children[1] = 0;
-		return Node;
-	} else {
-		int Mid = Start + (End - Start) / 2;
-		node_t *Node = Viewer->SortedX[Mid];
-		int MidIndex = Node->XIndex;
-		// Split Viewer->SortedY by Mid
-		node_t **A = Viewer->SortBuffer + Start;
-		node_t **B = Viewer->SortBuffer + Mid + 1;
-		node_t **P = Viewer->SortedY + Start;
-		for (int I = End - Start; --I >= 0; ++P) {
-			node_t *Node2 = *P;
-			if (Node2 == Node) {
-				Viewer->SortBuffer[Mid] = Node2;
-			} else if (Node2->XIndex < MidIndex) {
-				*A++ = Node2;
+			SlotY1 = &Node->Children[1];
+			++Count1;
+		} else if (Node->XIndex > RootIndex) {
+			if (--Split2 == 0) {
+				SlotY2[0] = 0;
+				Root2 = Node;
 			} else {
-				*B++ = Node2;
+				SlotY2[0] = Node;
 			}
+			SlotY2 = &Node->Children[1];
+			++Count2;
 		}
-		memcpy(Viewer->SortedY + Start, Viewer->SortBuffer + Start, (End - Start) * sizeof(node_t *));
-		Node->Children[0] = create_node_tree2_y(Viewer, Start, Mid);
-		Node->Children[1] = create_node_tree2_y(Viewer, Mid + 1, End);
-		return Node;
 	}
+	SlotY1[0] = SlotY2[0] = 0;
+	node_t *HeadX2 = Root->Children[0];
+	Root->Children[0] = Root1;
+	Root->Children[1] = Root2;
+	if (Root1) split_node_list_y(Root1, HeadX1, HeadY1, Count1);
+	if (Root2) split_node_list_y(Root2, HeadX2, HeadY2, Count2);
+	printf("split_node_list_x(%d) -> %d / %d\n", Count, Count1, Count2);
 }
 
-static void update_node_tree2(viewer_t *Viewer) {
-	node_t *Node = Viewer->Nodes;
-	int I = Viewer->NumNodes;
-	node_t **SortedX = Viewer->SortedX, **TailX = SortedX;
-	node_t **SortedY = Viewer->SortedY, **TailY = SortedY;
-	while (--I >= 0) {
-		if (!Node->Filtered) {
-			*(TailX++) = Node;
-			*(TailY++) = Node;
+static void split_node_list_y(node_t *Root, node_t *HeadX, node_t *HeadY1, int Count) {
+	int RootIndex = Root->YIndex;
+	node_t *HeadX1 = 0, *HeadX2 = 0;
+	node_t **SlotX1 = &HeadX1, **SlotX2 = &HeadX2;
+	node_t *Root1 = 0, *Root2 = 0;
+	int Split1 = Count >> 2, Split2 = (Count - (Count >> 1) - 1) >> 1;
+	int Count1 = 0, Count2 = 0;
+	for (node_t *Node = HeadX; Node; Node = Node->Children[0]) {
+		if (Node->YIndex < RootIndex) {
+			if (--Split1 == 0) {
+				SlotX1[0] = 0;
+				Root1 = Node;
+			} else {
+				SlotX1[0] = Node;
+			}
+			SlotX1 = &Node->Children[0];
+			++Count1;
+		} else if (Node->YIndex > RootIndex) {
+			if (--Split2 == 0) {
+				SlotX2[0] = 0;
+				Root2 = Node;
+			} else {
+				SlotX2[0] = Node;
+			}
+			SlotX2 = &Node->Children[0];
+			++Count2;
 		}
-		++Node;
 	}
-	if (TailX > SortedX) {
-		clock_t Start = clock();
-		merge_sort_x(SortedX, TailX, Viewer->SortBuffer);
-		int I = 0;
-		for (node_t **N = SortedX; N < TailX; ++N) N[0]->XIndex = I++;
-		merge_sort_y(SortedY, TailY, Viewer->SortBuffer);
-		I = 0;
-		for (node_t **N = SortedY; N < TailY; ++N) N[0]->YIndex = I++;
-		Viewer->Root = create_node_tree2_x(Viewer, 0, TailX - SortedX);
-		printf("update_node_tree2:%d @ %lu\n", __LINE__, clock() - Start);
-	} else {
+	SlotX1[0] = SlotX2[0] = 0;
+	node_t *HeadY2 = Root->Children[1];
+	Root->Children[0] = Root1;
+	Root->Children[1] = Root2;
+	if (Root1) split_node_list_x(Root1, HeadX1, HeadY1, Count1);
+	if (Root2) split_node_list_x(Root2, HeadX2, HeadY2, Count2);
+	printf("split_node_list_y(%d) -> %d / %d\n", Count, Count1, Count2);
+}
+
+static void update_node_tree(viewer_t *Viewer) {
+	if (Viewer->NumFiltered == 0) {
 		Viewer->Root = 0;
+	} else if (Viewer->NumFiltered == 1) {
+		node_t *Node = Viewer->Nodes;
+		while (!Node->Filtered) ++Node;
+		Node->Children[0] = 0;
+		Node->Children[1] = 0;
+		Viewer->Root = Node;
+	} else {
+		int MidIndex = Viewer->NumFiltered >> 1;
+		node_t *HeadX = 0, *HeadY = 0;
+		node_t **SlotX = &HeadX, **SlotY = &HeadY;
+		node_t **NodeX = Viewer->SortedX, **NodeY = Viewer->SortedY;
+		node_t *Root = 0;
+		for (int I = Viewer->NumNodes; --I >= 0; ++NodeX, ++NodeY) {
+			node_t *Node = *NodeX;
+			if (Node->Filtered) {
+				if (--MidIndex == 0) {
+					Root = Node;
+					SlotX[0] = 0;
+				} else {
+					SlotX[0] = Node;
+				}
+				SlotX = &Node->Children[0];
+			}
+			if (NodeY[0]->Filtered) {
+				SlotY[0] = NodeY[0];
+				SlotY = &NodeY[0]->Children[1];
+			}
+		}
+		SlotX[0] = SlotY[0] = 0;
+		split_node_list_x(Root, HeadX, HeadY, Viewer->NumFiltered);
+		Viewer->Root = Root;
 	}
+}
+
+static node_t *merge_sort_list_x(node_t *Start, node_t *End) {
+	if (Start + 1 == End) {
+		Start->Children[0] = 0;
+		return Start;
+	}
+	node_t *Mid = Start + (End - Start) / 2;
+	node_t *Head1 = merge_sort_list_x(Start, Mid);
+	node_t *Head2 = merge_sort_list_x(Mid, End);
+	node_t *Head, **Slot = &Head;
+	for (;;) {
+		if (Head1) {
+			if (Head2) {
+				if (Head1->X < Head2->X) {
+					Slot[0] = Head1;
+					Slot = &Head1->Children[0];
+					Head1 = Slot[0];
+				} else {
+					Slot[0] = Head2;
+					Slot = &Head2->Children[0];
+					Head2 = Slot[0];
+				}
+			} else {
+				Slot[0] = Head1;
+				Slot = &Head1->Children[0];
+				Head1 = Slot[0];
+			}
+		} else if (Head2) {
+			Slot[0] = Head2;
+			Slot = &Head2->Children[0];
+			Head2 = Slot[0];
+		} else {
+			Slot[0] = 0;
+			break;
+		}
+	}
+	return Head;
+}
+
+static node_t *merge_sort_list_y(node_t *Start, node_t *End) {
+	if (Start == End) return 0;
+	if (Start + 1 == End) {
+		Start->Children[1] = 0;
+		return Start;
+	}
+	node_t *Mid = Start + (End - Start) / 2;
+	node_t *Head1 = merge_sort_list_y(Start, Mid);
+	node_t *Head2 = merge_sort_list_y(Mid, End);
+	node_t *Head, **Slot = &Head;
+	for (;;) {
+		if (Head1) {
+			if (Head2) {
+				if (Head1->Y < Head2->Y) {
+					Slot[0] = Head1;
+					Slot = &Head1->Children[1];
+					Head1 = Slot[0];
+				} else {
+					Slot[0] = Head2;
+					Slot = &Head2->Children[1];
+					Head2 = Slot[0];
+				}
+			} else {
+				Slot[0] = Head1;
+				Slot = &Head1->Children[1];
+				Head1 = Slot[0];
+			}
+		} else if (Head2) {
+			Slot[0] = Head2;
+			Slot = &Head2->Children[1];
+			Head2 = Slot[0];
+		} else {
+			Slot[0] = 0;
+			break;
+		}
+	}
+	return Head;
 }
 
 static void set_viewer_indices(viewer_t *Viewer, int XIndex, int YIndex) {
@@ -397,9 +482,13 @@ static void set_viewer_indices(viewer_t *Viewer, int XIndex, int YIndex) {
 		++XValue;
 		++YValue;
 	}
-	//update_batches(Viewer);
+	merge_sort_x(Viewer->SortedX, Viewer->SortedX + NumNodes, Viewer->SortBuffer);
+	merge_sort_y(Viewer->SortedY, Viewer->SortedY + NumNodes, Viewer->SortBuffer);
+	for (int I = 0; I < NumNodes; ++I) {
+		Viewer->SortedX[I]->XIndex = I;
+		Viewer->SortedY[I]->YIndex = I;
+	}
 	update_node_tree(Viewer);
-	//update_node_tree2(Viewer);
 	double RangeX = XField->Range.Max - XField->Range.Min;
 	double RangeY = YField->Range.Max - YField->Range.Min;
 	Viewer->DataMin.X = XField->Range.Min - RangeX * 0.01;
@@ -644,9 +733,14 @@ static void viewer_open_file(viewer_t *Viewer, const char *CsvFileName, const ch
 	Viewer->SortedX = (node_t **)malloc(NumNodes * sizeof(node_t *));
 	Viewer->SortedY = (node_t **)malloc(NumNodes * sizeof(node_t *));
 	Viewer->SortBuffer = (node_t **)malloc(NumNodes * sizeof(node_t *));
-	Viewer->SortedBatches = (node_batch_t *)malloc((NumNodes / BATCH_SORT_SIZE + 1) * sizeof(node_batch_t));
+	Viewer->NumFiltered = NumNodes;
 	memset(Nodes, 0, NumNodes * sizeof(node_t));
-	for (int I = 0; I < NumNodes; ++I) Nodes[I].Viewer = Viewer;
+	for (int I = 0; I < NumNodes; ++I) {
+		Nodes[I].Viewer = Viewer;
+		Nodes[I].Filtered = 1;
+		Viewer->SortedX[I] = &Nodes[I];
+		Viewer->SortedY[I] = &Nodes[I];
+	}
 	field_t **Fields = Viewer->Fields = (field_t **)malloc(NumFields * sizeof(field_t *));
 	for (int I = 0; I < NumFields; ++I) {
 		field_t *Field = Fields[I] = (field_t *)malloc(sizeof(field_t) + NumNodes * sizeof(double));
@@ -772,8 +866,8 @@ static void draw_node_file_opened(GObject *Source, GAsyncResult *Result, node_t 
 }
 
 static int draw_node_image(viewer_t *Viewer, node_t *Node) {
-	++Viewer->NumVisibleImages;
-	if (Viewer->NumVisibleImages <= MAX_VISIBLE_IMAGES) {
+	++Viewer->NumVisible;
+	if (Viewer->NumVisible <= MAX_VISIBLE_IMAGES) {
 		Node->LoadGeneration = Viewer->LoadGeneration;
 		if (Node->Pixbuf) {
 			gtk_list_store_insert_with_values(Viewer->ImagesStore, 0, -1, 0, Node->FileName, 1, Node->Pixbuf, -1);
@@ -802,13 +896,13 @@ static int draw_node_image(viewer_t *Viewer, node_t *Node) {
 }
 
 static int draw_node_value(viewer_t *Viewer, node_t *Node) {
-	++Viewer->NumVisibleImages;
+	++Viewer->NumVisible;
 	field_t **Fields = Viewer->Fields;
 	int NumFields = Viewer->NumFields;
 	int Index = Node - Viewer->Nodes;
 	GtkTreeIter Iter[1];
 	gtk_list_store_append(Viewer->ValuesStore, Iter);
-	if (Viewer->NumVisibleImages <= MAX_VISIBLE_IMAGES) {
+	if (Viewer->NumVisible <= MAX_VISIBLE_IMAGES) {
 		for (int I = 0; I < NumFields; ++I) {
 			field_t *Field = Fields[I];
 			if (Field->PreviewColumn) {
@@ -857,7 +951,7 @@ static int draw_node_value(viewer_t *Viewer, node_t *Node) {
 }
 
 static void update_preview(viewer_t *Viewer) {
-	Viewer->NumVisibleImages = 0;
+	Viewer->NumVisible = 0;
 	double X1 = Viewer->Min.X + (Viewer->Pointer.X - Viewer->BoxSize / 2) / Viewer->Scale.X;
 	double Y1 = Viewer->Min.Y + (Viewer->Pointer.Y - Viewer->BoxSize / 2) / Viewer->Scale.Y;
 	double X2 = Viewer->Min.X + (Viewer->Pointer.X + Viewer->BoxSize / 2) / Viewer->Scale.X;
@@ -873,13 +967,13 @@ static void update_preview(viewer_t *Viewer) {
 		foreach_node(Viewer, X1, Y1, X2, Y2, Viewer, (node_callback_t *)draw_node_value);
 	}
 	char NumVisibleText[64];
-	sprintf(NumVisibleText, "%d points", Viewer->NumVisibleImages);
+	sprintf(NumVisibleText, "%d points", Viewer->NumVisible);
 	gtk_label_set_text(Viewer->NumVisibleLabel, NumVisibleText);
 }
 
 static int edit_node_value(viewer_t *Viewer, node_t *Node) {
 	field_t *Field = Viewer->EditField;
-	++Viewer->NumUpdatedNodes;
+	++Viewer->NumUpdated;
 	double Value = Field->Values[Node - Viewer->Nodes] = Viewer->EditValue;
 	if (Field == Viewer->Fields[Viewer->CIndex]) {
 		set_node_rgb(Node, 6.0 * (Value - Field->Range.Min) / (Field->Range.Max - Field->Range.Min));
@@ -891,7 +985,7 @@ static void viewer_filter_nodes(viewer_t *Viewer);
 
 static void edit_node_values(viewer_t *Viewer) {
 	if (!Viewer->EditField) return;
-	Viewer->NumUpdatedNodes = 0;
+	Viewer->NumUpdated = 0;
 	double X1 = Viewer->Min.X + (Viewer->Pointer.X - Viewer->BoxSize / 2) / Viewer->Scale.X;
 	double Y1 = Viewer->Min.Y + (Viewer->Pointer.Y - Viewer->BoxSize / 2) / Viewer->Scale.Y;
 	double X2 = Viewer->Min.X + (Viewer->Pointer.X + Viewer->BoxSize / 2) / Viewer->Scale.X;
@@ -903,7 +997,7 @@ static void edit_node_values(viewer_t *Viewer) {
 		set_viewer_colour_index(Viewer, Viewer->CIndex);
 	}
 	char NumVisibleText[64];
-	sprintf(NumVisibleText, "%d updates", Viewer->NumUpdatedNodes);
+	sprintf(NumVisibleText, "%d updates", Viewer->NumUpdated);
 	gtk_label_set_text(Viewer->NumVisibleLabel, NumVisibleText);
 	viewer_filter_nodes(Viewer);
 }
@@ -1589,7 +1683,7 @@ static void save_csv(GtkWidget *Button, viewer_t *Viewer) {
 
 static void filter_operator_equal(int Count, node_t *Node, double *Input, double Value) {
 	while (--Count >= 0) {
-		if (Input[0] != Value) Node->Filtered = 1;
+		if (Input[0] != Value) Node->Filtered = 0;
 		++Node;
 		++Input;
 	}
@@ -1597,7 +1691,7 @@ static void filter_operator_equal(int Count, node_t *Node, double *Input, double
 
 static void filter_operator_not_equal(int Count, node_t *Node, double *Input, double Value) {
 	while (--Count >= 0) {
-		if (Input[0] == Value) Node->Filtered = 1;
+		if (Input[0] == Value) Node->Filtered = 0;
 		++Node;
 		++Input;
 	}
@@ -1605,7 +1699,7 @@ static void filter_operator_not_equal(int Count, node_t *Node, double *Input, do
 
 static void filter_operator_less(int Count, node_t *Node, double *Input, double Value) {
 	while (--Count >= 0) {
-		if (Input[0] >= Value) Node->Filtered = 1;
+		if (Input[0] >= Value) Node->Filtered = 0;
 		++Node;
 		++Input;
 	}
@@ -1613,7 +1707,7 @@ static void filter_operator_less(int Count, node_t *Node, double *Input, double 
 
 static void filter_operator_greater(int Count, node_t *Node, double *Input, double Value) {
 	while (--Count >= 0) {
-		if (Input[0] <= Value) Node->Filtered = 1;
+		if (Input[0] <= Value) Node->Filtered = 0;
 		++Node;
 		++Input;
 	}
@@ -1621,7 +1715,7 @@ static void filter_operator_greater(int Count, node_t *Node, double *Input, doub
 
 static void filter_operator_less_or_equal(int Count, node_t *Node, double *Input, double Value) {
 	while (--Count >= 0) {
-		if (Input[0] > Value) Node->Filtered = 1;
+		if (Input[0] > Value) Node->Filtered = 0;
 		++Node;
 		++Input;
 	}
@@ -1629,7 +1723,7 @@ static void filter_operator_less_or_equal(int Count, node_t *Node, double *Input
 
 static void filter_operator_greater_or_equal(int Count, node_t *Node, double *Input, double Value) {
 	while (--Count >= 0) {
-		if (Input[0] < Value) Node->Filtered = 1;
+		if (Input[0] < Value) Node->Filtered = 0;
 		++Node;
 		++Input;
 	}
@@ -1639,7 +1733,7 @@ static void viewer_filter_nodes(viewer_t *Viewer) {
 	int NumNodes = Viewer->NumNodes;
 	node_t *Node = Viewer->Nodes;
 	for (int I = NumNodes; --I >= 0;) {
-		Node->Filtered = 0;
+		Node->Filtered = 1;
 		++Node;
 	}
 	for (filter_t *Filter = Viewer->Filters; Filter; Filter = Filter->Next) {
@@ -1648,11 +1742,12 @@ static void viewer_filter_nodes(viewer_t *Viewer) {
 		}
 	}
 	++Viewer->FilterGeneration;
+	Node = Viewer->Nodes;
+	int NumFiltered = 0;
+	for (int I = NumNodes; --I >= 0; ++Node) if (Node->Filtered) ++NumFiltered;
+	Viewer->NumFiltered = NumFiltered;
 	set_viewer_colour_index(Viewer, Viewer->CIndex);
-	//set_viewer_indices(Viewer, Viewer->XIndex, Viewer->YIndex);
-	//update_batches(Viewer);
 	update_node_tree(Viewer);
-	//update_node_tree2(Viewer);
 	redraw_viewer_background(Viewer);
 	update_preview(Viewer);
 	gtk_widget_queue_draw(Viewer->DrawingArea);
@@ -1981,7 +2076,7 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 	Viewer->CachedBackground = 0;
 #endif
 	Viewer->CacheHead = Viewer->CacheTail = 0;
-	Viewer->NumCachedImages = 0;
+	Viewer->NumCached = 0;
 	Viewer->EditField = 0;
 	Viewer->Filters = 0;
 	Viewer->FilterGeneration = 1;
