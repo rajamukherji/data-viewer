@@ -852,48 +852,46 @@ static int draw_node_value(viewer_t *Viewer, node_t *Node) {
 	int Index = Node - Viewer->Nodes;
 	GtkTreeIter Iter[1];
 	gtk_list_store_append(Viewer->ValuesStore, Iter);
-	if (Viewer->NumVisibleImages <= MAX_VISIBLE_IMAGES) {
-		for (int I = 0; I < NumFields; ++I) {
-			field_t *Field = Fields[I];
-			if (Field->PreviewColumn) {
-				double Value = Field->Values[Index];
-				GdkRGBA Colour[1];
-				Colour->alpha = 0.5;
-				if (Field->EnumStore && Value == 0.0) {
-					Colour->red = Colour->green = Colour->blue = POINT_COLOUR_SATURATION;
+	for (int I = 0; I < NumFields; ++I) {
+		field_t *Field = Fields[I];
+		if (Field->PreviewColumn) {
+			double Value = Field->Values[Index];
+			GdkRGBA Colour[1];
+			Colour->alpha = 0.5;
+			if (Field->EnumStore && Value == 0.0) {
+				Colour->red = Colour->green = Colour->blue = POINT_COLOUR_SATURATION;
+			} else {
+				double H = 6.0 * (Value - Field->Range.Min) / (Field->Range.Max - Field->Range.Min);
+				if (H < 1.0) {
+					Colour->red = POINT_COLOUR_VALUE;
+					Colour->green = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 1.0);
+					Colour->blue = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
+				} else if (H < 2.0) {
+					Colour->red = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 1.0);
+					Colour->green = POINT_COLOUR_VALUE;
+					Colour->blue = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
+				} else if (H < 3.0) {
+					Colour->red = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
+					Colour->green = POINT_COLOUR_VALUE;
+					Colour->blue = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 3.0);
+				} else if (H < 4.0) {
+					Colour->red = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
+					Colour->green = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 3.0);
+					Colour->blue = POINT_COLOUR_VALUE;
+				} else if (H < 5.0) {
+					Colour->red = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 5.0);
+					Colour->green = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
+					Colour->blue = POINT_COLOUR_VALUE;
 				} else {
-					double H = 6.0 * (Value - Field->Range.Min) / (Field->Range.Max - Field->Range.Min);
-					if (H < 1.0) {
-						Colour->red = POINT_COLOUR_VALUE;
-						Colour->green = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 1.0);
-						Colour->blue = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
-					} else if (H < 2.0) {
-						Colour->red = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 1.0);
-						Colour->green = POINT_COLOUR_VALUE;
-						Colour->blue = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
-					} else if (H < 3.0) {
-						Colour->red = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
-						Colour->green = POINT_COLOUR_VALUE;
-						Colour->blue = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 3.0);
-					} else if (H < 4.0) {
-						Colour->red = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
-						Colour->green = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 3.0);
-						Colour->blue = POINT_COLOUR_VALUE;
-					} else if (H < 5.0) {
-						Colour->red = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 5.0);
-						Colour->green = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
-						Colour->blue = POINT_COLOUR_VALUE;
-					} else {
-						Colour->red = POINT_COLOUR_VALUE;
-						Colour->green = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
-						Colour->blue = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 5.0);
-					}
+					Colour->red = POINT_COLOUR_VALUE;
+					Colour->green = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
+					Colour->blue = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 5.0);
 				}
-				if (Field->EnumStore) {
-					gtk_list_store_set(Viewer->ValuesStore, Iter, Field->PreviewIndex, Field->EnumNames[(int)Value], Field->PreviewIndex + 1, Colour, -1);
-				} else {
-					gtk_list_store_set(Viewer->ValuesStore, Iter, Field->PreviewIndex, Value, Field->PreviewIndex + 1, &Colour, -1);
-				}
+			}
+			if (Field->EnumStore) {
+				gtk_list_store_set(Viewer->ValuesStore, Iter, Field->PreviewIndex, Field->EnumNames[(int)Value], Field->PreviewIndex + 1, Colour, -1);
+			} else {
+				gtk_list_store_set(Viewer->ValuesStore, Iter, Field->PreviewIndex, Value, Field->PreviewIndex + 1, &Colour, -1);
 			}
 		}
 	}
