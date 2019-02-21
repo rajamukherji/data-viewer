@@ -311,7 +311,7 @@ static void split_node_list_x(node_t *Root, node_t *HeadX1, node_t *HeadY, int C
 	Root->Children[1] = Root2;
 	if (Root1) split_node_list_y(Root1, HeadX1, HeadY1, Count1);
 	if (Root2) split_node_list_y(Root2, HeadX2, HeadY2, Count2);
-	printf("split_node_list_x(%d) -> %d / %d\n", Count, Count1, Count2);
+	//printf("split_node_list_x(%d) -> %d / %d\n", Count, Count1, Count2);
 }
 
 static void split_node_list_y(node_t *Root, node_t *HeadX, node_t *HeadY1, int Count) {
@@ -348,7 +348,7 @@ static void split_node_list_y(node_t *Root, node_t *HeadX, node_t *HeadY1, int C
 	Root->Children[1] = Root2;
 	if (Root1) split_node_list_x(Root1, HeadX1, HeadY1, Count1);
 	if (Root2) split_node_list_x(Root2, HeadX2, HeadY2, Count2);
-	printf("split_node_list_y(%d) -> %d / %d\n", Count, Count1, Count2);
+	//printf("split_node_list_y(%d) -> %d / %d\n", Count, Count1, Count2);
 }
 
 static void update_node_tree(viewer_t *Viewer) {
@@ -552,7 +552,7 @@ static void filter_enum_field(viewer_t *Viewer, field_t *Field) {
 	int Max = 0;
 	double *Value = Field->Values;
 	for (int I = NumNodes; --I >= 0;) {
-		if (!Node->Filtered) {
+		if (Node->Filtered) {
 			int Index = (int)Value[0];
 			if (Index && !EnumValues[Index]) EnumValues[Index] = ++Max;
 		}
