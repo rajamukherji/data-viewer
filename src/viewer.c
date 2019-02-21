@@ -43,6 +43,7 @@ struct node_t {
 	GInputStream *LoadStream;
 	GFile *File;
 	double X, Y;
+	int XIndex, YIndex;
 #ifdef USE_GL
 	double R, G, B;
 #else
@@ -99,6 +100,7 @@ struct viewer_t {
 	GtkClipboard *Clipboard;
 	node_t *Nodes, *Root;
 	node_t **Sorted, **SortBuffer;
+	node_t **SortedX, **SortedY;
 	node_batch_t *SortedBatches;
 	cairo_t *Cairo;
 	node_t **LoadCache;
@@ -115,7 +117,7 @@ struct viewer_t {
 	int *Filtered;
 	point_t Min, Max, Scale, DataMin, DataMax, Pointer;
 	double PointSize, BoxSize, EditValue;
-	int NumNodes, NumBatches, NumFields, NumCachedImages, NumVisibleImages;
+	int NumNodes, NumBatches, NumFields, NumCachedImages, NumVisibleImages, NumUpdatedNodes;
 	int XIndex, YIndex, CIndex;
 	int FilterGeneration, LoadGeneration;
 	int LoadCacheIndex;
@@ -126,112 +128,6 @@ struct viewer_t {
 	GLuint GLProgram, GLTransformLocation;
 #endif
 };
-
-static inline void foreach_node_y(viewer_t *Viewer, double X1, double Y1, double X2, double Y2, void *Data, node_callback_t *Callback, node_batch_t *Batch) {
-	int Min = 0;
-	int Max = Batch->NumNodes - 1;
-	node_t **Nodes = Batch->Nodes;
-	if (Nodes[Min]->Y > Y2) return;
-	if (Nodes[Max]->Y < Y1) return;
-	int Mid1;
-	if (Nodes[Min]->Y >= Y1) {
-		Mid1 = Min;
-	} else {
-		do {
-			Mid1 = (Min + Max) / 2;
-			if (Nodes[Mid1]->Y < Y1) {
-				Min = ++Mid1;
-			} else {
-				Max = Mid1;
-			}
-		} while (Min < Max);
-	}
-	Min = Mid1;
-	Max = Batch->NumNodes - 1;
-	int Mid2;
-	if (Nodes[Max]->Y <= Y2) {
-		Mid2 = Max;
-	} else {
-		do {
-			Mid2 = (Min + Max + 1) / 2;
-			if (Nodes[Mid2]->Y > Y2) {
-				Max = --Mid2;
-			} else {
-				Min = Mid2;
-			}
-		} while (Min < Max);
-	}
-#ifdef DEBUG
-	printf("\tYRange = [%d - %d], %f - %f\n", Mid1, Mid2, Nodes[Mid1]->Y, Nodes[Mid2]->Y);
-#endif
-	if (Batch->XMin >= X1) {
-		if (Batch->XMax <= X2) {
-			for (int I = Mid1; I <= Mid2; ++I) Callback(Data, Nodes[I]);
-		} else {
-			for (int I = Mid1; I <= Mid2; ++I) {
-				if (Nodes[I]->X <= X2) Callback(Data, Nodes[I]);
-			}
-		}
-	} else if (Batch->XMax <= X2) {
-		for (int I = Mid1; I <= Mid2; ++I) {
-			if (Nodes[I]->X >= X1) Callback(Data, Nodes[I]);
-		}
-	} else {
-		for (int I = Mid1; I <= Mid2; ++I) {
-			if (Nodes[I]->X >= X1) if (Nodes[I]->X <= X2) Callback(Data, Nodes[I]);
-		}
-	}
-}
-
-static inline void foreach_node_batches(viewer_t *Viewer, double X1, double Y1, double X2, double Y2, void *Data, node_callback_t *Callback) {
-	if (Viewer->NumBatches <=0) return;
-	clock_t Start = clock();
-	printf("foreach_node:%d @ %lu\n", __LINE__, clock() - Start);
-	int Min = 0;
-	int Max = Viewer->NumBatches - 1;
-	node_batch_t *Batches = Viewer->SortedBatches;
-	if (Batches[Min].XMin > X2) return;
-	if (Batches[Max].XMax < X1) return;
-	int Mid1;
-	if (Batches[Min].XMin >= X1) {
-		Mid1 = Min;
-	} else {
-		do {
-			Mid1 = (Min + Max) / 2;
-			if (Batches[Mid1].XMax < X1) {
-				Min = Mid1 + 1;
-			} else if (Batches[Mid1].XMin < X1) {
-				break;
-			} else {
-				Max = Mid1 - 1;
-			}
-		} while (Min <= Max);
-	}
-	Min = Mid1;
-	Max = Viewer->NumBatches - 1;
-	int Mid2;
-	if (Batches[Max].XMax <= X2) {
-		Mid2 = Max;
-	} else {
-		do {
-			Mid2 = (Min + Max + 1) / 2;
-			if (Batches[Mid2].XMin > X2) {
-				Max = Mid2 - 1;
-			} else if (Batches[Mid2].XMax > X2) {
-				break;
-			} else {
-				Min = Mid2 + 1;
-			}
-		} while (Min <= Max);
-	}
-	printf("foreach_node:%d @ %lu\n", __LINE__, clock() - Start);
-	printf("Limits = (%f, %f) - (%f, %f)\n", X1, Y1, X2, Y2);
-	printf("\tXRange = [%d - %d], %f - %f\n", Mid1, Mid2, Batches[Mid1].XMin, Batches[Mid2].XMax);
-	for (int I = Mid1; I <= Mid2; ++I) {
-		foreach_node_y(Viewer, X1, Y1, X2, Y2, Data, Callback, &Batches[I]);
-	}
-	printf("foreach_node:%d @ %lu\n", __LINE__, clock() - Start);
-}
 
 typedef struct node_foreach_t {
 	void *Data;
@@ -350,7 +246,7 @@ static node_t *create_node_tree_y(node_t **Start, node_t **End, node_t **Buffer)
 	} else {
 		merge_sort_y(Start, End, Buffer);
 		node_t **Mid = Start + (End - Start) / 2;
-		Mid[0]->Children[0] = create_node_tree_x(Start, Mid - 1, Buffer);
+		Mid[0]->Children[0] = create_node_tree_x(Start, Mid, Buffer);
 		Mid[0]->Children[1] = create_node_tree_x(Mid + 1, End, Buffer);
 		return Mid[0];
 	}
@@ -366,7 +262,7 @@ static node_t *create_node_tree_x(node_t **Start, node_t **End, node_t **Buffer)
 	} else {
 		merge_sort_x(Start, End, Buffer);
 		node_t **Mid = Start + (End - Start) / 2;
-		Mid[0]->Children[0] = create_node_tree_y(Start, Mid - 1, Buffer);
+		Mid[0]->Children[0] = create_node_tree_y(Start, Mid, Buffer);
 		Mid[0]->Children[1] = create_node_tree_y(Mid + 1, End, Buffer);
 		return Mid[0];
 	}
@@ -380,8 +276,7 @@ static void update_node_tree(viewer_t *Viewer) {
 		if (!Node->Filtered) *(Tail++) = Node;
 		++Node;
 	}
-	int NumVisibleNodes = Tail - Sorted;
-	if (NumVisibleNodes) {
+	if (Tail > Sorted) {
 		clock_t Start = clock();
 		Viewer->Root = create_node_tree_x(Sorted, Tail, Viewer->SortBuffer);
 		printf("update_node_tree:%d @ %lu\n", __LINE__, clock() - Start);
@@ -390,40 +285,98 @@ static void update_node_tree(viewer_t *Viewer) {
 	}
 }
 
-static void update_batches(viewer_t *Viewer) {
+static node_t *create_node_tree2_x(viewer_t *Viewer, int Start, int End);
+
+static node_t *create_node_tree2_y(viewer_t *Viewer, int Start, int End) {
+	if (Start == End) {
+		return 0;
+	} else if (Start + 1 == End) {
+		node_t *Node = Viewer->SortedY[Start];
+		Node->Children[0] = 0;
+		Node->Children[1] = 0;
+		return Node;
+	} else {
+		int Mid = Start + (End - Start) / 2;
+		node_t *Node = Viewer->SortedY[Mid];
+		int MidIndex = Node->YIndex;
+		// Split Viewer->SortedX by Mid
+		node_t **A = Viewer->SortBuffer + Start;
+		node_t **B = Viewer->SortBuffer + Mid + 1;
+		node_t **P = Viewer->SortedX + Start;
+		for (int I = End - Start; --I >= 0; ++P) {
+			node_t *Node2 = *P;
+			if (Node2 == Node) {
+				Viewer->SortBuffer[Mid] = Node2;
+			} else if (Node2->YIndex < MidIndex) {
+				*A++ = Node2;
+			} else {
+				*B++ = Node2;
+			}
+		}
+		memcpy(Viewer->SortedX + Start, Viewer->SortBuffer + Start, (End - Start) * sizeof(node_t *));
+		Node->Children[0] = create_node_tree2_x(Viewer, Start, Mid);
+		Node->Children[1] = create_node_tree2_x(Viewer, Mid + 1, End);
+		return Node;
+	}
+}
+
+static node_t *create_node_tree2_x(viewer_t *Viewer, int Start, int End) {
+	if (Start == End) {
+		return 0;
+	} else if (Start + 1 == End) {
+		node_t *Node = Viewer->SortedX[Start];
+		Node->Children[0] = 0;
+		Node->Children[1] = 0;
+		return Node;
+	} else {
+		int Mid = Start + (End - Start) / 2;
+		node_t *Node = Viewer->SortedX[Mid];
+		int MidIndex = Node->XIndex;
+		// Split Viewer->SortedY by Mid
+		node_t **A = Viewer->SortBuffer + Start;
+		node_t **B = Viewer->SortBuffer + Mid + 1;
+		node_t **P = Viewer->SortedY + Start;
+		for (int I = End - Start; --I >= 0; ++P) {
+			node_t *Node2 = *P;
+			if (Node2 == Node) {
+				Viewer->SortBuffer[Mid] = Node2;
+			} else if (Node2->XIndex < MidIndex) {
+				*A++ = Node2;
+			} else {
+				*B++ = Node2;
+			}
+		}
+		memcpy(Viewer->SortedY + Start, Viewer->SortBuffer + Start, (End - Start) * sizeof(node_t *));
+		Node->Children[0] = create_node_tree2_y(Viewer, Start, Mid);
+		Node->Children[1] = create_node_tree2_y(Viewer, Mid + 1, End);
+		return Node;
+	}
+}
+
+static void update_node_tree2(viewer_t *Viewer) {
 	node_t *Node = Viewer->Nodes;
 	int I = Viewer->NumNodes;
-	node_t **Sorted = Viewer->Sorted, **Tail = Sorted;
+	node_t **SortedX = Viewer->SortedX, **TailX = SortedX;
+	node_t **SortedY = Viewer->SortedY, **TailY = SortedY;
 	while (--I >= 0) {
-		if (!Node->Filtered) *(Tail++) = Node;
+		if (!Node->Filtered) {
+			*(TailX++) = Node;
+			*(TailY++) = Node;
+		}
 		++Node;
 	}
-	int NumVisibleNodes = Tail - Sorted;
-	if (NumVisibleNodes) {
+	if (TailX > SortedX) {
 		clock_t Start = clock();
-		merge_sort_x(Sorted, Tail, Viewer->SortBuffer);
-		printf("merge_sort_x:%d @ %lu\n", __LINE__, clock() - Start);
-		node_batch_t *Batch = Viewer->SortedBatches;
-		int LastBatch = (NumVisibleNodes - 1) & -BATCH_SORT_SIZE;
-		printf("NumVisibleNodes = %d, LastBatch = %d\n", NumVisibleNodes, LastBatch);
-		for (int I = 0; I < LastBatch; I += BATCH_SORT_SIZE) {
-			Batch->XMin = Sorted[0]->X;
-			Batch->XMax = Sorted[BATCH_SORT_SIZE - 1]->X;
-			Batch->Nodes = Sorted;
-			Batch->NumNodes = BATCH_SORT_SIZE;
-			merge_sort_y(Sorted, Sorted + BATCH_SORT_SIZE, Viewer->SortBuffer);
-			Sorted += BATCH_SORT_SIZE;
-			++Batch;
-		}
-		Batch->XMin = Sorted[0]->X;
-		Batch->XMax = Tail[-1]->X;
-		Batch->Nodes = Sorted;
-		Batch->NumNodes = Tail - Sorted;
-		merge_sort_y(Sorted, Tail, Viewer->SortBuffer);
-		printf("merge_sort_y:%d @ %lu\n", __LINE__, clock() - Start);
-		Viewer->NumBatches = (Batch - Viewer->SortedBatches) + 1;
+		merge_sort_x(SortedX, TailX, Viewer->SortBuffer);
+		int I = 0;
+		for (node_t **N = SortedX; N < TailX; ++N) N[0]->XIndex = I++;
+		merge_sort_y(SortedY, TailY, Viewer->SortBuffer);
+		I = 0;
+		for (node_t **N = SortedY; N < TailY; ++N) N[0]->YIndex = I++;
+		Viewer->Root = create_node_tree2_x(Viewer, 0, TailX - SortedX);
+		printf("update_node_tree2:%d @ %lu\n", __LINE__, clock() - Start);
 	} else {
-		Viewer->NumBatches = 0;
+		Viewer->Root = 0;
 	}
 }
 
@@ -446,6 +399,7 @@ static void set_viewer_indices(viewer_t *Viewer, int XIndex, int YIndex) {
 	}
 	//update_batches(Viewer);
 	update_node_tree(Viewer);
+	//update_node_tree2(Viewer);
 	double RangeX = XField->Range.Max - XField->Range.Min;
 	double RangeY = YField->Range.Max - YField->Range.Min;
 	Viewer->DataMin.X = XField->Range.Min - RangeX * 0.01;
@@ -687,6 +641,8 @@ static void viewer_open_file(viewer_t *Viewer, const char *CsvFileName, const ch
 	int NumFields = Viewer->NumFields;
 	node_t *Nodes = Viewer->Nodes = (node_t *)malloc(NumNodes * sizeof(node_t));
 	Viewer->Sorted = (node_t **)malloc(NumNodes * sizeof(node_t *));
+	Viewer->SortedX = (node_t **)malloc(NumNodes * sizeof(node_t *));
+	Viewer->SortedY = (node_t **)malloc(NumNodes * sizeof(node_t *));
 	Viewer->SortBuffer = (node_t **)malloc(NumNodes * sizeof(node_t *));
 	Viewer->SortedBatches = (node_batch_t *)malloc((NumNodes / BATCH_SORT_SIZE + 1) * sizeof(node_batch_t));
 	memset(Nodes, 0, NumNodes * sizeof(node_t));
@@ -921,6 +877,7 @@ static void update_preview(viewer_t *Viewer) {
 
 static int edit_node_value(viewer_t *Viewer, node_t *Node) {
 	field_t *Field = Viewer->EditField;
+	++Viewer->NumUpdatedNodes;
 	double Value = Field->Values[Node - Viewer->Nodes] = Viewer->EditValue;
 	if (Field == Viewer->Fields[Viewer->CIndex]) {
 		set_node_rgb(Node, 6.0 * (Value - Field->Range.Min) / (Field->Range.Max - Field->Range.Min));
@@ -928,8 +885,11 @@ static int edit_node_value(viewer_t *Viewer, node_t *Node) {
 	return 0;
 }
 
+static void viewer_filter_nodes(viewer_t *Viewer);
+
 static void edit_node_values(viewer_t *Viewer) {
 	if (!Viewer->EditField) return;
+	Viewer->NumUpdatedNodes = 0;
 	double X1 = Viewer->Min.X + (Viewer->Pointer.X - Viewer->BoxSize / 2) / Viewer->Scale.X;
 	double Y1 = Viewer->Min.Y + (Viewer->Pointer.Y - Viewer->BoxSize / 2) / Viewer->Scale.Y;
 	double X2 = Viewer->Min.X + (Viewer->Pointer.X + Viewer->BoxSize / 2) / Viewer->Scale.X;
@@ -940,6 +900,10 @@ static void edit_node_values(viewer_t *Viewer) {
 		++Viewer->FilterGeneration;
 		set_viewer_colour_index(Viewer, Viewer->CIndex);
 	}
+	char NumVisibleText[64];
+	sprintf(NumVisibleText, "%d updates", Viewer->NumUpdatedNodes);
+	gtk_label_set_text(Viewer->NumVisibleLabel, NumVisibleText);
+	viewer_filter_nodes(Viewer);
 }
 
 static inline int redraw_point(viewer_t *Viewer, node_t *Node) {
@@ -1365,6 +1329,14 @@ static gboolean motion_notify_viewer(GtkWidget *Widget, GdkEventMotion *Event, v
 		Viewer->Pointer.X = Event->x;
 		Viewer->Pointer.Y = Event->y;
 		update_preview(Viewer);
+	} else if (Event->state & GDK_SHIFT_MASK) {
+		double DeltaX = (Viewer->Pointer.X - Event->x) / Viewer->Scale.X;
+		double DeltaY = (Viewer->Pointer.Y - Event->y) / Viewer->Scale.Y;
+		pan_viewer(Viewer, DeltaX, DeltaY);
+		redraw_viewer_background(Viewer);
+		Viewer->Pointer.X = Event->x;
+		Viewer->Pointer.Y = Event->y;
+		gtk_widget_queue_draw(Widget);
 	}
 	return FALSE;
 }
@@ -1678,6 +1650,7 @@ static void viewer_filter_nodes(viewer_t *Viewer) {
 	//set_viewer_indices(Viewer, Viewer->XIndex, Viewer->YIndex);
 	//update_batches(Viewer);
 	update_node_tree(Viewer);
+	//update_node_tree2(Viewer);
 	redraw_viewer_background(Viewer);
 	update_preview(Viewer);
 	gtk_widget_queue_draw(Viewer->DrawingArea);
