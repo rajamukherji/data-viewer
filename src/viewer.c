@@ -259,6 +259,7 @@ static node_t *create_node_tree_x(node_t **Start, node_t **End, node_t **Buffer)
 }
 
 static void update_node_tree(viewer_t *Viewer) {
+	clock_t Start = clock();
 	node_t *Node = Viewer->Nodes;
 	int I = Viewer->NumNodes;
 	node_t **Sorted = Viewer->Sorted, **Tail = Sorted;
@@ -267,12 +268,11 @@ static void update_node_tree(viewer_t *Viewer) {
 		++Node;
 	}
 	if (Tail > Sorted) {
-		clock_t Start = clock();
 		Viewer->Root = create_node_tree_x(Sorted, Tail, Viewer->SortBuffer);
-		printf("update_node_tree:%d @ %lu\n", __LINE__, clock() - Start);
 	} else {
 		Viewer->Root = 0;
 	}
+<<<<<<< HEAD
 }*/
 
 static void split_node_list_y(node_t *Root, node_t *HeadX, node_t *HeadY1, int Count);
@@ -349,6 +349,9 @@ static void split_node_list_y(node_t *Root, node_t *HeadX, node_t *HeadY1, int C
 	if (Root1) split_node_list_x(Root1, HeadX1, HeadY1, Count1);
 	if (Root2) split_node_list_x(Root2, HeadX2, HeadY2, Count2);
 	//printf("split_node_list_y(%d) -> %d / %d\n", Count, Count1, Count2);
+=======
+	printf("update_node_tree took %lu\n", clock() - Start);
+>>>>>>> ae8c94fe3a6417c3607f1bb5f1a37e074d9cddab
 }
 
 static void update_node_tree(viewer_t *Viewer) {
