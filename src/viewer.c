@@ -269,6 +269,7 @@ static node_t *create_node_tree_x(node_t **Start, node_t **End, node_t **Buffer)
 }
 
 static void update_node_tree(viewer_t *Viewer) {
+	clock_t Start = clock();
 	node_t *Node = Viewer->Nodes;
 	int I = Viewer->NumNodes;
 	node_t **Sorted = Viewer->Sorted, **Tail = Sorted;
@@ -277,12 +278,11 @@ static void update_node_tree(viewer_t *Viewer) {
 		++Node;
 	}
 	if (Tail > Sorted) {
-		clock_t Start = clock();
 		Viewer->Root = create_node_tree_x(Sorted, Tail, Viewer->SortBuffer);
-		printf("update_node_tree:%d @ %lu\n", __LINE__, clock() - Start);
 	} else {
 		Viewer->Root = 0;
 	}
+	printf("update_node_tree took %lu\n", clock() - Start);
 }
 
 static node_t *create_node_tree2_x(viewer_t *Viewer, int Start, int End);
