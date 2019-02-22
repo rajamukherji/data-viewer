@@ -16,6 +16,13 @@
 #define POINT_COLOUR_CHROMA 0.5
 #define POINT_COLOUR_SATURATION 0.7
 #define POINT_COLOUR_VALUE 0.9
+#ifdef USE_GL
+#define POINT_SIZE 6.0
+#define BOX_SIZE 40.0
+#else
+#define POINT_SIZE 4.0
+#define BOX_SIZE 40.0
+#endif
 
 typedef struct node_t node_t;
 typedef int node_callback_t(void *Data, node_t *Node);
@@ -106,12 +113,12 @@ struct viewer_t {
 	field_t **Fields, *EditField;
 	filter_t *Filters;
 	point_t Min, Max, Scale, DataMin, DataMax, Pointer;
-	double PointSize, BoxSize, EditValue;
+	double EditValue;
 	int NumNodes, NumFields, NumCached, NumFiltered, NumVisible, NumUpdated;
 	int XIndex, YIndex, CIndex;
 	int FilterGeneration, LoadGeneration;
 	int LoadCacheIndex;
-	int ShowBox;
+	int ShowBox, RedrawBackground;
 #ifdef USE_GL
 	int GLCount, GLReady;
 	GLuint GLArrays[2], GLBuffers[4];
@@ -963,10 +970,10 @@ static int draw_node_value(viewer_t *Viewer, node_t *Node) {
 
 static void update_preview(viewer_t *Viewer) {
 	Viewer->NumVisible = 0;
-	double X1 = Viewer->Min.X + (Viewer->Pointer.X - Viewer->BoxSize / 2) / Viewer->Scale.X;
-	double Y1 = Viewer->Min.Y + (Viewer->Pointer.Y - Viewer->BoxSize / 2) / Viewer->Scale.Y;
-	double X2 = Viewer->Min.X + (Viewer->Pointer.X + Viewer->BoxSize / 2) / Viewer->Scale.X;
-	double Y2 = Viewer->Min.Y + (Viewer->Pointer.Y + Viewer->BoxSize / 2) / Viewer->Scale.Y;
+	double X1 = Viewer->Min.X + (Viewer->Pointer.X - BOX_SIZE / 2) / Viewer->Scale.X;
+	double Y1 = Viewer->Min.Y + (Viewer->Pointer.Y - BOX_SIZE / 2) / Viewer->Scale.Y;
+	double X2 = Viewer->Min.X + (Viewer->Pointer.X + BOX_SIZE / 2) / Viewer->Scale.X;
+	double Y2 = Viewer->Min.Y + (Viewer->Pointer.Y + BOX_SIZE / 2) / Viewer->Scale.Y;
 	if (Viewer->ImagesStore) {
 		++Viewer->LoadGeneration;
 		gtk_list_store_clear(Viewer->ImagesStore);
@@ -997,10 +1004,10 @@ static void viewer_filter_nodes(viewer_t *Viewer);
 static void edit_node_values(viewer_t *Viewer) {
 	if (!Viewer->EditField) return;
 	Viewer->NumUpdated = 0;
-	double X1 = Viewer->Min.X + (Viewer->Pointer.X - Viewer->BoxSize / 2) / Viewer->Scale.X;
-	double Y1 = Viewer->Min.Y + (Viewer->Pointer.Y - Viewer->BoxSize / 2) / Viewer->Scale.Y;
-	double X2 = Viewer->Min.X + (Viewer->Pointer.X + Viewer->BoxSize / 2) / Viewer->Scale.X;
-	double Y2 = Viewer->Min.Y + (Viewer->Pointer.Y + Viewer->BoxSize / 2) / Viewer->Scale.Y;
+	double X1 = Viewer->Min.X + (Viewer->Pointer.X - BOX_SIZE / 2) / Viewer->Scale.X;
+	double Y1 = Viewer->Min.Y + (Viewer->Pointer.Y - BOX_SIZE / 2) / Viewer->Scale.Y;
+	double X2 = Viewer->Min.X + (Viewer->Pointer.X + BOX_SIZE / 2) / Viewer->Scale.X;
+	double Y2 = Viewer->Min.Y + (Viewer->Pointer.Y + BOX_SIZE / 2) / Viewer->Scale.Y;
 	printf("\n\n%s:%d\n", __FUNCTION__, __LINE__);
 	foreach_node(Viewer, X1, Y1, X2, Y2, Viewer, (node_callback_t *)edit_node_value);
 	if (Viewer->EditField == Viewer->Fields[Viewer->CIndex]) {
@@ -1021,14 +1028,14 @@ static inline int redraw_point(viewer_t *Viewer, node_t *Node) {
 	double Y = Viewer->Scale.Y * (Node->Y - Viewer->Min.Y);
 	//printf("Point at (%f, %f)\n", X, Y);
 	int Index = Viewer->GLCount;
-	Viewer->GLVertices[3 * Index + 0] = X - Viewer->PointSize / 2;
-	Viewer->GLVertices[3 * Index + 1] = Y + Viewer->PointSize * 0.33;
+	Viewer->GLVertices[3 * Index + 0] = X - POINT_SIZE / 2;
+	Viewer->GLVertices[3 * Index + 1] = Y + POINT_SIZE * 0.33;
 	Viewer->GLVertices[3 * Index + 2] = 0.0;
 	Viewer->GLVertices[3 * Index + 3] = X;
-	Viewer->GLVertices[3 * Index + 4] = Y - Viewer->PointSize * 0.66;
+	Viewer->GLVertices[3 * Index + 4] = Y - POINT_SIZE * 0.66;
 	Viewer->GLVertices[3 * Index + 5] = 0.0;
-	Viewer->GLVertices[3 * Index + 6] = X + Viewer->PointSize / 2;
-	Viewer->GLVertices[3 * Index + 7] = Y + Viewer->PointSize * 0.33;
+	Viewer->GLVertices[3 * Index + 6] = X + POINT_SIZE / 2;
+	Viewer->GLVertices[3 * Index + 7] = Y + POINT_SIZE * 0.33;
 	Viewer->GLVertices[3 * Index + 8] = 0.0;
 	Viewer->GLColours[4 * Index + 0] = Node->R;
 	Viewer->GLColours[4 * Index + 1] = Node->G;
@@ -1046,24 +1053,58 @@ static inline int redraw_point(viewer_t *Viewer, node_t *Node) {
 #else
 	double X = Viewer->Scale.X * (Node->X - Viewer->Min.X);
 	double Y = Viewer->Scale.Y * (Node->Y - Viewer->Min.Y);
-	int X0 = (X - Viewer->PointSize / 2) + 0.5;
-	int Y0 = (Y - Viewer->PointSize / 2) + 0.5;
+	int X0 = (X - POINT_SIZE / 2) + 0.5;
+	int Y0 = (Y - POINT_SIZE / 2) + 0.5;
 	int Stride = Viewer->CachedStride;
 	unsigned int *Pixels = Viewer->CachedPixels + X0;
 	Pixels = (unsigned int *)((char *)Pixels + Y0 * Stride);
 	unsigned int Colour = Node->Colour;
-	int PointSize = Viewer->PointSize;
+	int PointSize = POINT_SIZE;
 	for (int J = PointSize; --J >= 0;) {
 		for (int I = 0; I < PointSize; ++I) Pixels[I] = Colour;
 		Pixels = (unsigned int *)((char *)Pixels + Stride);
 	}
 	/*cairo_t *Cairo = Viewer->Cairo;
 	cairo_new_path(Cairo);
-	cairo_rectangle(Cairo, X - Viewer->PointSize / 2, Y - Viewer->PointSize / 2, Viewer->PointSize, Viewer->PointSize);
+	cairo_rectangle(Cairo, X - POINT_SIZE / 2, Y - POINT_SIZE / 2, POINT_SIZE, POINT_SIZE);
 	cairo_set_source_rgb(Cairo, Node->R, Node->G, Node->B);
 	cairo_fill(Cairo);*/
 #endif
 	return 0;
+}
+
+static void redraw_viewer_background(viewer_t *Viewer) {
+#ifdef USE_GL
+	Viewer->GLCount = 0;
+	clock_t Start = clock();
+	printf("\n\n%s:%d\n", __FUNCTION__, __LINE__);
+	foreach_node(Viewer, Viewer->Min.X, Viewer->Min.Y, Viewer->Max.X, Viewer->Max.Y, Viewer, (node_callback_t *)redraw_point);
+	printf("foreach_node took %d\n", clock() - Start);
+	printf("rendered %d points\n", Viewer->GLCount);
+	if (Viewer->GLReady) {
+		gtk_gl_area_make_current(GTK_GL_AREA(Viewer->DrawingArea));
+		glBindBuffer(GL_ARRAY_BUFFER, Viewer->GLBuffers[0]);
+		glBufferData(GL_ARRAY_BUFFER, Viewer->GLCount * 3 * sizeof(float), Viewer->GLVertices, GL_STATIC_DRAW);
+		glBindBuffer(GL_ARRAY_BUFFER, Viewer->GLBuffers[1]);
+		glBufferData(GL_ARRAY_BUFFER, Viewer->GLCount * 4 * sizeof(float), Viewer->GLColours, GL_STATIC_DRAW);
+		glBindBuffer(GL_ARRAY_BUFFER, 0);
+	}
+#else
+	Viewer->RedrawBackground = 1;
+	/*guint Width = cairo_image_surface_get_width(Viewer->CachedBackground);
+	guint Height = cairo_image_surface_get_height(Viewer->CachedBackground);
+	cairo_t *Cairo = cairo_create(Viewer->CachedBackground);
+	cairo_set_source_rgb(Cairo, 1.0, 1.0, 1.0);
+	cairo_rectangle(Cairo, 0.0, 0.0, Width, Height);
+	cairo_fill(Cairo);
+	Viewer->Cairo = Cairo;
+	clock_t Start = clock();
+	printf("\n\n%s:%d\n", __FUNCTION__, __LINE__);
+	foreach_node(Viewer, Viewer->Min.X, Viewer->Min.Y, Viewer->Max.X, Viewer->Max.Y, Viewer, (node_callback_t *)redraw_point);
+	printf("foreach_node took %lu\n", clock() - Start);
+	Viewer->Cairo = 0;
+	cairo_destroy(Cairo);*/
+#endif
 }
 
 #ifdef USE_GL
@@ -1111,10 +1152,10 @@ static gboolean render_viewer(GtkGLArea *Widget, GdkGLContext *Context, viewer_t
 	glDisableVertexAttribArray(0);
 	glBindBuffer(GL_ARRAY_BUFFER, 0);
 
-	float BoxX1 = Viewer->Pointer.X - Viewer->BoxSize / 2;
-	float BoxY1 = Viewer->Pointer.Y - Viewer->BoxSize / 2;
-	float BoxX2 = Viewer->Pointer.X + Viewer->BoxSize / 2;
-	float BoxY2 = Viewer->Pointer.Y + Viewer->BoxSize / 2;
+	float BoxX1 = Viewer->Pointer.X - BOX_SIZE / 2;
+	float BoxY1 = Viewer->Pointer.Y - BOX_SIZE / 2;
+	float BoxX2 = Viewer->Pointer.X + BOX_SIZE / 2;
+	float BoxY2 = Viewer->Pointer.Y + BOX_SIZE / 2;
 
 	float BoxVertices[] = {
 		BoxX1, BoxY1, 0.1,
@@ -1254,15 +1295,31 @@ static void realize_viewer(GtkWidget *Widget, viewer_t *Viewer) {
 }
 
 static void redraw_viewer(GtkWidget *Widget, cairo_t *Cairo, viewer_t *Viewer) {
+	if (Viewer->RedrawBackground) {
+		Viewer->RedrawBackground = 1;
+		guint Width = cairo_image_surface_get_width(Viewer->CachedBackground);
+		guint Height = cairo_image_surface_get_height(Viewer->CachedBackground);
+		cairo_t *Cairo = cairo_create(Viewer->CachedBackground);
+		cairo_set_source_rgb(Cairo, 1.0, 1.0, 1.0);
+		cairo_rectangle(Cairo, 0.0, 0.0, Width, Height);
+		cairo_fill(Cairo);
+		Viewer->Cairo = Cairo;
+		clock_t Start = clock();
+		printf("\n\n%s:%d\n", __FUNCTION__, __LINE__);
+		foreach_node(Viewer, Viewer->Min.X, Viewer->Min.Y, Viewer->Max.X, Viewer->Max.Y, Viewer, (node_callback_t *)redraw_point);
+		printf("foreach_node took %lu\n", clock() - Start);
+		Viewer->Cairo = 0;
+		cairo_destroy(Cairo);
+	}
 	cairo_set_source_surface(Cairo, Viewer->CachedBackground, 0.0, 0.0);
 	cairo_paint(Cairo);
 	if (Viewer->ShowBox) {
 		cairo_new_path(Cairo);
 		cairo_rectangle(Cairo,
-			Viewer->Pointer.X - Viewer->BoxSize / 2,
-			Viewer->Pointer.Y - Viewer->BoxSize / 2,
-			Viewer->BoxSize,
-			Viewer->BoxSize
+			Viewer->Pointer.X - BOX_SIZE / 2,
+			Viewer->Pointer.Y - BOX_SIZE / 2,
+			BOX_SIZE,
+			BOX_SIZE
 		);
 		cairo_set_source_rgb(Cairo, 1.0, 1.0, 0.5);
 		cairo_stroke_preserve(Cairo);
@@ -1320,39 +1377,6 @@ static void pan_viewer(viewer_t *Viewer, double DeltaX, double DeltaY) {
 	}
 }
 
-static void redraw_viewer_background(viewer_t *Viewer) {
-#ifdef USE_GL
-	Viewer->GLCount = 0;
-	clock_t Start = clock();
-	printf("\n\n%s:%d\n", __FUNCTION__, __LINE__);
-	foreach_node(Viewer, Viewer->Min.X, Viewer->Min.Y, Viewer->Max.X, Viewer->Max.Y, Viewer, (node_callback_t *)redraw_point);
-	printf("foreach_node took %d\n", clock() - Start);
-	printf("rendered %d points\n", Viewer->GLCount);
-	if (Viewer->GLReady) {
-		gtk_gl_area_make_current(GTK_GL_AREA(Viewer->DrawingArea));
-		glBindBuffer(GL_ARRAY_BUFFER, Viewer->GLBuffers[0]);
-		glBufferData(GL_ARRAY_BUFFER, Viewer->GLCount * 3 * sizeof(float), Viewer->GLVertices, GL_STATIC_DRAW);
-		glBindBuffer(GL_ARRAY_BUFFER, Viewer->GLBuffers[1]);
-		glBufferData(GL_ARRAY_BUFFER, Viewer->GLCount * 4 * sizeof(float), Viewer->GLColours, GL_STATIC_DRAW);
-		glBindBuffer(GL_ARRAY_BUFFER, 0);
-	}
-#else
-	guint Width = cairo_image_surface_get_width(Viewer->CachedBackground);
-	guint Height = cairo_image_surface_get_height(Viewer->CachedBackground);
-	cairo_t *Cairo = cairo_create(Viewer->CachedBackground);
-	cairo_set_source_rgb(Cairo, 1.0, 1.0, 1.0);
-	cairo_rectangle(Cairo, 0.0, 0.0, Width, Height);
-	cairo_fill(Cairo);
-	Viewer->Cairo = Cairo;
-	clock_t Start = clock();
-	printf("\n\n%s:%d\n", __FUNCTION__, __LINE__);
-	foreach_node(Viewer, Viewer->Min.X, Viewer->Min.Y, Viewer->Max.X, Viewer->Max.Y, Viewer, (node_callback_t *)redraw_point);
-	printf("foreach_node took %lu\n", clock() - Start);
-	Viewer->Cairo = 0;
-	cairo_destroy(Cairo);
-#endif
-}
-
 static void resize_viewer(GtkWidget *Widget, GdkRectangle *Allocation, viewer_t *Viewer) {
 	Viewer->Scale.X = Allocation->width / (Viewer->Max.X - Viewer->Min.X);
 	Viewer->Scale.Y = Allocation->height / (Viewer->Max.Y - Viewer->Min.Y);
@@ -1361,7 +1385,7 @@ static void resize_viewer(GtkWidget *Widget, GdkRectangle *Allocation, viewer_t 
 	if (Viewer->CachedBackground) {
 		cairo_surface_destroy(Viewer->CachedBackground);
 	}
-	int PointSize = Viewer->PointSize;
+	int PointSize = POINT_SIZE;
 	int BufferSize = PointSize + 2;
 	unsigned char *Pixels = malloc((Allocation->width + 2 * BufferSize) * (Allocation->height + 2 * BufferSize) * sizeof(int));
 	int Stride = (Allocation->width + 2 * BufferSize) * sizeof(unsigned int);
@@ -1382,6 +1406,7 @@ static void resize_viewer(GtkWidget *Widget, GdkRectangle *Allocation, viewer_t 
 }
 
 static gboolean scroll_viewer(GtkWidget *Widget, GdkEventScroll *Event, viewer_t *Viewer) {
+	printf("scroll_viewer()\n");
 	double X = Viewer->Min.X + (Event->x / Viewer->Scale.X);
 	double Y = Viewer->Min.Y + (Event->y / Viewer->Scale.Y);
 	if (Event->direction == GDK_SCROLL_DOWN) {
@@ -2076,14 +2101,10 @@ static GtkWidget *create_viewer_action_bar(viewer_t *Viewer) {
 static viewer_t *create_viewer(int Argc, char *Argv[]) {
 	viewer_t *Viewer = (viewer_t *)malloc(sizeof(viewer_t));
 #ifdef USE_GL
-	Viewer->PointSize = 6.0;
-	Viewer->BoxSize = 40.0;
 	Viewer->GLVertices = 0;
 	Viewer->GLColours = 0;
 	Viewer->GLReady = 0;
 #else
-	Viewer->PointSize = 4.0;
-	Viewer->BoxSize = 40.0;
 	Viewer->CachedBackground = 0;
 #endif
 	Viewer->CacheHead = Viewer->CacheTail = 0;
@@ -2095,6 +2116,7 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 	Viewer->LoadCache = (node_t **)calloc(MAX_CACHED_IMAGES, sizeof(node_t *));
 	Viewer->LoadCacheIndex = 0;
 	Viewer->ShowBox = 0;
+	Viewer->RedrawBackground = 0;
 	Viewer->FieldsStore = gtk_list_store_new(2, G_TYPE_STRING, G_TYPE_INT);
 
 	GtkWidget *MainWindow = Viewer->MainWindow = gtk_window_new(GTK_WINDOW_TOPLEVEL);
@@ -2116,15 +2138,15 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 
 	gtk_paned_pack1(GTK_PANED(Viewer->MainVPaned), Viewer->DrawingArea, TRUE, TRUE);
 
-	cairo_surface_t *CursorSurface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, Viewer->BoxSize, Viewer->BoxSize);
+	cairo_surface_t *CursorSurface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, BOX_SIZE, BOX_SIZE);
 	cairo_t *CursorCairo = cairo_create(CursorSurface);
 	cairo_new_path(CursorCairo);
-	cairo_rectangle(CursorCairo, 0.0, 0.0, Viewer->BoxSize, Viewer->BoxSize);
+	cairo_rectangle(CursorCairo, 0.0, 0.0, BOX_SIZE, BOX_SIZE);
 	cairo_set_source_rgb(CursorCairo, 0.5, 0.5, 1.0);
 	cairo_stroke_preserve(CursorCairo);
 	cairo_set_source_rgba(CursorCairo, 0.5, 0.5, 1.0, 0.5);
 	cairo_fill(CursorCairo);
-	Viewer->Cursor = gdk_cursor_new_from_surface(gdk_display_get_default(), CursorSurface, Viewer->BoxSize / 2.0, Viewer->BoxSize / 2.0);
+	Viewer->Cursor = gdk_cursor_new_from_surface(gdk_display_get_default(), CursorSurface, BOX_SIZE / 2.0, BOX_SIZE / 2.0);
 
 	Viewer->ImagesStore = gtk_list_store_new(2, G_TYPE_STRING, GDK_TYPE_PIXBUF);
 	Viewer->ValuesStore = 0;
