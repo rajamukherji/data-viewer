@@ -275,83 +275,94 @@ static void update_node_tree(viewer_t *Viewer) {
 	}
 }*/
 
-static void split_node_list_y(node_t *Root, node_t *HeadX, node_t *HeadY1, int Count);
+static void split_node_list_y(node_t *Root, node_t *HeadX, node_t *HeadY1, int Count1, int Count2);
 
-static void split_node_list_x(node_t *Root, node_t *HeadX1, node_t *HeadY, int Count) {
+static void split_node_list_x(node_t *Root, node_t *HeadX1, node_t *HeadY, int Count1, int Count2) {
 	int RootIndex = Root->XIndex;
 	node_t *HeadY1 = 0, *HeadY2 = 0;
 	node_t **SlotY1 = &HeadY1, **SlotY2 = &HeadY2;
 	node_t *Root1 = 0, *Root2 = 0;
-	int Split1 = Count >> 2, Split2 = (Count - (Count >> 1) - 1) >> 1;
-	int Count1 = 0, Count2 = 0;
+	int Split1 = 1 + Count1 >> 1, Split2 = 1 + Count2 >> 1;
+	//printf("split_node_list_x(%d/%d, X:%d)\n\t", Count1, Count2, RootIndex);
+	//int Actual = 0, Left = 0, Right = 0;
 	for (node_t *Node = HeadY; Node; Node = Node->Children[1]) {
+		//++Actual;
+		//printf(" %d,%d", Node->XIndex, Node->YIndex);
 		if (Node->XIndex < RootIndex) {
+			//++Left;
 			if (--Split1 == 0) {
 				SlotY1[0] = 0;
 				Root1 = Node;
+				//printf("[1]");
 			} else {
 				SlotY1[0] = Node;
 			}
 			SlotY1 = &Node->Children[1];
-			++Count1;
 		} else if (Node->XIndex > RootIndex) {
+			//++Right;
 			if (--Split2 == 0) {
 				SlotY2[0] = 0;
 				Root2 = Node;
+				//printf("[2]");
 			} else {
 				SlotY2[0] = Node;
 			}
 			SlotY2 = &Node->Children[1];
-			++Count2;
 		}
 	}
+	//printf(" -> %d/%d/%d\n", Actual, Left, Right);
 	SlotY1[0] = SlotY2[0] = 0;
 	node_t *HeadX2 = Root->Children[0];
 	Root->Children[0] = Root1;
 	Root->Children[1] = Root2;
-	if (Root1) split_node_list_y(Root1, HeadX1, HeadY1, Count1);
-	if (Root2) split_node_list_y(Root2, HeadX2, HeadY2, Count2);
-	//printf("split_node_list_x(%d) -> %d / %d\n", Count, Count1, Count2);
+	if (Root1) split_node_list_y(Root1, HeadX1, HeadY1, Count1 - (Count1 >> 1) - 1, Count1 >> 1);
+	if (Root2) split_node_list_y(Root2, HeadX2, HeadY2, Count2 - (Count2 >> 1) - 1, Count2 >> 1);
 }
 
-static void split_node_list_y(node_t *Root, node_t *HeadX, node_t *HeadY1, int Count) {
+static void split_node_list_y(node_t *Root, node_t *HeadX, node_t *HeadY1, int Count1, int Count2) {
 	int RootIndex = Root->YIndex;
 	node_t *HeadX1 = 0, *HeadX2 = 0;
 	node_t **SlotX1 = &HeadX1, **SlotX2 = &HeadX2;
 	node_t *Root1 = 0, *Root2 = 0;
-	int Split1 = Count >> 2, Split2 = (Count - (Count >> 1) - 1) >> 1;
-	int Count1 = 0, Count2 = 0;
+	int Split1 = 1 + Count1 >> 1, Split2 = 1 + Count2 >> 1;
+	//printf("split_node_list_y(%d/%d, X:%d)\n\t", Count1, Count2, RootIndex);
+	//int Actual = 0, Left = 0, Right = 0;
 	for (node_t *Node = HeadX; Node; Node = Node->Children[0]) {
+		//++Actual;
+		//printf(" %d,%d", Node->XIndex, Node->YIndex);
 		if (Node->YIndex < RootIndex) {
+			//++Left;
 			if (--Split1 == 0) {
 				SlotX1[0] = 0;
 				Root1 = Node;
+				//printf("[1]");
 			} else {
 				SlotX1[0] = Node;
 			}
 			SlotX1 = &Node->Children[0];
-			++Count1;
 		} else if (Node->YIndex > RootIndex) {
+			//++Right;
 			if (--Split2 == 0) {
 				SlotX2[0] = 0;
 				Root2 = Node;
+				//printf("[2]");
 			} else {
 				SlotX2[0] = Node;
 			}
 			SlotX2 = &Node->Children[0];
-			++Count2;
 		}
 	}
+	//printf(" -> %d/%d/%d\n", Actual, Left, Right);
 	SlotX1[0] = SlotX2[0] = 0;
 	node_t *HeadY2 = Root->Children[1];
 	Root->Children[0] = Root1;
 	Root->Children[1] = Root2;
-	if (Root1) split_node_list_x(Root1, HeadX1, HeadY1, Count1);
-	if (Root2) split_node_list_x(Root2, HeadX2, HeadY2, Count2);
-	//printf("split_node_list_y(%d) -> %d / %d\n", Count, Count1, Count2);
+	if (Root1) split_node_list_x(Root1, HeadX1, HeadY1, Count1 - (Count1 >> 1) - 1, Count1 >> 1);
+	if (Root2) split_node_list_x(Root2, HeadX2, HeadY2, Count2 - (Count2 >> 1) - 1, Count2 >> 1);
 }
 
 static void update_node_tree(viewer_t *Viewer) {
+	clock_t Start = clock();
 	if (Viewer->NumFiltered == 0) {
 		Viewer->Root = 0;
 	} else if (Viewer->NumFiltered == 1) {
@@ -361,7 +372,8 @@ static void update_node_tree(viewer_t *Viewer) {
 		Node->Children[1] = 0;
 		Viewer->Root = Node;
 	} else {
-		int MidIndex = Viewer->NumFiltered >> 1;
+		int Count1 = Viewer->NumFiltered >> 1;
+		int MidIndex = Count1 + 1;
 		node_t *HeadX = 0, *HeadY = 0;
 		node_t **SlotX = &HeadX, **SlotY = &HeadY;
 		node_t **NodeX = Viewer->SortedX, **NodeY = Viewer->SortedY;
@@ -383,9 +395,10 @@ static void update_node_tree(viewer_t *Viewer) {
 			}
 		}
 		SlotX[0] = SlotY[0] = 0;
-		split_node_list_x(Root, HeadX, HeadY, Viewer->NumFiltered);
+		split_node_list_x(Root, HeadX, HeadY, Count1, Viewer->NumFiltered - Count1 - 1);
 		Viewer->Root = Root;
 	}
+	printf("update_node_tree took %lu\n", clock() - Start);
 }
 
 static node_t *merge_sort_list_x(node_t *Start, node_t *End) {
@@ -902,48 +915,46 @@ static int draw_node_value(viewer_t *Viewer, node_t *Node) {
 	int Index = Node - Viewer->Nodes;
 	GtkTreeIter Iter[1];
 	gtk_list_store_append(Viewer->ValuesStore, Iter);
-	if (Viewer->NumVisible <= MAX_VISIBLE_IMAGES) {
-		for (int I = 0; I < NumFields; ++I) {
-			field_t *Field = Fields[I];
-			if (Field->PreviewColumn) {
-				double Value = Field->Values[Index];
-				GdkRGBA Colour[1];
-				Colour->alpha = 0.5;
-				if (Field->EnumStore && Value == 0.0) {
-					Colour->red = Colour->green = Colour->blue = POINT_COLOUR_SATURATION;
+	for (int I = 0; I < NumFields; ++I) {
+		field_t *Field = Fields[I];
+		if (Field->PreviewColumn) {
+			double Value = Field->Values[Index];
+			GdkRGBA Colour[1];
+			Colour->alpha = 0.5;
+			if (Field->EnumStore && Value == 0.0) {
+				Colour->red = Colour->green = Colour->blue = POINT_COLOUR_SATURATION;
+			} else {
+				double H = 6.0 * (Value - Field->Range.Min) / (Field->Range.Max - Field->Range.Min);
+				if (H < 1.0) {
+					Colour->red = POINT_COLOUR_VALUE;
+					Colour->green = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 1.0);
+					Colour->blue = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
+				} else if (H < 2.0) {
+					Colour->red = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 1.0);
+					Colour->green = POINT_COLOUR_VALUE;
+					Colour->blue = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
+				} else if (H < 3.0) {
+					Colour->red = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
+					Colour->green = POINT_COLOUR_VALUE;
+					Colour->blue = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 3.0);
+				} else if (H < 4.0) {
+					Colour->red = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
+					Colour->green = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 3.0);
+					Colour->blue = POINT_COLOUR_VALUE;
+				} else if (H < 5.0) {
+					Colour->red = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 5.0);
+					Colour->green = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
+					Colour->blue = POINT_COLOUR_VALUE;
 				} else {
-					double H = 6.0 * (Value - Field->Range.Min) / (Field->Range.Max - Field->Range.Min);
-					if (H < 1.0) {
-						Colour->red = POINT_COLOUR_VALUE;
-						Colour->green = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 1.0);
-						Colour->blue = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
-					} else if (H < 2.0) {
-						Colour->red = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 1.0);
-						Colour->green = POINT_COLOUR_VALUE;
-						Colour->blue = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
-					} else if (H < 3.0) {
-						Colour->red = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
-						Colour->green = POINT_COLOUR_VALUE;
-						Colour->blue = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 3.0);
-					} else if (H < 4.0) {
-						Colour->red = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
-						Colour->green = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 3.0);
-						Colour->blue = POINT_COLOUR_VALUE;
-					} else if (H < 5.0) {
-						Colour->red = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 5.0);
-						Colour->green = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
-						Colour->blue = POINT_COLOUR_VALUE;
-					} else {
-						Colour->red = POINT_COLOUR_VALUE;
-						Colour->green = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
-						Colour->blue = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 5.0);
-					}
+					Colour->red = POINT_COLOUR_VALUE;
+					Colour->green = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
+					Colour->blue = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 5.0);
 				}
-				if (Field->EnumStore) {
-					gtk_list_store_set(Viewer->ValuesStore, Iter, Field->PreviewIndex, Field->EnumNames[(int)Value], Field->PreviewIndex + 1, Colour, -1);
-				} else {
-					gtk_list_store_set(Viewer->ValuesStore, Iter, Field->PreviewIndex, Value, Field->PreviewIndex + 1, &Colour, -1);
-				}
+			}
+			if (Field->EnumStore) {
+				gtk_list_store_set(Viewer->ValuesStore, Iter, Field->PreviewIndex, Field->EnumNames[(int)Value], Field->PreviewIndex + 1, Colour, -1);
+			} else {
+				gtk_list_store_set(Viewer->ValuesStore, Iter, Field->PreviewIndex, Value, Field->PreviewIndex + 1, &Colour, -1);
 			}
 		}
 	}
