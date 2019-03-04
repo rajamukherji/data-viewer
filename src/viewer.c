@@ -2018,12 +2018,11 @@ static void preview_column_visible_toggled(GtkCellRendererToggle *Renderer, char
 	gtk_tree_model_get(GTK_TREE_MODEL(Viewer->FieldsStore), Iter, 1, &Index, -1);
 	field_t *Field = Viewer->Fields[Index];
 	Field->PreviewVisible = !Field->PreviewVisible;
-	gtk_tree_view_column_set_visible(Field->PreviewColumn, Field->PreviewVisible);
+	if (Viewer->ValuesStore) gtk_tree_view_column_set_visible(Field->PreviewColumn, Field->PreviewVisible);
 	gtk_list_store_set(Viewer->FieldsStore, Iter, 2, Field->PreviewVisible, -1);
 }
 
 static void show_columns_clicked(GtkWidget *Button, viewer_t *Viewer) {
-	if (!Viewer->ValuesStore) return;
 	GtkWidget *Window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
 	gtk_window_set_transient_for(GTK_WINDOW(Window), GTK_WINDOW(Viewer->MainWindow));
 	gtk_container_set_border_width(GTK_CONTAINER(Window), 6);
@@ -2041,7 +2040,8 @@ static GtkWidget *create_viewer_action_bar(viewer_t *Viewer) {
 	GtkActionBar *ActionBar = GTK_ACTION_BAR(gtk_action_bar_new());
 	//GtkToolItem *OpenCsvButton = gtk_tool_button_new(gtk_image_new_from_icon_name("gtk-open", GTK_ICON_SIZE_BUTTON), "Open");
 	GtkWidget *SaveCsvButton = gtk_button_new_with_label("Save");
-	gtk_button_set_image(GTK_BUTTON(SaveCsvButton), gtk_image_new_from_icon_name("document-save-as", GTK_ICON_SIZE_BUTTON));
+	gtk_button_set_image(GTK_BUTTON(SaveCsvButton), gtk_image_new_from_icon_name("document-save-as-symbolic", GTK_ICON_SIZE_BUTTON));
+	g_object_set(SaveCsvButton, "always-show-image", TRUE, NULL);
 	gtk_action_bar_pack_start(ActionBar, SaveCsvButton);
 
 	g_signal_connect(G_OBJECT(SaveCsvButton), "clicked", G_CALLBACK(save_csv), Viewer);
@@ -2085,10 +2085,12 @@ static GtkWidget *create_viewer_action_bar(viewer_t *Viewer) {
 	g_signal_connect(G_OBJECT(EditValueComboBox), "changed", G_CALLBACK(edit_value_changed), Viewer);
 
 	GtkWidget *AddFieldButton = gtk_button_new_with_label("Add Field");
-	gtk_button_set_image(GTK_BUTTON(AddFieldButton), gtk_image_new_from_icon_name("list-add", GTK_ICON_SIZE_BUTTON));
+	gtk_button_set_image(GTK_BUTTON(AddFieldButton), gtk_image_new_from_icon_name("list-add-symbolic", GTK_ICON_SIZE_BUTTON));
+	g_object_set(AddFieldButton, "always-show-image", TRUE, NULL);
 
 	GtkWidget *AddValueButton = gtk_button_new_with_label("Add Value");
-	gtk_button_set_image(GTK_BUTTON(AddValueButton), gtk_image_new_from_icon_name("list-add", GTK_ICON_SIZE_BUTTON));
+	gtk_button_set_image(GTK_BUTTON(AddValueButton), gtk_image_new_from_icon_name("list-add-symbolic", GTK_ICON_SIZE_BUTTON));
+	g_object_set(AddValueButton, "always-show-image", TRUE, NULL);
 
 	gtk_action_bar_pack_start(ActionBar, gtk_label_new("Edit"));
 	gtk_action_bar_pack_start(ActionBar, EditFieldComboBox);
@@ -2104,19 +2106,23 @@ static GtkWidget *create_viewer_action_bar(viewer_t *Viewer) {
 	create_filter_window(Viewer);
 
 	GtkWidget *FilterButton = gtk_button_new_with_label("Filter");
-	gtk_button_set_image(GTK_BUTTON(FilterButton), gtk_image_new_from_icon_name("edit-find-replace", GTK_ICON_SIZE_BUTTON));
+	gtk_button_set_image(GTK_BUTTON(FilterButton), gtk_image_new_from_icon_name("edit-find-replace-symbolic", GTK_ICON_SIZE_BUTTON));
+	g_object_set(FilterButton, "always-show-image", TRUE, NULL);
 	gtk_action_bar_pack_start(ActionBar, FilterButton);
 
 	g_signal_connect(G_OBJECT(FilterButton), "clicked", G_CALLBACK(show_filter_window), Viewer);
 
 	GtkWidget *ViewImagesButton = gtk_button_new_with_label("Images");
-	gtk_button_set_image(GTK_BUTTON(ViewImagesButton), gtk_image_new_from_icon_name("view-paged", GTK_ICON_SIZE_BUTTON));
+	gtk_button_set_image(GTK_BUTTON(ViewImagesButton), gtk_image_new_from_icon_name("view-grid-symbolic", GTK_ICON_SIZE_BUTTON));
+	g_object_set(ViewImagesButton, "always-show-image", TRUE, NULL);
 
 	GtkWidget *ViewDataButton = gtk_button_new_with_label("Data");
-	gtk_button_set_image(GTK_BUTTON(AddValueButton), gtk_image_new_from_icon_name("view-grid", GTK_ICON_SIZE_BUTTON));
+	gtk_button_set_image(GTK_BUTTON(ViewDataButton), gtk_image_new_from_icon_name("view-list-symbolic", GTK_ICON_SIZE_BUTTON));
+	g_object_set(ViewDataButton, "always-show-image", TRUE, NULL);
 
-	GtkWidget *ShowColumnsButton = gtk_button_new_with_label("Select Columns");
-	gtk_button_set_image(GTK_BUTTON(ShowColumnsButton), gtk_image_new_from_icon_name("object-select", GTK_ICON_SIZE_BUTTON));
+	GtkWidget *ShowColumnsButton = gtk_button_new_with_label("Columns");
+	gtk_button_set_image(GTK_BUTTON(ShowColumnsButton), gtk_image_new_from_icon_name("object-select-symbolic", GTK_ICON_SIZE_BUTTON));
+	g_object_set(ShowColumnsButton, "always-show-image", TRUE, NULL);
 
 	gtk_action_bar_pack_start(ActionBar, ViewImagesButton);
 	gtk_action_bar_pack_start(ActionBar, ViewDataButton);
