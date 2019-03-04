@@ -68,7 +68,7 @@ struct field_t {
 	GtkTreeViewColumn *PreviewColumn;
 	range_t Range;
 	int EnumSize;
-	int PreviewIndex;
+	int PreviewVisible;
 	int FilterGeneration;
 	double Sum, Sum2, SD;
 	double Values[];
@@ -289,7 +289,7 @@ static void split_node_list_x(node_t *Root, node_t *HeadX1, node_t *HeadY, int C
 	node_t *HeadY1 = 0, *HeadY2 = 0;
 	node_t **SlotY1 = &HeadY1, **SlotY2 = &HeadY2;
 	node_t *Root1 = 0, *Root2 = 0;
-	int Split1 = 1 + Count1 >> 1, Split2 = 1 + Count2 >> 1;
+	int Split1 = (1 + Count1) >> 1, Split2 = (1 + Count2) >> 1;
 	//printf("split_node_list_x(%d/%d, X:%d)\n\t", Count1, Count2, RootIndex);
 	//int Actual = 0, Left = 0, Right = 0;
 	for (node_t *Node = HeadY; Node; Node = Node->Children[1]) {
@@ -331,7 +331,7 @@ static void split_node_list_y(node_t *Root, node_t *HeadX, node_t *HeadY1, int C
 	node_t *HeadX1 = 0, *HeadX2 = 0;
 	node_t **SlotX1 = &HeadX1, **SlotX2 = &HeadX2;
 	node_t *Root1 = 0, *Root2 = 0;
-	int Split1 = 1 + Count1 >> 1, Split2 = 1 + Count2 >> 1;
+	int Split1 = (1 + Count1) >> 1, Split2 = (1 + Count2) >> 1;
 	//printf("split_node_list_y(%d/%d, X:%d)\n\t", Count1, Count2, RootIndex);
 	//int Actual = 0, Left = 0, Right = 0;
 	for (node_t *Node = HeadX; Node; Node = Node->Children[0]) {
@@ -767,8 +767,8 @@ static void viewer_open_file(viewer_t *Viewer, const char *CsvFileName, const ch
 		Field->EnumHash = 0;
 		Field->Range.Min = INFINITY;
 		Field->Range.Max = -INFINITY;
-		Field->PreviewIndex = -1;
 		Field->PreviewColumn = 0;
+		Field->PreviewVisible = 1;
 		Field->FilterGeneration = 0;
 		Field->Sum = Field->Sum2 = 0.0;
 		Fields[I] = Field;
@@ -794,7 +794,7 @@ static void viewer_open_file(viewer_t *Viewer, const char *CsvFileName, const ch
 
 	for (int I = 0; I < NumFields; ++I) {
 		field_t *Field = Fields[I];
-		gtk_list_store_insert_with_values(Viewer->FieldsStore, 0, -1, 0, Field->Name, 1, I, -1);
+		gtk_list_store_insert_with_values(Viewer->FieldsStore, 0, -1, 0, Field->Name, 1, I, 2, TRUE, -1);
 		if (Field->EnumHash) {
 			int EnumSize = Field->EnumSize = g_hash_table_size(Field->EnumHash) + 1;
 			const char **EnumNames = (const char **)malloc(EnumSize * sizeof(const char *));
@@ -959,9 +959,9 @@ static int draw_node_value(viewer_t *Viewer, node_t *Node) {
 				}
 			}
 			if (Field->EnumStore) {
-				gtk_list_store_set(Viewer->ValuesStore, Iter, Field->PreviewIndex, Field->EnumNames[(int)Value], Field->PreviewIndex + 1, Colour, -1);
+				gtk_list_store_set(Viewer->ValuesStore, Iter, 2 * I, Field->EnumNames[(int)Value], 2 * I + 1, Colour, -1);
 			} else {
-				gtk_list_store_set(Viewer->ValuesStore, Iter, Field->PreviewIndex, Value, Field->PreviewIndex + 1, &Colour, -1);
+				gtk_list_store_set(Viewer->ValuesStore, Iter, 2 * I, Value, 2 * I + 1, &Colour, -1);
 			}
 		}
 	}
@@ -1494,7 +1494,7 @@ static gboolean key_press_viewer(GtkWidget *Widget, GdkEventKey *Event, viewer_t
 					Viewer
 				);
 			}
-			return FALSE;
+			return TRUE;
 		}
 		break;
 	}
@@ -1504,6 +1504,26 @@ static gboolean key_press_viewer(GtkWidget *Widget, GdkEventKey *Event, viewer_t
 		cairo_surface_write_to_png(Viewer->CachedBackground, "screenshot.png");
 #endif
 		break;
+	}
+	case GDK_KEY_Left: {
+		pan_viewer(Viewer, -BOX_SIZE / Viewer->Scale.X, 0.0);
+		gtk_widget_queue_draw(Widget);
+		return TRUE;
+	}
+	case GDK_KEY_Right: {
+		pan_viewer(Viewer, BOX_SIZE / Viewer->Scale.X, 0.0);
+		gtk_widget_queue_draw(Widget);
+		return TRUE;
+	}
+	case GDK_KEY_Up: {
+		pan_viewer(Viewer, 0.0, -BOX_SIZE / Viewer->Scale.Y);
+		gtk_widget_queue_draw(Widget);
+		return TRUE;
+	}
+	case GDK_KEY_Down: {
+		pan_viewer(Viewer, 0.0, BOX_SIZE / Viewer->Scale.Y);
+		gtk_widget_queue_draw(Widget);
+		return TRUE;
 	}
 	}
 	return FALSE;
@@ -1606,7 +1626,7 @@ static void edit_value_changed(GtkComboBox *Widget, viewer_t *Viewer) {
 
 static void add_field_callback(const char *Name, viewer_t *Viewer, void *Data) {
 	Name = strdup(Name);
-	gtk_list_store_insert_with_values(Viewer->FieldsStore, 0, -1, 0, Name, 1, Viewer->NumFields, -1);
+	gtk_list_store_insert_with_values(Viewer->FieldsStore, 0, -1, 0, Name, 1, Viewer->NumFields, 2, TRUE, -1);
 	int NumFields = Viewer->NumFields + 1;
 	field_t **Fields = (field_t **)malloc(NumFields * sizeof(field_t *));
 	field_t *Field = (field_t *)malloc(sizeof(field_t) + Viewer->NumNodes * sizeof(double));
@@ -1616,8 +1636,8 @@ static void add_field_callback(const char *Name, viewer_t *Viewer, void *Data) {
 	Field->EnumNames[0] = "";
 	Field->EnumSize = 1;
 	Field->Name = Name;
-	Field->PreviewIndex = -1;
 	Field->PreviewColumn = 0;
+	Field->PreviewVisible = 1;
 	Field->FilterGeneration = 0;
 	Field->Sum = Field->Sum2 = 0.0;
 	gtk_list_store_insert_with_values(Field->EnumStore, 0, -1, 0, "", 1, 0.0, -1);
@@ -1948,13 +1968,6 @@ static void view_images_clicked(GtkWidget *Button, viewer_t *Viewer) {
 	update_preview(Viewer);
 }
 
-static void data_column_remove_clicked(GtkWidget *Button, field_t *Field) {
-	Field->PreviewIndex = -1;
-	GtkTreeView *ValuesView = GTK_TREE_VIEW(gtk_tree_view_column_get_tree_view(Field->PreviewColumn));
-	gtk_tree_view_remove_column(ValuesView, Field->PreviewColumn);
-	Field->PreviewColumn = 0;
-}
-
 static void view_data_clicked(GtkWidget *Button, viewer_t *Viewer) {
 	if (Viewer->ValuesStore) {
 		g_object_unref(G_OBJECT(Viewer->ValuesStore));
@@ -1966,38 +1979,29 @@ static void view_data_clicked(GtkWidget *Button, viewer_t *Viewer) {
 	}
 	gtk_container_remove(GTK_CONTAINER(Viewer->MainVPaned), Viewer->PreviewWidget);
 	int NumFields = Viewer->NumFields;
-	GType Types[NumFields * 2 - 2];
-	for (int I = 1; I < NumFields; ++I) {
+	GType Types[NumFields * 2];
+	for (int I = 0; I < NumFields; ++I) {
 		field_t *Field = Viewer->Fields[I];
-		Types[2 * I - 2] = Field->EnumStore ? G_TYPE_STRING : G_TYPE_DOUBLE;
-		Types[2 * I - 1] = GDK_TYPE_RGBA;
-		Field->PreviewIndex = 2 * I - 2;
+		Types[2 * I] = Field->EnumStore ? G_TYPE_STRING : G_TYPE_DOUBLE;
+		Types[2 * I + 1] = GDK_TYPE_RGBA;
 	}
 
-	Viewer->ValuesStore = gtk_list_store_newv(2 * NumFields - 2, Types);
+	Viewer->ValuesStore = gtk_list_store_newv(2 * NumFields, Types);
 	GtkWidget *ValuesScrolledArea = Viewer->PreviewWidget = gtk_scrolled_window_new(0, 0);
 	GtkWidget *ValuesView = gtk_tree_view_new_with_model(GTK_TREE_MODEL(Viewer->ValuesStore));
 
-	for (int I = 1; I < NumFields; ++I) {
+	for (int I = 0; I < NumFields; ++I) {
 		field_t *Field = Viewer->Fields[I];
 		GtkTreeViewColumn *Column = gtk_tree_view_column_new();
-		GtkWidget *Header = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
-		GtkWidget *Title = gtk_label_new(Field->Name);
-		gtk_box_pack_start(GTK_BOX(Header), Title, TRUE, TRUE, 2);
-		GtkWidget *RemoveButton = gtk_event_box_new();
-		gtk_container_add(GTK_CONTAINER(RemoveButton), gtk_image_new_from_icon_name("window-close", GTK_ICON_SIZE_SMALL_TOOLBAR));
-		gtk_box_pack_end(GTK_BOX(Header), RemoveButton, FALSE, FALSE, 2);
-		gtk_tree_view_column_set_widget(Column, Header);
-		gtk_widget_show_all(Header);
-		gtk_tree_view_column_set_clickable(Column, TRUE);
+		gtk_tree_view_column_set_title(Column, Field->Name);
 		gtk_tree_view_column_set_reorderable(Column, TRUE);
 		GtkCellRenderer *Renderer = gtk_cell_renderer_text_new();
 		gtk_tree_view_column_pack_start(Column, Renderer, TRUE);
-		gtk_tree_view_column_add_attribute(Column, Renderer, "text", Field->PreviewIndex);
-		gtk_tree_view_column_add_attribute(Column, Renderer, "background-rgba", Field->PreviewIndex + 1);
+		gtk_tree_view_column_add_attribute(Column, Renderer, "text", 2 * I);
+		gtk_tree_view_column_add_attribute(Column, Renderer, "background-rgba", 2 * I + 1);
 		gtk_tree_view_append_column(GTK_TREE_VIEW(ValuesView), Column);
+		gtk_tree_view_column_set_visible(Column, Field->PreviewVisible);
 		Field->PreviewColumn = Column;
-		g_signal_connect(Column, "clicked", G_CALLBACK(data_column_remove_clicked), Field);
 	}
 
 	gtk_container_add(GTK_CONTAINER(ValuesScrolledArea), ValuesView);
@@ -2005,6 +2009,32 @@ static void view_data_clicked(GtkWidget *Button, viewer_t *Viewer) {
 	gtk_widget_show_all(ValuesScrolledArea);
 
 	update_preview(Viewer);
+}
+
+static void preview_column_visible_toggled(GtkCellRendererToggle *Renderer, char *Path, viewer_t *Viewer) {
+	GtkTreeIter Iter[1];
+	gtk_tree_model_get_iter_from_string(GTK_TREE_MODEL(Viewer->FieldsStore), Iter, Path);
+	int Index;
+	gtk_tree_model_get(GTK_TREE_MODEL(Viewer->FieldsStore), Iter, 1, &Index, -1);
+	field_t *Field = Viewer->Fields[Index];
+	Field->PreviewVisible = !Field->PreviewVisible;
+	gtk_tree_view_column_set_visible(Field->PreviewColumn, Field->PreviewVisible);
+	gtk_list_store_set(Viewer->FieldsStore, Iter, 2, Field->PreviewVisible, -1);
+}
+
+static void show_columns_clicked(GtkWidget *Button, viewer_t *Viewer) {
+	if (!Viewer->ValuesStore) return;
+	GtkWidget *Window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+	gtk_window_set_transient_for(GTK_WINDOW(Window), GTK_WINDOW(Viewer->MainWindow));
+	gtk_container_set_border_width(GTK_CONTAINER(Window), 6);
+	GtkWidget *FieldsView = gtk_tree_view_new_with_model(GTK_TREE_MODEL(Viewer->FieldsStore));
+	GtkCellRenderer *VisibleRenderer = gtk_cell_renderer_toggle_new();
+	gtk_tree_view_append_column(GTK_TREE_VIEW(FieldsView), gtk_tree_view_column_new_with_attributes("Name", gtk_cell_renderer_text_new(), "text", 0, NULL));
+	gtk_tree_view_append_column(GTK_TREE_VIEW(FieldsView), gtk_tree_view_column_new_with_attributes("Visible", VisibleRenderer, "active", 2, NULL));
+	gtk_container_add(GTK_CONTAINER(Window), FieldsView);
+	g_signal_connect(G_OBJECT(VisibleRenderer), "toggled", G_CALLBACK(preview_column_visible_toggled), Viewer);
+	gtk_widget_show_all(Window);
+	g_signal_connect(G_OBJECT(Window), "delete-event", G_CALLBACK(gtk_widget_destroy), Viewer);
 }
 
 static GtkWidget *create_viewer_action_bar(viewer_t *Viewer) {
@@ -2055,10 +2085,10 @@ static GtkWidget *create_viewer_action_bar(viewer_t *Viewer) {
 	g_signal_connect(G_OBJECT(EditValueComboBox), "changed", G_CALLBACK(edit_value_changed), Viewer);
 
 	GtkWidget *AddFieldButton = gtk_button_new_with_label("Add Field");
-	gtk_button_set_image(GTK_BUTTON(AddFieldButton), gtk_image_new_from_icon_name("list-add-symbolic", GTK_ICON_SIZE_BUTTON));
+	gtk_button_set_image(GTK_BUTTON(AddFieldButton), gtk_image_new_from_icon_name("list-add", GTK_ICON_SIZE_BUTTON));
 
 	GtkWidget *AddValueButton = gtk_button_new_with_label("Add Value");
-	gtk_button_set_image(GTK_BUTTON(AddValueButton), gtk_image_new_from_icon_name("list-add-symbolic", GTK_ICON_SIZE_BUTTON));
+	gtk_button_set_image(GTK_BUTTON(AddValueButton), gtk_image_new_from_icon_name("list-add", GTK_ICON_SIZE_BUTTON));
 
 	gtk_action_bar_pack_start(ActionBar, gtk_label_new("Edit"));
 	gtk_action_bar_pack_start(ActionBar, EditFieldComboBox);
@@ -2079,17 +2109,22 @@ static GtkWidget *create_viewer_action_bar(viewer_t *Viewer) {
 
 	g_signal_connect(G_OBJECT(FilterButton), "clicked", G_CALLBACK(show_filter_window), Viewer);
 
-	GtkWidget *ViewImagesButton = gtk_button_new_with_label("View Images");
-	gtk_button_set_image(GTK_BUTTON(ViewImagesButton), gtk_image_new_from_icon_name("image-x-generic", GTK_ICON_SIZE_BUTTON));
+	GtkWidget *ViewImagesButton = gtk_button_new_with_label("Images");
+	gtk_button_set_image(GTK_BUTTON(ViewImagesButton), gtk_image_new_from_icon_name("view-paged", GTK_ICON_SIZE_BUTTON));
 
-	GtkWidget *ViewDataButton = gtk_button_new_with_label("View Data");
-	gtk_button_set_image(GTK_BUTTON(AddValueButton), gtk_image_new_from_icon_name("view-list", GTK_ICON_SIZE_BUTTON));
+	GtkWidget *ViewDataButton = gtk_button_new_with_label("Data");
+	gtk_button_set_image(GTK_BUTTON(AddValueButton), gtk_image_new_from_icon_name("view-grid", GTK_ICON_SIZE_BUTTON));
+
+	GtkWidget *ShowColumnsButton = gtk_button_new_with_label("Select Columns");
+	gtk_button_set_image(GTK_BUTTON(ShowColumnsButton), gtk_image_new_from_icon_name("object-select", GTK_ICON_SIZE_BUTTON));
 
 	gtk_action_bar_pack_start(ActionBar, ViewImagesButton);
 	gtk_action_bar_pack_start(ActionBar, ViewDataButton);
+	gtk_action_bar_pack_start(ActionBar, ShowColumnsButton);
 
 	g_signal_connect(G_OBJECT(ViewImagesButton), "clicked", G_CALLBACK(view_images_clicked), Viewer);
 	g_signal_connect(G_OBJECT(ViewDataButton), "clicked", G_CALLBACK(view_data_clicked), Viewer);
+	g_signal_connect(G_OBJECT(ShowColumnsButton), "clicked", G_CALLBACK(show_columns_clicked), Viewer);
 
 	GtkWidget *NumVisibleLabel = gtk_label_new(0);
 	gtk_action_bar_pack_end(ActionBar, NumVisibleLabel);
@@ -2117,7 +2152,7 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 	Viewer->LoadCacheIndex = 0;
 	Viewer->ShowBox = 0;
 	Viewer->RedrawBackground = 0;
-	Viewer->FieldsStore = gtk_list_store_new(2, G_TYPE_STRING, G_TYPE_INT);
+	Viewer->FieldsStore = gtk_list_store_new(3, G_TYPE_STRING, G_TYPE_INT, G_TYPE_BOOLEAN);
 
 	GtkWidget *MainWindow = Viewer->MainWindow = gtk_window_new(GTK_WINDOW_TOPLEVEL);
 #ifdef USE_GL
