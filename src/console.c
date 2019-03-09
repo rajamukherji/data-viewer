@@ -91,7 +91,6 @@ static void console_submit(GtkWidget *Button, console_t *Console) {
 	gtk_text_buffer_get_end_iter(LogBuffer, End);
 	gtk_text_buffer_insert_range(LogBuffer, End, InputStart, InputEnd);
 	gtk_text_buffer_insert(LogBuffer, End, "\n", -1);
-
 	gtk_text_buffer_set_text(InputBuffer, "", 0);
 
 	mlc_scanner_t *Scanner = Console->Scanner;
@@ -166,6 +165,7 @@ static gboolean console_keypress(GtkWidget *Widget, GdkEventKey *Event, console_
 void console_show(console_t *Console, GtkWindow *Parent) {
 	gtk_window_set_transient_for(Parent, GTK_WINDOW(Console->Window));
 	gtk_widget_show_all(Console->Window);
+	gtk_widget_grab_focus(Console->InputView);
 }
 
 void console_append(console_t *Console, const char *Buffer, int Length) {
@@ -293,7 +293,7 @@ console_t *console_new(ml_getter_t GlobalGet, void *Globals) {
 		"background", "#FFF0F0",
 		"foreground", "#303030",
 		"indent", 10,
-		"pixels-below-lines", 10,
+		"pixels-below-lines", 20,
 	NULL);
 	g_object_set(Console->ErrorTag,
 		"background", "#FFF0F0",

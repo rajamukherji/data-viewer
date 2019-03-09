@@ -1,5 +1,5 @@
-CFLAGS := old + ['-g', '-pthread', pkgconfig("--cflags gtk+-3.0 gdk-pixbuf-2.0 gtksourceview-3.0")]
-LDFLAGS := old + ['-g', '-lm', '-pthread', pkgconfig("--libs gtk+-3.0 gdk-pixbuf-2.0 gtksourceview-3.0")]
+CFLAGS := old + ['-g', '-pthread', pkgconfig("--cflags gtk+-3.0 gdk-pixbuf-2.0 gtksourceview-4")]
+LDFLAGS := old + ['-g', '-lm', '-pthread', pkgconfig("--libs gtk+-3.0 gdk-pixbuf-2.0 gtksourceview-4")]
 
 if DEBUG then
 	CFLAGS := old + ["-DDEBUG"]
