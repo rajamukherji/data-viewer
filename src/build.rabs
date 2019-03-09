@@ -16,9 +16,14 @@ file("minilang"):mkdir
 CFLAGS := old + ['-D_GNU_SOURCE', '-I{file("minilang/minilang.h"):dir(:true)}']
 LDFLAGS := old + ["-lgc"]
 
+file("resources.c")[file("resources.xml")] => fun(Target) do
+	execute("glib-compile-resources", '--sourcedir={file("build.rabs"):dir(:true)}', file("resources.xml"), "--generate-source", '--target={Target}')
+end
+
 var Objects := [
 	file("viewer.o"),
 	file("console.o"),
+	file("resources.o"),
 	file("libcsv.o"),
 	file("minilang/minilang.o"),
 	file("minilang/ml_compiler.o"),

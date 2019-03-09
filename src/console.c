@@ -13,6 +13,8 @@
 
 #include "console.h"
 
+#define MAX_HISTORY 128
+
 static ml_value_t *StringMethod;
 
 struct console_t {
@@ -22,6 +24,8 @@ struct console_t {
 	void *ParentGlobals;
 	mlc_scanner_t *Scanner;
 	char *Input;
+	char *History[MAX_HISTORY];
+	int HistoryIndex, HistoryEnd;
 	stringmap_t Globals[1];
 };
 
@@ -78,6 +82,10 @@ static void console_submit(GtkWidget *Button, console_t *Console) {
 	gtk_text_buffer_get_bounds(InputBuffer, InputStart, InputEnd);
 	Console->Input = gtk_text_buffer_get_text(InputBuffer, InputStart, InputEnd, FALSE);
 
+	int HistoryEnd = Console->HistoryEnd;
+	Console->History[HistoryEnd] = GC_strdup(Console->Input);
+	Console->HistoryIndex = Console->HistoryEnd = (HistoryEnd + 1) % MAX_HISTORY;
+
 	GtkTextIter End[1];
 	GtkTextBuffer *LogBuffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(Console->LogView));
 	gtk_text_buffer_get_end_iter(LogBuffer, End);
@@ -128,6 +136,28 @@ static gboolean console_keypress(GtkWidget *Widget, GdkEventKey *Event, console_
 		}
 		break;
 	}
+	case GDK_KEY_Up: {
+		if (Event->state & GDK_CONTROL_MASK) {
+			int HistoryIndex = (Console->HistoryIndex + MAX_HISTORY - 1) % MAX_HISTORY;
+			if (Console->History[HistoryIndex]) {
+				gtk_text_buffer_set_text(gtk_text_view_get_buffer(GTK_TEXT_VIEW(Console->InputView)), Console->History[HistoryIndex], -1);
+				Console->HistoryIndex = HistoryIndex;
+			}
+			return TRUE;
+		}
+		break;
+	}
+	case GDK_KEY_Down: {
+		if (Event->state & GDK_CONTROL_MASK) {
+			int HistoryIndex = (Console->HistoryIndex + 1) % MAX_HISTORY;
+			if (Console->History[HistoryIndex]) {
+				gtk_text_buffer_set_text(gtk_text_view_get_buffer(GTK_TEXT_VIEW(Console->InputView)), Console->History[HistoryIndex], -1);
+				Console->HistoryIndex = HistoryIndex;
+			}
+			return TRUE;
+		}
+		break;
+	}
 	}
 	return FALSE;
 }
@@ -162,18 +192,94 @@ ml_value_t *console_print(console_t *Console, int Count, ml_value_t **Args) {
 	return MLNil;
 }
 
+extern GResource *resources_get_resource(void);
+
 console_t *console_new(ml_getter_t GlobalGet, void *Globals) {
 	StringMethod = ml_method("string");
+	GError *Error = 0;
+	char *TempDir = g_dir_make_tmp("data-viewer-XXXXXX", &Error);
+	if (Error) {
+		printf("Error: %s\n", Error->message);
+		exit(1);
+	}
+	GResource *Resources = resources_get_resource();
+	char Buffer[256];
+	GFile *File = g_file_new_build_filename(TempDir, "wrapl.xml", NULL);
+	GInputStream *InputStream = g_resource_open_stream(Resources, "/gtksourceview/wrapl.xml", G_RESOURCE_LOOKUP_FLAGS_NONE, &Error);
+	if (Error) {
+		printf("Error: %s\n", Error->message);
+		exit(1);
+	}
+	GOutputStream *OutputStream = G_OUTPUT_STREAM(g_file_create(File, G_FILE_CREATE_NONE, NULL, &Error));
+	if (Error) {
+		printf("Error: %s\n", Error->message);
+		exit(1);
+	}
+	for (;;) {
+		gssize Read = g_input_stream_read(InputStream, Buffer, 256, NULL, &Error);
+		if (Error) {
+			printf("Error: %s\n", Error->message);
+			exit(1);
+		}
+		if (Read == 0) break;
+		gsize Written;
+		g_output_stream_write_all(OutputStream, Buffer, Read, &Written, NULL, &Error);
+		if (Error) {
+			printf("Error: %s\n", Error->message);
+			exit(1);
+		}
+	}
+	g_input_stream_close(InputStream, NULL, &Error);
+	g_output_stream_close(OutputStream, NULL, &Error);
+	File = g_file_new_build_filename(TempDir, "minilang.lang", NULL);
+	InputStream = g_resource_open_stream(Resources, "/gtksourceview/minilang.lang", G_RESOURCE_LOOKUP_FLAGS_NONE, &Error);
+	if (Error) {
+		printf("Error: %s\n", Error->message);
+		exit(1);
+	}
+	OutputStream = G_OUTPUT_STREAM(g_file_create(File, G_FILE_CREATE_NONE, NULL, &Error));
+	if (Error) {
+		printf("Error: %s\n", Error->message);
+		exit(1);
+	}
+	for (;;) {
+		gssize Read = g_input_stream_read(InputStream, Buffer, 256, NULL, &Error);
+		if (Error) {
+			printf("Error: %s\n", Error->message);
+			exit(1);
+		}
+		if (Read <= 0) break;
+		gsize Written;
+		g_output_stream_write_all(OutputStream, Buffer, Read, &Written, NULL, &Error);
+		if (Error) {
+			printf("Error: %s\n", Error->message);
+			exit(1);
+		}
+	}
+	g_input_stream_close(InputStream, NULL, &Error);
+	g_output_stream_close(OutputStream, NULL, &Error);
 	console_t *Console = new(console_t);
 	Console->ParentGetter = GlobalGet;
 	Console->ParentGlobals = Globals;
+	Console->Input = 0;
+	Console->HistoryIndex = 0;
+	Console->HistoryEnd = 0;
 	Console->Scanner = ml_scanner("Console", Console, (void *)console_read);
 	GtkWidget *Container = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
 	Console->InputView = gtk_source_view_new();
+
 	GtkSourceLanguageManager *LanguageManager = gtk_source_language_manager_get_default();
+	const gchar * const *OldPath = gtk_source_language_manager_get_search_path(LanguageManager);
+	int PathSize = 0;
+	while (OldPath[PathSize]) ++PathSize;
+	gchar **NewPath = GC_malloc((PathSize + 1) * sizeof(gchar *));
+	NewPath[0] = TempDir;
+	memcpy(NewPath + 1, OldPath, PathSize * sizeof(gchar *));
+	gtk_source_language_manager_set_search_path(LanguageManager, NewPath);
 	GtkSourceLanguage *Language = gtk_source_language_manager_get_language(LanguageManager, "minilang");
 	gtk_source_buffer_set_language(GTK_SOURCE_BUFFER(gtk_text_view_get_buffer(GTK_TEXT_VIEW(Console->InputView))), Language);
 	GtkSourceStyleSchemeManager *StyleManager = gtk_source_style_scheme_manager_get_default();
+	gtk_source_style_scheme_manager_prepend_search_path(StyleManager, TempDir);
 	GtkSourceStyleScheme *StyleScheme = gtk_source_style_scheme_manager_get_scheme(StyleManager, "wrapl");
 	gtk_source_buffer_set_style_scheme(GTK_SOURCE_BUFFER(gtk_text_view_get_buffer(GTK_TEXT_VIEW(Console->InputView))), StyleScheme);
 	GtkTextTagTable *TagTable = gtk_text_buffer_get_tag_table(gtk_text_view_get_buffer(GTK_TEXT_VIEW(Console->InputView)));
@@ -217,8 +323,6 @@ console_t *console_new(ml_getter_t GlobalGet, void *Globals) {
 	gtk_text_view_set_monospace(GTK_TEXT_VIEW(Console->InputView), TRUE);
 	gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(Console->InputView), TRUE);
 	gtk_source_view_set_tab_width(GTK_SOURCE_VIEW(Console->InputView), 4);
-
-	Console->Input = 0;
 	GtkWidget *InputPanel = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
 	GtkWidget *SubmitButton = gtk_button_new();
 	gtk_button_set_image(GTK_BUTTON(SubmitButton), gtk_image_new_from_icon_name("go-jump-symbolic", GTK_ICON_SIZE_BUTTON));
