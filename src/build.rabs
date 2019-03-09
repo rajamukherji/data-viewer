@@ -1,5 +1,5 @@
-CFLAGS := old + ['-g', '-pthread', pkgconfig("--cflags gtk+-3.0 gdk-pixbuf-2.0")]
-LDFLAGS := old + ['-g', '-lm', '-pthread', pkgconfig("--libs gtk+-3.0 gdk-pixbuf-2.0")]
+CFLAGS := old + ['-g', '-pthread', pkgconfig("--cflags gtk+-3.0 gdk-pixbuf-2.0 gtksourceview-3.0")]
+LDFLAGS := old + ['-g', '-lm', '-pthread', pkgconfig("--libs gtk+-3.0 gdk-pixbuf-2.0 gtksourceview-3.0")]
 
 if DEBUG then
 	CFLAGS := old + ["-DDEBUG"]
@@ -12,10 +12,27 @@ file("libcsv.o") => fun(Object) do
 	execute('gcc -c {CFLAGS} -o{Object} -I{Source:dir} {Source}')
 end
 
+file("minilang"):mkdir
+CFLAGS := old + ['-D_GNU_SOURCE', '-I{file("minilang/minilang.h"):dir(:true)}']
+LDFLAGS := old + ["-lgc"]
+
+var Objects := [
+	file("viewer.o"),
+	file("console.o"),
+	file("libcsv.o"),
+	file("minilang/minilang.o"),
+	file("minilang/ml_compiler.o"),
+	file("minilang/ml_runtime.o"),
+	file("minilang/ml_types.o"),
+	file("minilang/ml_file.o"),
+	file("minilang/sha256.o"),
+	file("minilang/stringmap.o")
+]
+
 if USE_GL then
 	CFLAGS := old + ['-DUSE_GL']
 	LDFLAGS := old + ['-lepoxy']
-	c_program(BIN_DIR/"data-viewer-gl", [file("viewer.o"), file("libcsv.o")])
+	c_program(BIN_DIR/"data-viewer-gl", Objects)
 else
-	c_program(BIN_DIR/"data-viewer", [file("viewer.o"), file("libcsv.o")])
+	c_program(BIN_DIR/"data-viewer", Objects)
 end

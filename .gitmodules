@@ -1,3 +1,6 @@
 [submodule "src/libcsv"]
 	path = src/libcsv
 	url = https://github.com/rgamble/libcsv.git
+[submodule "src/minilang"]
+	path = src/minilang
+	url = https://github.com/wrapl/minilang
