@@ -2018,19 +2018,7 @@ static void view_data_clicked(GtkWidget *Button, viewer_t *Viewer) {
 }
 
 static void view_console_clicked(GtkWidget *Button, viewer_t *Viewer) {
-	if (Viewer->ValuesStore) {
-		g_object_unref(G_OBJECT(Viewer->ValuesStore));
-		Viewer->ValuesStore = 0;
-	}
-	if (Viewer->ImagesStore) {
-		g_object_unref(G_OBJECT(Viewer->ImagesStore));
-		Viewer->ImagesStore = 0;
-	}
-	if (Viewer->PreviewWidget) gtk_container_remove(GTK_CONTAINER(Viewer->MainVPaned), Viewer->PreviewWidget);
-	GtkWidget *ConsoleWidget = Viewer->PreviewWidget = console_get_widget(Viewer->Console);
-	g_object_ref(ConsoleWidget);
-	gtk_paned_pack2(GTK_PANED(Viewer->MainVPaned), ConsoleWidget, TRUE, TRUE);
-	gtk_widget_show_all(ConsoleWidget);
+	console_show(Viewer->Console, GTK_WINDOW(Viewer->MainWindow));
 }
 
 static void preview_column_visible_toggled(GtkCellRendererToggle *Renderer, char *Path, viewer_t *Viewer) {
@@ -2143,7 +2131,7 @@ static GtkWidget *create_viewer_action_bar(viewer_t *Viewer) {
 	g_object_set(ViewDataButton, "always-show-image", TRUE, NULL);
 
 	GtkWidget *ViewConsoleButton = gtk_button_new_with_label("Console");
-	gtk_button_set_image(GTK_BUTTON(ViewConsoleButton), gtk_image_new_from_icon_name("utilites-terminal-symbolic", GTK_ICON_SIZE_BUTTON));
+	gtk_button_set_image(GTK_BUTTON(ViewConsoleButton), gtk_image_new_from_icon_name("utilities-terminal-symbolic", GTK_ICON_SIZE_BUTTON));
 	g_object_set(ViewConsoleButton, "always-show-image", TRUE, NULL);
 
 	GtkWidget *ShowColumnsButton = gtk_button_new_with_label("Columns");
