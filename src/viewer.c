@@ -6,6 +6,10 @@
 #include <gtk/gtk.h>
 #include <gdk-pixbuf/gdk-pixbuf.h>
 #include "libcsv/csv.h"
+#include <gc/gc.h>
+#include <minilang.h>
+#include "console.h"
+#include <stringmap.h>
 
 #ifdef USE_GL
 #include <epoxy/gl.h>
@@ -16,6 +20,13 @@
 #define POINT_COLOUR_CHROMA 0.5
 #define POINT_COLOUR_SATURATION 0.7
 #define POINT_COLOUR_VALUE 0.9
+#ifdef USE_GL
+#define POINT_SIZE 6.0
+#define BOX_SIZE 40.0
+#else
+#define POINT_SIZE 4.0
+#define BOX_SIZE 40.0
+#endif
 
 typedef struct node_t node_t;
 typedef int node_callback_t(void *Data, node_t *Node);
@@ -31,13 +42,26 @@ typedef struct {
 	double Min, Max;
 } range_t;
 
+static ml_type_t *NodeT;
+
 struct node_t {
-	node_t *Children[4];
+	const ml_type_t *Type;
+	node_t *Children[2];
+	viewer_t *Viewer;
 	const char *FileName;
 	GdkPixbuf *Pixbuf;
-	node_t *CacheNext, *CachePrev;
-	double X, Y, R, G, B;
+	GCancellable *LoadCancel;
+	GInputStream *LoadStream;
+	GFile *File;
+	double X, Y;
+	int XIndex, YIndex;
+#ifdef USE_GL
+	double R, G, B;
+#else
+	unsigned int Colour;
+#endif
 	int Filtered;
+	int LoadGeneration;
 };
 
 struct field_t {
@@ -45,12 +69,13 @@ struct field_t {
 	GHashTable *EnumHash;
 	GtkListStore *EnumStore;
 	const char **EnumNames;
-	double *EnumValues;
+	int *EnumValues;
 	GtkTreeViewColumn *PreviewColumn;
 	range_t Range;
 	int EnumSize;
-	int PreviewIndex;
+	int PreviewVisible;
 	int FilterGeneration;
+	double Sum, Sum2, SD;
 	double Values[];
 };
 
@@ -69,28 +94,42 @@ struct viewer_t {
 	GtkWidget *MainWindow, *MainVPaned;
 	GtkLabel *NumVisibleLabel;
     GtkWidget *FilterWindow, *FiltersBox;
-	GtkWidget *DrawingArea;
+	GtkWidget *DrawingArea, *ImagesView;
 	GtkWidget *PreviewWidget;
 	GtkWidget *XComboBox, *YComboBox, *CComboBox, *EditFieldComboBox, *EditValueComboBox;
+	GdkCursor *Cursor;
 	GtkListStore *ImagesStore, *ValuesStore;
 	GtkListStore *FieldsStore;
 	GtkListStore *OperatorsStore;
-	node_t *Root, *Nodes;
+	GtkClipboard *Clipboard;
+	node_t *Nodes, *Root;
+	node_t **Sorted, **SortBuffer;
+	node_t **SortedX, **SortedY;
 	cairo_t *Cairo;
+	node_t **LoadCache;
+	node_t *ActiveNode;
+	ml_value_t *ActivationFn;
+	const char *ActivationCode;
+	console_t *Console;
+	stringmap_t Globals[1];
+	stringmap_t FieldsByName[1];
 #ifdef USE_GL
 	float *GLVertices, *GLColours;
 #else
 	cairo_surface_t *CachedBackground;
+	unsigned int *CachedPixels;
+	int CachedStride;
 #endif
 	node_t *CacheHead, *CacheTail;
 	field_t **Fields, *EditField;
 	filter_t *Filters;
-	int *Filtered;
 	point_t Min, Max, Scale, DataMin, DataMax, Pointer;
-	double PointSize, BoxSize, EditValue;
-	int NumNodes, NumFields, NumCachedImages, NumVisibleImages;
+	double EditValue;
+	int NumNodes, NumFields, NumCached, NumFiltered, NumVisible, NumUpdated;
 	int XIndex, YIndex, CIndex;
-	int FilterGeneration;
+	int FilterGeneration, LoadGeneration;
+	int LoadCacheIndex;
+	int ShowBox, RedrawBackground;
 #ifdef USE_GL
 	int GLCount, GLReady;
 	GLuint GLArrays[2], GLBuffers[4];
@@ -98,110 +137,363 @@ struct viewer_t {
 #endif
 };
 
-static void add_node(node_t *Root, node_t *Node) {
-	int Index = (Node->Y >= Root->Y) * 2 + (Node->X >= Root->X);
-	node_t *Child = Root->Children[Index];
-	if (!Child) {
-		Root->Children[Index] = Node;
-	} else {
-		add_node(Child, Node);
-	}
-}
-
-typedef struct {
+typedef struct node_foreach_t {
 	void *Data;
 	node_callback_t *Callback;
 	double X1, Y1, X2, Y2;
-} foreach_t;
+} node_foreach_t;
 
-static void foreach_node2(node_t *Root, foreach_t *Foreach) {
-	// Bounds  = [Bounds]
-	if (!Root) {
-	} else if (Foreach->X2 < Root->X) {
-		if (Foreach->Y2 < Root->Y) {
-			foreach_node2(Root->Children[0], Foreach);
-		} else if (Foreach->Y1 > Root->Y) {
-			foreach_node2(Root->Children[2], Foreach);
-		} else {
-			foreach_node2(Root->Children[0], Foreach);
-			foreach_node2(Root->Children[2], Foreach);
-		}
-	} else if (Foreach->X1 > Root->X) {
-		if (Foreach->Y2 < Root->Y) {
-			foreach_node2(Root->Children[1], Foreach);
-		} else if (Foreach->Y1 > Root->Y) {
-			foreach_node2(Root->Children[3], Foreach);
-		} else {
-			foreach_node2(Root->Children[1], Foreach);
-			foreach_node2(Root->Children[3], Foreach);
-		}
+static void foreach_node_tree_x(node_foreach_t *Foreach, node_t *Node);
+
+static void foreach_node_tree_y(node_foreach_t *Foreach, node_t *Node) {
+	if (Foreach->Y2 < Node->Y) {
+		if (Node->Children[0]) foreach_node_tree_x(Foreach, Node->Children[0]);
+	} else if (Foreach->Y1 > Node->Y) {
+		if (Node->Children[1]) foreach_node_tree_x(Foreach, Node->Children[1]);
 	} else {
-		if (Foreach->Y2 < Root->Y) {
-			foreach_node2(Root->Children[0], Foreach);
-			foreach_node2(Root->Children[1], Foreach);
-		} else if (Foreach->Y1 > Root->Y) {
-			foreach_node2(Root->Children[2], Foreach);
-			foreach_node2(Root->Children[3], Foreach);
-		} else {
-			Foreach->Callback(Foreach->Data, Root);
-			foreach_node2(Root->Children[0], Foreach);
-			foreach_node2(Root->Children[1], Foreach);
-			foreach_node2(Root->Children[2], Foreach);
-			foreach_node2(Root->Children[3], Foreach);
+		if (Foreach->X1 <= Node->X && Foreach->X2 >= Node->X) {
+			Foreach->Callback(Foreach->Data, Node);
 		}
+		if (Node->Children[0]) foreach_node_tree_x(Foreach, Node->Children[0]);
+		if (Node->Children[1]) foreach_node_tree_x(Foreach, Node->Children[1]);
 	}
 }
 
-static inline int foreach_node(node_t *Root, double X1, double Y1, double X2, double Y2, void *Data, node_callback_t *Callback) {
-	foreach_t Foreach = {Data, Callback, X1, Y1, X2, Y2};
-	foreach_node2(Root, &Foreach);
-	return 0;
-/*
-	if (!Root) return 0;
-	if (X2 < Root->X) {
-		if (Y2 < Root->Y) {
-			return foreach_node(Root->Children[0], X1, Y1, X2, Y2, Data, Callback);
-		} else if (Y1 > Root->Y) {
-			return foreach_node(Root->Children[2], X1, Y1, X2, Y2, Data, Callback);
-		} else {
-			return foreach_node(Root->Children[0], X1, Y1, X2, Y2, Data, Callback)
-				|| foreach_node(Root->Children[2], X1, Y1, X2, Y2, Data, Callback);
-		}
-	} else if (X1 > Root->X) {
-		if (Y2 < Root->Y) {
-			return foreach_node(Root->Children[1], X1, Y1, X2, Y2, Data, Callback);
-		} else if (Y1 > Root->Y) {
-			return foreach_node(Root->Children[3], X1, Y1, X2, Y2, Data, Callback);
-		} else {
-			return foreach_node(Root->Children[1], X1, Y1, X2, Y2, Data, Callback)
-				|| foreach_node(Root->Children[3], X1, Y1, X2, Y2, Data, Callback);
-		}
+static void foreach_node_tree_x(node_foreach_t *Foreach, node_t *Node) {
+	if (Foreach->X2 < Node->X) {
+		if (Node->Children[0]) foreach_node_tree_y(Foreach, Node->Children[0]);
+	} else if (Foreach->X1 > Node->X) {
+		if (Node->Children[1]) foreach_node_tree_y(Foreach, Node->Children[1]);
 	} else {
-		if (Y2 < Root->Y) {
-			return foreach_node(Root->Children[0], X1, Y1, X2, Y2, Data, Callback)
-				|| foreach_node(Root->Children[1], X1, Y1, X2, Y2, Data, Callback);
-		} else if (Y1 > Root->Y) {
-			return foreach_node(Root->Children[2], X1, Y1, X2, Y2, Data, Callback)
-				|| foreach_node(Root->Children[3], X1, Y1, X2, Y2, Data, Callback);
-		} else {
-			return Callback(Data, Root)
-				|| foreach_node(Root->Children[0], X1, Y1, X2, Y2, Data, Callback)
-				|| foreach_node(Root->Children[1], X1, Y1, X2, Y2, Data, Callback)
-				|| foreach_node(Root->Children[2], X1, Y1, X2, Y2, Data, Callback)
-				|| foreach_node(Root->Children[3], X1, Y1, X2, Y2, Data, Callback);
+		if (Foreach->Y1 <= Node->Y && Foreach->Y2 >= Node->Y) {
+			Foreach->Callback(Foreach->Data, Node);
 		}
+		if (Node->Children[0]) foreach_node_tree_y(Foreach, Node->Children[0]);
+		if (Node->Children[1]) foreach_node_tree_y(Foreach, Node->Children[1]);
 	}
-*/
 }
 
-static void forall_nodes(node_t *Root, void *Data, node_callback_t *Callback) {
-	if (Root) {
-		Callback(Data, Root);
-		forall_nodes(Root->Children[0], Data, Callback);
-		forall_nodes(Root->Children[1], Data, Callback);
-		forall_nodes(Root->Children[2], Data, Callback);
-		forall_nodes(Root->Children[3], Data, Callback);
+static inline void foreach_node(viewer_t *Viewer, double X1, double Y1, double X2, double Y2, void *Data, node_callback_t *Callback) {
+	node_foreach_t Foreach = {Data, Callback, X1, Y1, X2, Y2};
+	clock_t Start = clock();
+	if (Viewer->Root) foreach_node_tree_x(&Foreach, Viewer->Root);
+	printf("foreach_node:%d @ %lu\n", __LINE__, clock() - Start);
+}
+
+static void merge_sort_x(node_t **Start, node_t **End, node_t **Buffer) {
+	node_t **Mid = Start + (End - Start) / 2;
+	if (Mid - Start > 1) merge_sort_x(Start, Mid, Buffer);
+	if (End - Mid > 1) merge_sort_x(Mid, End, Buffer);
+	node_t **A = Start;
+	node_t **B = Mid;
+	node_t **C = Buffer;
+	double XA = A[0]->X;
+	double XB = B[0]->X;
+	for (;;) {
+		if (XA <= XB) {
+			*C++ = *A++;
+			if (A < Mid) {
+				XA = A[0]->X;
+			} else {
+				memcpy(C, B, (End - B) * sizeof(node_t *));
+				break;
+			}
+		} else {
+			*C++ = *B++;
+			if (B < End) {
+				XB = B[0]->X;
+			} else {
+				memcpy(C, A, (Mid - A) * sizeof(node_t *));
+				break;
+			}
+		}
 	}
+	memcpy(Start, Buffer, (End - Start) * sizeof(node_t *));
+}
+
+static void merge_sort_y(node_t **Start, node_t **End, node_t **Buffer) {
+	node_t **Mid = Start + (End - Start) / 2;
+	if (Mid - Start > 1) merge_sort_y(Start, Mid, Buffer);
+	if (End - Mid > 1) merge_sort_y(Mid, End, Buffer);
+	node_t **A = Start;
+	node_t **B = Mid;
+	node_t **C = Buffer;
+	double YA = A[0]->Y;
+	double YB = B[0]->Y;
+	for (;;) {
+		if (YA <= YB) {
+			*C++ = *A++;
+			if (A < Mid) {
+				YA = A[0]->Y;
+			} else {
+				memcpy(C, B, (End - B) * sizeof(node_t *));
+				break;
+			}
+		} else {
+			*C++ = *B++;
+			if (B < End) {
+				YB = B[0]->Y;
+			} else {
+				memcpy(C, A, (Mid - A) * sizeof(node_t *));
+				break;
+			}
+		}
+	}
+	memcpy(Start, Buffer, (End - Start) * sizeof(node_t *));
+}
+
+/*static node_t *create_node_tree_x(node_t **Start, node_t **End, node_t **Buffer);
+
+static node_t *create_node_tree_y(node_t **Start, node_t **End, node_t **Buffer) {
+	if (Start == End) {
+		return 0;
+	} else if (Start + 1 == End) {
+		Start[0]->Children[0] = 0;
+		Start[0]->Children[1] = 0;
+		return Start[0];
+	} else {
+		merge_sort_y(Start, End, Buffer);
+		node_t **Mid = Start + (End - Start) / 2;
+		Mid[0]->Children[0] = create_node_tree_x(Start, Mid, Buffer);
+		Mid[0]->Children[1] = create_node_tree_x(Mid + 1, End, Buffer);
+		return Mid[0];
+	}
+}
+
+static node_t *create_node_tree_x(node_t **Start, node_t **End, node_t **Buffer) {
+	if (Start == End) {
+		return 0;
+	} else if (Start + 1 == End) {
+		Start[0]->Children[0] = 0;
+		Start[0]->Children[1] = 0;
+		return Start[0];
+	} else {
+		merge_sort_x(Start, End, Buffer);
+		node_t **Mid = Start + (End - Start) / 2;
+		Mid[0]->Children[0] = create_node_tree_y(Start, Mid, Buffer);
+		Mid[0]->Children[1] = create_node_tree_y(Mid + 1, End, Buffer);
+		return Mid[0];
+	}
+}
+
+static void update_node_tree(viewer_t *Viewer) {
+	node_t *Node = Viewer->Nodes;
+	int I = Viewer->NumNodes;
+	node_t **Sorted = Viewer->Sorted, **Tail = Sorted;
+	while (--I >= 0) {
+		if (!Node->Filtered) *(Tail++) = Node;
+		++Node;
+	}
+	if (Tail > Sorted) {
+		clock_t Start = clock();
+		Viewer->Root = create_node_tree_x(Sorted, Tail, Viewer->SortBuffer);
+		printf("update_node_tree:%d @ %lu\n", __LINE__, clock() - Start);
+	} else {
+		Viewer->Root = 0;
+	}
+}*/
+
+static void split_node_list_y(node_t *Root, node_t *HeadX, node_t *HeadY1, int Count1, int Count2);
+
+static void split_node_list_x(node_t *Root, node_t *HeadX1, node_t *HeadY, int Count1, int Count2) {
+	int RootIndex = Root->XIndex;
+	node_t *HeadY1 = 0, *HeadY2 = 0;
+	node_t **SlotY1 = &HeadY1, **SlotY2 = &HeadY2;
+	node_t *Root1 = 0, *Root2 = 0;
+	int Split1 = (1 + Count1) >> 1, Split2 = (1 + Count2) >> 1;
+	//printf("split_node_list_x(%d/%d, X:%d)\n\t", Count1, Count2, RootIndex);
+	//int Actual = 0, Left = 0, Right = 0;
+	for (node_t *Node = HeadY; Node; Node = Node->Children[1]) {
+		//++Actual;
+		//printf(" %d,%d", Node->XIndex, Node->YIndex);
+		if (Node->XIndex < RootIndex) {
+			//++Left;
+			if (--Split1 == 0) {
+				SlotY1[0] = 0;
+				Root1 = Node;
+				//printf("[1]");
+			} else {
+				SlotY1[0] = Node;
+			}
+			SlotY1 = &Node->Children[1];
+		} else if (Node->XIndex > RootIndex) {
+			//++Right;
+			if (--Split2 == 0) {
+				SlotY2[0] = 0;
+				Root2 = Node;
+				//printf("[2]");
+			} else {
+				SlotY2[0] = Node;
+			}
+			SlotY2 = &Node->Children[1];
+		}
+	}
+	//printf(" -> %d/%d/%d\n", Actual, Left, Right);
+	SlotY1[0] = SlotY2[0] = 0;
+	node_t *HeadX2 = Root->Children[0];
+	Root->Children[0] = Root1;
+	Root->Children[1] = Root2;
+	if (Root1) split_node_list_y(Root1, HeadX1, HeadY1, Count1 - (Count1 >> 1) - 1, Count1 >> 1);
+	if (Root2) split_node_list_y(Root2, HeadX2, HeadY2, Count2 - (Count2 >> 1) - 1, Count2 >> 1);
+}
+
+static void split_node_list_y(node_t *Root, node_t *HeadX, node_t *HeadY1, int Count1, int Count2) {
+	int RootIndex = Root->YIndex;
+	node_t *HeadX1 = 0, *HeadX2 = 0;
+	node_t **SlotX1 = &HeadX1, **SlotX2 = &HeadX2;
+	node_t *Root1 = 0, *Root2 = 0;
+	int Split1 = (1 + Count1) >> 1, Split2 = (1 + Count2) >> 1;
+	//printf("split_node_list_y(%d/%d, X:%d)\n\t", Count1, Count2, RootIndex);
+	//int Actual = 0, Left = 0, Right = 0;
+	for (node_t *Node = HeadX; Node; Node = Node->Children[0]) {
+		//++Actual;
+		//printf(" %d,%d", Node->XIndex, Node->YIndex);
+		if (Node->YIndex < RootIndex) {
+			//++Left;
+			if (--Split1 == 0) {
+				SlotX1[0] = 0;
+				Root1 = Node;
+				//printf("[1]");
+			} else {
+				SlotX1[0] = Node;
+			}
+			SlotX1 = &Node->Children[0];
+		} else if (Node->YIndex > RootIndex) {
+			//++Right;
+			if (--Split2 == 0) {
+				SlotX2[0] = 0;
+				Root2 = Node;
+				//printf("[2]");
+			} else {
+				SlotX2[0] = Node;
+			}
+			SlotX2 = &Node->Children[0];
+		}
+	}
+	//printf(" -> %d/%d/%d\n", Actual, Left, Right);
+	SlotX1[0] = SlotX2[0] = 0;
+	node_t *HeadY2 = Root->Children[1];
+	Root->Children[0] = Root1;
+	Root->Children[1] = Root2;
+	if (Root1) split_node_list_x(Root1, HeadX1, HeadY1, Count1 - (Count1 >> 1) - 1, Count1 >> 1);
+	if (Root2) split_node_list_x(Root2, HeadX2, HeadY2, Count2 - (Count2 >> 1) - 1, Count2 >> 1);
+}
+
+static void update_node_tree(viewer_t *Viewer) {
+	clock_t Start = clock();
+	if (Viewer->NumFiltered == 0) {
+		Viewer->Root = 0;
+	} else if (Viewer->NumFiltered == 1) {
+		node_t *Node = Viewer->Nodes;
+		while (!Node->Filtered) ++Node;
+		Node->Children[0] = 0;
+		Node->Children[1] = 0;
+		Viewer->Root = Node;
+	} else {
+		int Count1 = Viewer->NumFiltered >> 1;
+		int MidIndex = Count1 + 1;
+		node_t *HeadX = 0, *HeadY = 0;
+		node_t **SlotX = &HeadX, **SlotY = &HeadY;
+		node_t **NodeX = Viewer->SortedX, **NodeY = Viewer->SortedY;
+		node_t *Root = 0;
+		for (int I = Viewer->NumNodes; --I >= 0; ++NodeX, ++NodeY) {
+			node_t *Node = *NodeX;
+			if (Node->Filtered) {
+				if (--MidIndex == 0) {
+					Root = Node;
+					SlotX[0] = 0;
+				} else {
+					SlotX[0] = Node;
+				}
+				SlotX = &Node->Children[0];
+			}
+			if (NodeY[0]->Filtered) {
+				SlotY[0] = NodeY[0];
+				SlotY = &NodeY[0]->Children[1];
+			}
+		}
+		SlotX[0] = SlotY[0] = 0;
+		split_node_list_x(Root, HeadX, HeadY, Count1, Viewer->NumFiltered - Count1 - 1);
+		Viewer->Root = Root;
+	}
+	printf("update_node_tree took %lu\n", clock() - Start);
+}
+
+static node_t *merge_sort_list_x(node_t *Start, node_t *End) {
+	if (Start + 1 == End) {
+		Start->Children[0] = 0;
+		return Start;
+	}
+	node_t *Mid = Start + (End - Start) / 2;
+	node_t *Head1 = merge_sort_list_x(Start, Mid);
+	node_t *Head2 = merge_sort_list_x(Mid, End);
+	node_t *Head, **Slot = &Head;
+	for (;;) {
+		if (Head1) {
+			if (Head2) {
+				if (Head1->X < Head2->X) {
+					Slot[0] = Head1;
+					Slot = &Head1->Children[0];
+					Head1 = Slot[0];
+				} else {
+					Slot[0] = Head2;
+					Slot = &Head2->Children[0];
+					Head2 = Slot[0];
+				}
+			} else {
+				Slot[0] = Head1;
+				Slot = &Head1->Children[0];
+				Head1 = Slot[0];
+			}
+		} else if (Head2) {
+			Slot[0] = Head2;
+			Slot = &Head2->Children[0];
+			Head2 = Slot[0];
+		} else {
+			Slot[0] = 0;
+			break;
+		}
+	}
+	return Head;
+}
+
+static node_t *merge_sort_list_y(node_t *Start, node_t *End) {
+	if (Start == End) return 0;
+	if (Start + 1 == End) {
+		Start->Children[1] = 0;
+		return Start;
+	}
+	node_t *Mid = Start + (End - Start) / 2;
+	node_t *Head1 = merge_sort_list_y(Start, Mid);
+	node_t *Head2 = merge_sort_list_y(Mid, End);
+	node_t *Head, **Slot = &Head;
+	for (;;) {
+		if (Head1) {
+			if (Head2) {
+				if (Head1->Y < Head2->Y) {
+					Slot[0] = Head1;
+					Slot = &Head1->Children[1];
+					Head1 = Slot[0];
+				} else {
+					Slot[0] = Head2;
+					Slot = &Head2->Children[1];
+					Head2 = Slot[0];
+				}
+			} else {
+				Slot[0] = Head1;
+				Slot = &Head1->Children[1];
+				Head1 = Slot[0];
+			}
+		} else if (Head2) {
+			Slot[0] = Head2;
+			Slot = &Head2->Children[1];
+			Head2 = Slot[0];
+		} else {
+			Slot[0] = 0;
+			break;
+		}
+	}
+	return Head;
 }
 
 static void set_viewer_indices(viewer_t *Viewer, int XIndex, int YIndex) {
@@ -217,29 +509,17 @@ static void set_viewer_indices(viewer_t *Viewer, int XIndex, int YIndex) {
 	for (int I = NumNodes; --I >= 0;) {
 		Node->X = *XValue;
 		Node->Y = *YValue;
-		Node->Children[0] = Node->Children[1] = Node->Children[2] = Node->Children[3] = 0;
 		++Node;
 		++XValue;
 		++YValue;
 	}
-
-	node_t *Root = 0;
-	Node = Viewer->Nodes;
-	int I = NumNodes;
-	while (--I >= 0) {
-		if (!Node->Filtered) {
-			Root = Node;
-			break;
-		}
-		++Node;
+	merge_sort_x(Viewer->SortedX, Viewer->SortedX + NumNodes, Viewer->SortBuffer);
+	merge_sort_y(Viewer->SortedY, Viewer->SortedY + NumNodes, Viewer->SortBuffer);
+	for (int I = 0; I < NumNodes; ++I) {
+		Viewer->SortedX[I]->XIndex = I;
+		Viewer->SortedY[I]->YIndex = I;
 	}
-	++Node;
-	Viewer->Root = Root;
-	while (--I >= 0) {
-		if (!Node->Filtered) add_node(Root, Node);
-		++Node;
-	}
-
+	update_node_tree(Viewer);
 	double RangeX = XField->Range.Max - XField->Range.Min;
 	double RangeY = YField->Range.Max - YField->Range.Min;
 	Viewer->DataMin.X = XField->Range.Min - RangeX * 0.01;
@@ -255,54 +535,63 @@ static void set_viewer_indices(viewer_t *Viewer, int XIndex, int YIndex) {
 }
 
 static inline void set_node_rgb(node_t *Node, double H) {
+	double R, G, B;
 	if (H < 1.0) {
-		Node->R = POINT_COLOUR_VALUE;
-		Node->G = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 1.0);
-		Node->B = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
+		R = POINT_COLOUR_VALUE;
+		G = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 1.0);
+		B = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
 	} else if (H < 2.0) {
-		Node->R = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 1.0);
-		Node->G = POINT_COLOUR_VALUE;
-		Node->B = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
+		R = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 1.0);
+		G = POINT_COLOUR_VALUE;
+		B = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
 	} else if (H < 3.0) {
-		Node->R = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
-		Node->G = POINT_COLOUR_VALUE;
-		Node->B = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 3.0);
+		R = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
+		G = POINT_COLOUR_VALUE;
+		B = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 3.0);
 	} else if (H < 4.0) {
-		Node->R = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
-		Node->G = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 3.0);
-		Node->B = POINT_COLOUR_VALUE;
+		R = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
+		G = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 3.0);
+		B = POINT_COLOUR_VALUE;
 	} else if (H < 5.0) {
-		Node->R = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 5.0);
-		Node->G = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
-		Node->B = POINT_COLOUR_VALUE;
+		R = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 5.0);
+		G = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
+		B = POINT_COLOUR_VALUE;
 	} else {
-		Node->R = POINT_COLOUR_VALUE;
-		Node->G = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
-		Node->B = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 5.0);
+		R = POINT_COLOUR_VALUE;
+		G = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
+		B = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 5.0);
 	}
+#ifdef USE_GL
+	Node->R = R;
+	Node->G = G;
+	Node->B = B;
+#else
+	Node->Colour =
+		(((unsigned int)255) << 24) +
+		(((unsigned int)((R * 255) + 0.5)) << 16) +
+		(((unsigned int)((G * 255) + 0.5)) << 8) +
+		(((unsigned int)((B * 255) + 0.5)));
+#endif
 }
 
 static void filter_enum_field(viewer_t *Viewer, field_t *Field) {
 	printf("filter_enum_field(%s)\n", Field->Name);
 	node_t *Node = Viewer->Nodes;
 	int NumNodes = Viewer->NumNodes;
-	double *EnumValues = Field->EnumValues;
-	memset(EnumValues, 0, Field->EnumSize * sizeof(double));
-	double Max = 0.0;
+	int *EnumValues = Field->EnumValues;
+	memset(EnumValues, 0, Field->EnumSize * sizeof(int));
+	int Max = 0;
 	double *Value = Field->Values;
 	for (int I = NumNodes; --I >= 0;) {
-		if (!Node->Filtered) {
+		if (Node->Filtered) {
 			int Index = (int)Value[0];
-			if (Index && (EnumValues[Index] == 0.0)) {
-				Max += 1.0;
-				EnumValues[Index] = Max;
-			}
+			if (Index && !EnumValues[Index]) EnumValues[Index] = ++Max;
 		}
 		++Node;
 		++Value;
 	}
 	Field->Range.Max = Max;
-	printf("Field->Range.Max = %f\n", Max);
+	printf("Field->Range.Max = %d\n", Max);
 	Field->FilterGeneration = Viewer->FilterGeneration;
 }
 
@@ -310,28 +599,33 @@ static void set_viewer_colour_index(viewer_t *Viewer, int CIndex) {
 	Viewer->CIndex = CIndex;
 	int NumNodes = Viewer->NumNodes;
 	field_t *CField = Viewer->Fields[CIndex];
-	if (CField->FilterGeneration != Viewer->FilterGeneration) {
-		filter_enum_field(Viewer, CField);
-	}
-	double Min = CField->Range.Min;
-	double Range = CField->Range.Max - Min;
 	node_t *Node = Viewer->Nodes;
 	double *CValue = CField->Values;
 	if (CField->EnumStore) {
-		double *EnumValues = CField->EnumValues;
-		Range += 1.0;
+		if (CField->FilterGeneration != Viewer->FilterGeneration) {
+			filter_enum_field(Viewer, CField);
+		}
+		int *EnumValues = CField->EnumValues;
+		double Range = CField->Range.Max + 1;
 		for (int I = NumNodes; --I >= 0;) {
-			double Value = EnumValues[(int)CValue[0]];
+			int Value = EnumValues[(int)CValue[0]];
 			if (Value > 0.0) {
-				set_node_rgb(Node, 6.0 * (Value - Min) / Range);
+				set_node_rgb(Node, 6.0 * Value / Range);
 			} else {
+#ifdef USE_GL
 				Node->R = Node->G = Node->B = POINT_COLOUR_SATURATION;
+#else
+				Node->Colour = 0xFF808080;
+#endif
 			}
 			++Node;
 			++CValue;
 		}
 	} else {
+		double Min = CField->Range.Min;
+		double Range = CField->Range.Max - Min;
 		if (Range <= 1.0e-6) Range = 1.0;
+		Range += CField->SD;
 		for (int I = NumNodes; --I >= 0;) {
 			set_node_rgb(Node, 6.0 * (*CValue - Min) / Range);
 			++Node;
@@ -344,23 +638,35 @@ typedef struct {
 	viewer_t *Viewer;
 	field_t **Fields;
 	node_t *Nodes;
-	int Index, Row;
+	const char *ImagePrefix;
+	int Index, Row, ImagePrefixLength;
 } csv_node_loader_t;
 
 static void load_nodes_field_callback(void *Text, size_t Size, csv_node_loader_t *Loader) {
 	if (!Loader->Row) {
 		if (Loader->Index) {
-			char *FieldName = malloc(Size + 1);
+			char *FieldName = GC_malloc(Size + 1);
 			memcpy(FieldName, Text, Size);
 			FieldName[Size] = 0;
 			Loader->Fields[Loader->Index - 1]->Name = FieldName;
 		}
 	} else {
 		if (!Loader->Index) {
-			char *FileName = malloc(Size + 1);
+			char *FileName, *FilePath;
+			FileName = GC_malloc(Size + 1);
 			memcpy(FileName, Text, Size);
 			FileName[Size] = 0;
+			if (Loader->ImagePrefixLength) {
+				int Length = Loader->ImagePrefixLength + Size;
+				FilePath = GC_malloc(Length + 1);
+				memcpy(stpcpy(FilePath, Loader->ImagePrefix), Text, Size);
+				FilePath[Length] = 0;
+			} else {
+				FilePath = FileName;
+			}
 			Loader->Nodes[Loader->Row - 1].FileName = FileName;
+			Loader->Nodes[Loader->Row - 1].File = g_file_new_for_path(FilePath);
+			if (FilePath != FileName) GC_free(FilePath);
 		} else {
 			int Index = Loader->Index - 1;
 			field_t *Field = Loader->Fields[Index];
@@ -372,7 +678,7 @@ static void load_nodes_field_callback(void *Text, size_t Size, csv_node_loader_t
 					if (Ref) {
 						Value = *(double *)Ref;
 					} else {
-						char *EnumName = malloc(Size + 1);
+						char *EnumName = GC_malloc(Size + 1);
 						memcpy(EnumName, Text, Size);
 						EnumName[Size] = 0;
 						Ref = (void *)&Field->Values[Loader->Row - 1];
@@ -399,6 +705,8 @@ static void load_nodes_field_callback(void *Text, size_t Size, csv_node_loader_t
 			Field->Values[Loader->Row - 1] = Value;
 			if (Field->Range.Min > Value) Field->Range.Min = Value;
 			if (Field->Range.Max < Value) Field->Range.Max = Value;
+			Field->Sum += Value;
+			Field->Sum2 += Value * Value;
 		}
 	}
 	++Loader->Index;
@@ -427,8 +735,9 @@ static void set_enum_name_fn(const char *Name, const double *Value, const char *
 	Names[(int)Value[0]] = Name;
 }
 
-static void viewer_open_file(viewer_t *Viewer, const char *CsvFileName) {
-	csv_node_loader_t Loader[1] = {{Viewer, 0, 0, 0, 0}};
+static void viewer_open_file(viewer_t *Viewer, const char *CsvFileName, const char *ImagePrefix) {
+	int ImagePrefixLength = ImagePrefix ? strlen(ImagePrefix) : 0;
+	csv_node_loader_t Loader[1] = {{Viewer, 0, 0, ImagePrefix, 0, 0, ImagePrefixLength}};
 	char Buffer[4096];
 	struct csv_parser Parser[1];
 
@@ -450,22 +759,35 @@ static void viewer_open_file(viewer_t *Viewer, const char *CsvFileName) {
 
 	int NumNodes = Viewer->NumNodes = Loader->Row - 1;
 	int NumFields = Viewer->NumFields;
-	node_t *Nodes = Viewer->Nodes = (node_t *)malloc(NumNodes * sizeof(node_t));
+	node_t *Nodes = Viewer->Nodes = (node_t *)GC_malloc(NumNodes * sizeof(node_t));
+	Viewer->Sorted = (node_t **)GC_malloc(NumNodes * sizeof(node_t *));
+	Viewer->SortedX = (node_t **)GC_malloc(NumNodes * sizeof(node_t *));
+	Viewer->SortedY = (node_t **)GC_malloc(NumNodes * sizeof(node_t *));
+	Viewer->SortBuffer = (node_t **)GC_malloc(NumNodes * sizeof(node_t *));
+	Viewer->NumFiltered = NumNodes;
 	memset(Nodes, 0, NumNodes * sizeof(node_t));
-	field_t **Fields = Viewer->Fields = (field_t **)malloc(NumFields * sizeof(field_t *));
+	for (int I = 0; I < NumNodes; ++I) {
+		Nodes[I].Type = NodeT;
+		Nodes[I].Viewer = Viewer;
+		Nodes[I].Filtered = 1;
+		Viewer->SortedX[I] = &Nodes[I];
+		Viewer->SortedY[I] = &Nodes[I];
+	}
+	field_t **Fields = Viewer->Fields = (field_t **)GC_malloc(NumFields * sizeof(field_t *));
 	for (int I = 0; I < NumFields; ++I) {
-		field_t *Field = Fields[I] = (field_t *)malloc(sizeof(field_t) + NumNodes * sizeof(double));
+		field_t *Field = Fields[I] = (field_t *)GC_malloc(sizeof(field_t) + NumNodes * sizeof(double));
 		Field->EnumHash = 0;
 		Field->Range.Min = INFINITY;
 		Field->Range.Max = -INFINITY;
-		Field->PreviewIndex = -1;
 		Field->PreviewColumn = 0;
+		Field->PreviewVisible = 1;
 		Field->FilterGeneration = 0;
+		Field->Sum = Field->Sum2 = 0.0;
 		Fields[I] = Field;
 	}
 #ifdef USE_GL
-	Viewer->GLVertices = (float *)malloc(NumNodes * 3 * 3 * sizeof(float));
-	Viewer->GLColours = (float *)malloc(NumNodes * 3 * 4 * sizeof(float));
+	Viewer->GLVertices = (float *)GC_malloc_atomic(NumNodes * 3 * 3 * sizeof(float));
+	Viewer->GLColours = (float *)GC_malloc_atomic(NumNodes * 3 * 4 * sizeof(float));
 #endif
 	printf("Loading rows...\n");
 	fopen(CsvFileName, "r");
@@ -484,10 +806,11 @@ static void viewer_open_file(viewer_t *Viewer, const char *CsvFileName) {
 
 	for (int I = 0; I < NumFields; ++I) {
 		field_t *Field = Fields[I];
-		gtk_list_store_insert_with_values(Viewer->FieldsStore, 0, -1, 0, Field->Name, 1, I, -1);
+		gtk_list_store_insert_with_values(Viewer->FieldsStore, 0, -1, 0, Field->Name, 1, I, 2, TRUE, -1);
+		stringmap_insert(Viewer->FieldsByName, Field->Name, Field);
 		if (Field->EnumHash) {
 			int EnumSize = Field->EnumSize = g_hash_table_size(Field->EnumHash) + 1;
-			const char **EnumNames = (const char **)malloc(EnumSize * sizeof(const char *));
+			const char **EnumNames = (const char **)GC_malloc(EnumSize * sizeof(const char *));
 			EnumNames[0] = "";
 			g_hash_table_foreach(Field->EnumHash, (void *)set_enum_name_fn, EnumNames);
 			Field->EnumNames = EnumNames;
@@ -495,7 +818,10 @@ static void viewer_open_file(viewer_t *Viewer, const char *CsvFileName) {
 			for (int J = 0; J < EnumSize; ++J) {
 				gtk_list_store_insert_with_values(Field->EnumStore, 0, -1, 0, Field->EnumNames[J], 1, (double)(J + 1), -1);
 			}
-			Field->EnumValues = (double *)malloc(EnumSize * sizeof(double));
+			Field->EnumValues = (int *)GC_malloc_atomic(EnumSize * sizeof(int));
+		} else {
+			double Mean = Field->Sum / Viewer->NumNodes;
+			Field->SD = sqrt((Field->Sum2 / Viewer->NumNodes) - Mean * Mean);
 		}
 	}
 
@@ -503,115 +829,164 @@ static void viewer_open_file(viewer_t *Viewer, const char *CsvFileName) {
 	set_viewer_colour_index(Viewer, Viewer->NumFields - 1);
 }
 
-static GdkPixbuf *get_node_pixbuf(viewer_t *Viewer, node_t *Node) {
-	if (Node->Pixbuf) {
-		if (Node->CachePrev) {
-			Node->CachePrev->CacheNext = Node->CacheNext;
-		} else {
-			Viewer->CacheHead = Node->CacheNext;
-		}
-		if (Node->CacheNext) {
-			Node->CacheNext->CachePrev = Node->CachePrev;
-		} else {
-			Viewer->CacheTail = Node->CachePrev;
-		}
-		Node->CacheNext = Node->CachePrev = 0;
-	} else {
-		if (Viewer->NumCachedImages == MAX_CACHED_IMAGES) {
-			node_t *LRU = Viewer->CacheHead;
-			Viewer->CacheHead = LRU->CacheNext;
-			Viewer->CacheHead->CachePrev = 0;
-			g_object_unref(LRU->Pixbuf);
-			LRU->Pixbuf = 0;
-		} else {
-			++Viewer->NumCachedImages;
-		}
-		GError *Error = 0;
-		Node->Pixbuf = gdk_pixbuf_new_from_file_at_size(Node->FileName, 128, -1, &Error);
-		if (!Node->Pixbuf) {
-			guchar *Pixels = malloc(128 * 192 * 4);
-			cairo_surface_t *Surface = cairo_image_surface_create_for_data(Pixels, CAIRO_FORMAT_ARGB32, 128, 192, 128 * 4);
-			cairo_t *Cairo = cairo_create(Surface);
-			cairo_rectangle(Cairo, 0.0, 0.0, 128.0, 192.0);
-			cairo_set_source_rgb(Cairo,
-				(Node->X - Viewer->DataMin.X) / (Viewer->DataMax.X - Viewer->DataMin.X),
-				1.0,
-				(Node->Y - Viewer->DataMin.Y) / (Viewer->DataMax.Y - Viewer->DataMin.Y)
-			);
-			cairo_fill(Cairo);
-			cairo_destroy(Cairo);
-			cairo_surface_destroy(Surface);
-			Node->Pixbuf = gdk_pixbuf_new_from_data(Pixels, GDK_COLORSPACE_RGB, TRUE, 8, 128, 192, 128 * 4, (void *)free, 0);
-		}
+static void draw_node_image_loaded(GObject *Source, GAsyncResult *Result, node_t *Node) {
+	viewer_t *Viewer = Node->Viewer;
+	g_input_stream_close(Node->LoadStream, 0, 0);
+	g_object_unref(G_OBJECT(Node->LoadStream));
+	Node->LoadStream = 0;
+	gboolean Cancelled = g_cancellable_is_cancelled(Node->LoadCancel);
+	g_object_unref(G_OBJECT(Node->LoadCancel));
+	Node->LoadCancel = 0;
+	if (Cancelled) return;
+	Node->Pixbuf = gdk_pixbuf_new_from_stream_finish(Result, 0);
+	if (!Node->Pixbuf) {
+		printf("Generating image %s (image read error)\n", Node->FileName);
+		guchar *Pixels = GC_malloc_atomic(128 * 192 * 4);
+		cairo_surface_t *Surface = cairo_image_surface_create_for_data(Pixels, CAIRO_FORMAT_ARGB32, 128, 192, 128 * 4);
+		cairo_t *Cairo = cairo_create(Surface);
+		cairo_rectangle(Cairo, 0.0, 0.0, 128.0, 192.0);
+		cairo_set_source_rgb(Cairo,
+			(Node->X - Viewer->DataMin.X) / (Viewer->DataMax.X - Viewer->DataMin.X),
+			1.0,
+			(Node->Y - Viewer->DataMin.Y) / (Viewer->DataMax.Y - Viewer->DataMin.Y)
+		);
+		cairo_fill(Cairo);
+		cairo_destroy(Cairo);
+		cairo_surface_destroy(Surface);
+		Node->Pixbuf = gdk_pixbuf_new_from_data(Pixels, GDK_COLORSPACE_RGB, TRUE, 8, 128, 192, 128 * 4, (void *)free, 0);
 	}
-	if (Viewer->CacheTail) {
-		Node->CachePrev = Viewer->CacheTail;
-		Viewer->CacheTail->CacheNext = Node;
-		Viewer->CacheTail = Node;
-	} else {
-		Viewer->CacheHead = Viewer->CacheTail = Node;
+	if (Node->LoadGeneration == Viewer->LoadGeneration) {
+		gtk_list_store_insert_with_values(Viewer->ImagesStore, 0, -1,
+			0, Node->FileName,
+			1, Node->Pixbuf,
+			2, Node,
+		-1);
 	}
-	return Node->Pixbuf;
+}
+
+static void draw_node_file_opened(GObject *Source, GAsyncResult *Result, node_t *Node) {
+	gboolean Cancelled = g_cancellable_is_cancelled(Node->LoadCancel);
+	if (Cancelled) {
+		g_object_unref(G_OBJECT(Node->LoadCancel));
+		Node->LoadCancel = 0;
+		return;
+	}
+	GFileInputStream *InputStream = g_file_read_finish(Node->File, Result, 0);
+	if (InputStream) {
+		Node->LoadStream = G_INPUT_STREAM(InputStream);
+		gdk_pixbuf_new_from_stream_at_scale_async(
+			Node->LoadStream,
+			128, 192, TRUE,
+			Node->LoadCancel,
+			(void *)draw_node_image_loaded,
+			Node
+		);
+	} else {
+		g_object_unref(G_OBJECT(Node->LoadCancel));
+		Node->LoadCancel = 0;
+		viewer_t *Viewer = Node->Viewer;
+		guchar *Pixels = GC_malloc_atomic(128 * 192 * 4);
+		cairo_surface_t *Surface = cairo_image_surface_create_for_data(Pixels, CAIRO_FORMAT_ARGB32, 128, 192, 128 * 4);
+		cairo_t *Cairo = cairo_create(Surface);
+		cairo_rectangle(Cairo, 0.0, 0.0, 128.0, 192.0);
+		cairo_set_source_rgb(Cairo,
+			(Node->X - Viewer->DataMin.X) / (Viewer->DataMax.X - Viewer->DataMin.X),
+			1.0,
+			(Node->Y - Viewer->DataMin.Y) / (Viewer->DataMax.Y - Viewer->DataMin.Y)
+		);
+		cairo_fill(Cairo);
+		cairo_destroy(Cairo);
+		cairo_surface_destroy(Surface);
+		Node->Pixbuf = gdk_pixbuf_new_from_data(Pixels, GDK_COLORSPACE_RGB, TRUE, 8, 128, 192, 128 * 4, (void *)free, 0);
+		gtk_list_store_insert_with_values(Viewer->ImagesStore, 0, -1,
+			0, Node->FileName,
+			1, Node->Pixbuf,
+			2, Node,
+		-1);
+	}
 }
 
 static int draw_node_image(viewer_t *Viewer, node_t *Node) {
-	++Viewer->NumVisibleImages;
-	if (Viewer->NumVisibleImages <= MAX_VISIBLE_IMAGES) {
-		GdkPixbuf *Pixbuf = get_node_pixbuf(Viewer, Node);
-		gtk_list_store_insert_with_values(Viewer->ImagesStore, 0, -1, 0, Node->FileName, 1, Pixbuf, -1);
+	++Viewer->NumVisible;
+	if (Viewer->NumVisible <= MAX_VISIBLE_IMAGES) {
+		Node->LoadGeneration = Viewer->LoadGeneration;
+		if (Node->Pixbuf) {
+			gtk_list_store_insert_with_values(Viewer->ImagesStore, 0, -1,
+				0, Node->FileName,
+				1, Node->Pixbuf,
+				2, Node,
+			-1);
+		} else if (!Node->LoadCancel) {
+			int Index = Viewer->LoadCacheIndex;
+			node_t **Cache = Viewer->LoadCache;
+			while (Cache[Index] && (Cache[Index]->LoadGeneration == Viewer->LoadGeneration)) {
+				Index = (Index + 1) % MAX_CACHED_IMAGES;
+			}
+			if (Cache[Index]) {
+				node_t *OldNode = Cache[Index];
+				if (OldNode->Pixbuf) {
+					g_object_unref(G_OBJECT(OldNode->Pixbuf));
+					OldNode->Pixbuf = 0;
+				} else if (OldNode->LoadCancel) {
+					g_cancellable_cancel(OldNode->LoadCancel);
+				}
+			}
+			Cache[Index] = Node;
+			Viewer->LoadCacheIndex = (Index + 1) % MAX_CACHED_IMAGES;
+			Node->LoadCancel = g_cancellable_new();
+			g_file_read_async(Node->File, G_PRIORITY_DEFAULT, Node->LoadCancel, (void *)draw_node_file_opened, Node);
+		}
 	}
 	return 0;
 }
 
 static int draw_node_value(viewer_t *Viewer, node_t *Node) {
-	++Viewer->NumVisibleImages;
+	++Viewer->NumVisible;
 	field_t **Fields = Viewer->Fields;
 	int NumFields = Viewer->NumFields;
 	int Index = Node - Viewer->Nodes;
 	GtkTreeIter Iter[1];
 	gtk_list_store_append(Viewer->ValuesStore, Iter);
-	if (Viewer->NumVisibleImages <= MAX_VISIBLE_IMAGES) {
-		for (int I = 0; I < NumFields; ++I) {
-			field_t *Field = Fields[I];
-			if (Field->PreviewColumn) {
-				double Value = Field->Values[Index];
-				GdkRGBA Colour[1];
-				Colour->alpha = 0.5;
-				if (Field->EnumStore && Value == 0.0) {
-					Colour->red = Colour->green = Colour->blue = POINT_COLOUR_SATURATION;
+	for (int I = 0; I < NumFields; ++I) {
+		field_t *Field = Fields[I];
+		if (Field->PreviewColumn) {
+			double Value = Field->Values[Index];
+			GdkRGBA Colour[1];
+			Colour->alpha = 0.5;
+			if (Field->EnumStore && Value == 0.0) {
+				Colour->red = Colour->green = Colour->blue = POINT_COLOUR_SATURATION;
+			} else {
+				double H = 6.0 * (Value - Field->Range.Min) / (Field->Range.Max - Field->Range.Min);
+				if (H < 1.0) {
+					Colour->red = POINT_COLOUR_VALUE;
+					Colour->green = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 1.0);
+					Colour->blue = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
+				} else if (H < 2.0) {
+					Colour->red = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 1.0);
+					Colour->green = POINT_COLOUR_VALUE;
+					Colour->blue = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
+				} else if (H < 3.0) {
+					Colour->red = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
+					Colour->green = POINT_COLOUR_VALUE;
+					Colour->blue = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 3.0);
+				} else if (H < 4.0) {
+					Colour->red = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
+					Colour->green = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 3.0);
+					Colour->blue = POINT_COLOUR_VALUE;
+				} else if (H < 5.0) {
+					Colour->red = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 5.0);
+					Colour->green = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
+					Colour->blue = POINT_COLOUR_VALUE;
 				} else {
-					double H = 6.0 * (Value - Field->Range.Min) / (Field->Range.Max - Field->Range.Min);
-					if (H < 1.0) {
-						Colour->red = POINT_COLOUR_VALUE;
-						Colour->green = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 1.0);
-						Colour->blue = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
-					} else if (H < 2.0) {
-						Colour->red = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 1.0);
-						Colour->green = POINT_COLOUR_VALUE;
-						Colour->blue = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
-					} else if (H < 3.0) {
-						Colour->red = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
-						Colour->green = POINT_COLOUR_VALUE;
-						Colour->blue = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 3.0);
-					} else if (H < 4.0) {
-						Colour->red = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
-						Colour->green = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 3.0);
-						Colour->blue = POINT_COLOUR_VALUE;
-					} else if (H < 5.0) {
-						Colour->red = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 5.0);
-						Colour->green = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
-						Colour->blue = POINT_COLOUR_VALUE;
-					} else {
-						Colour->red = POINT_COLOUR_VALUE;
-						Colour->green = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
-						Colour->blue = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 5.0);
-					}
+					Colour->red = POINT_COLOUR_VALUE;
+					Colour->green = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA;
+					Colour->blue = POINT_COLOUR_VALUE - POINT_COLOUR_CHROMA * fabs(H - 5.0);
 				}
-				if (Field->EnumStore) {
-					gtk_list_store_set(Viewer->ValuesStore, Iter, Field->PreviewIndex, Field->EnumNames[(int)Value], Field->PreviewIndex + 1, Colour, -1);
-				} else {
-					gtk_list_store_set(Viewer->ValuesStore, Iter, Field->PreviewIndex, Value, Field->PreviewIndex + 1, &Colour, -1);
-				}
+			}
+			if (Field->EnumStore) {
+				gtk_list_store_set(Viewer->ValuesStore, Iter, 2 * I, Field->EnumNames[(int)Value], 2 * I + 1, Colour, -1);
+			} else {
+				gtk_list_store_set(Viewer->ValuesStore, Iter, 2 * I, Value, 2 * I + 1, &Colour, -1);
 			}
 		}
 	}
@@ -619,25 +994,29 @@ static int draw_node_value(viewer_t *Viewer, node_t *Node) {
 }
 
 static void update_preview(viewer_t *Viewer) {
-	Viewer->NumVisibleImages = 0;
-	double X1 = Viewer->Min.X + (Viewer->Pointer.X - Viewer->BoxSize / 2) / Viewer->Scale.X;
-	double Y1 = Viewer->Min.Y + (Viewer->Pointer.Y - Viewer->BoxSize / 2) / Viewer->Scale.Y;
-	double X2 = Viewer->Min.X + (Viewer->Pointer.X + Viewer->BoxSize / 2) / Viewer->Scale.X;
-	double Y2 = Viewer->Min.Y + (Viewer->Pointer.Y + Viewer->BoxSize / 2) / Viewer->Scale.Y;
+	Viewer->NumVisible = 0;
+	double X1 = Viewer->Min.X + (Viewer->Pointer.X - BOX_SIZE / 2) / Viewer->Scale.X;
+	double Y1 = Viewer->Min.Y + (Viewer->Pointer.Y - BOX_SIZE / 2) / Viewer->Scale.Y;
+	double X2 = Viewer->Min.X + (Viewer->Pointer.X + BOX_SIZE / 2) / Viewer->Scale.X;
+	double Y2 = Viewer->Min.Y + (Viewer->Pointer.Y + BOX_SIZE / 2) / Viewer->Scale.Y;
 	if (Viewer->ImagesStore) {
+		++Viewer->LoadGeneration;
 		gtk_list_store_clear(Viewer->ImagesStore);
-		foreach_node(Viewer->Root, X1, Y1, X2, Y2, Viewer, (node_callback_t *)draw_node_image);
+		printf("\n\n%s:%d\n", __FUNCTION__, __LINE__);
+		foreach_node(Viewer, X1, Y1, X2, Y2, Viewer, (node_callback_t *)draw_node_image);
 	} else if (Viewer->ValuesStore) {
 		gtk_list_store_clear(Viewer->ValuesStore);
-		foreach_node(Viewer->Root, X1, Y1, X2, Y2, Viewer, (node_callback_t *)draw_node_value);
+		printf("\n\n%s:%d\n", __FUNCTION__, __LINE__);
+		foreach_node(Viewer, X1, Y1, X2, Y2, Viewer, (node_callback_t *)draw_node_value);
 	}
 	char NumVisibleText[64];
-	sprintf(NumVisibleText, "%d points", Viewer->NumVisibleImages);
+	sprintf(NumVisibleText, "%d points", Viewer->NumVisible);
 	gtk_label_set_text(Viewer->NumVisibleLabel, NumVisibleText);
 }
 
 static int edit_node_value(viewer_t *Viewer, node_t *Node) {
 	field_t *Field = Viewer->EditField;
+	++Viewer->NumUpdated;
 	double Value = Field->Values[Node - Viewer->Nodes] = Viewer->EditValue;
 	if (Field == Viewer->Fields[Viewer->CIndex]) {
 		set_node_rgb(Node, 6.0 * (Value - Field->Range.Min) / (Field->Range.Max - Field->Range.Min));
@@ -645,16 +1024,28 @@ static int edit_node_value(viewer_t *Viewer, node_t *Node) {
 	return 0;
 }
 
+static void viewer_filter_nodes(viewer_t *Viewer);
+
 static void edit_node_values(viewer_t *Viewer) {
 	if (!Viewer->EditField) return;
-	double X1 = Viewer->Min.X + (Viewer->Pointer.X - Viewer->BoxSize / 2) / Viewer->Scale.X;
-	double Y1 = Viewer->Min.Y + (Viewer->Pointer.Y - Viewer->BoxSize / 2) / Viewer->Scale.Y;
-	double X2 = Viewer->Min.X + (Viewer->Pointer.X + Viewer->BoxSize / 2) / Viewer->Scale.X;
-	double Y2 = Viewer->Min.Y + (Viewer->Pointer.Y + Viewer->BoxSize / 2) / Viewer->Scale.Y;
-	foreach_node(Viewer->Root, X1, Y1, X2, Y2, Viewer, (node_callback_t *)edit_node_value);
+	Viewer->NumUpdated = 0;
+	double X1 = Viewer->Min.X + (Viewer->Pointer.X - BOX_SIZE / 2) / Viewer->Scale.X;
+	double Y1 = Viewer->Min.Y + (Viewer->Pointer.Y - BOX_SIZE / 2) / Viewer->Scale.Y;
+	double X2 = Viewer->Min.X + (Viewer->Pointer.X + BOX_SIZE / 2) / Viewer->Scale.X;
+	double Y2 = Viewer->Min.Y + (Viewer->Pointer.Y + BOX_SIZE / 2) / Viewer->Scale.Y;
+	printf("\n\n%s:%d\n", __FUNCTION__, __LINE__);
+	foreach_node(Viewer, X1, Y1, X2, Y2, Viewer, (node_callback_t *)edit_node_value);
+	if (Viewer->EditField == Viewer->Fields[Viewer->CIndex]) {
+		++Viewer->FilterGeneration;
+		set_viewer_colour_index(Viewer, Viewer->CIndex);
+	}
+	char NumVisibleText[64];
+	sprintf(NumVisibleText, "%d updates", Viewer->NumUpdated);
+	gtk_label_set_text(Viewer->NumVisibleLabel, NumVisibleText);
+	viewer_filter_nodes(Viewer);
 }
 
-static int redraw_point(viewer_t *Viewer, node_t *Node) {
+static inline int redraw_point(viewer_t *Viewer, node_t *Node) {
 #ifdef USE_GL
 	//double X = (Node->X - Viewer->Min.X) / (Viewer->Max.X - Viewer->Min.X);
 	//double Y = (Node->Y - Viewer->Min.Y) / (Viewer->Max.Y - Viewer->Min.Y);
@@ -662,14 +1053,14 @@ static int redraw_point(viewer_t *Viewer, node_t *Node) {
 	double Y = Viewer->Scale.Y * (Node->Y - Viewer->Min.Y);
 	//printf("Point at (%f, %f)\n", X, Y);
 	int Index = Viewer->GLCount;
-	Viewer->GLVertices[3 * Index + 0] = X - Viewer->PointSize / 2;
-	Viewer->GLVertices[3 * Index + 1] = Y + Viewer->PointSize * 0.33;
+	Viewer->GLVertices[3 * Index + 0] = X - POINT_SIZE / 2;
+	Viewer->GLVertices[3 * Index + 1] = Y + POINT_SIZE * 0.33;
 	Viewer->GLVertices[3 * Index + 2] = 0.0;
 	Viewer->GLVertices[3 * Index + 3] = X;
-	Viewer->GLVertices[3 * Index + 4] = Y - Viewer->PointSize * 0.66;
+	Viewer->GLVertices[3 * Index + 4] = Y - POINT_SIZE * 0.66;
 	Viewer->GLVertices[3 * Index + 5] = 0.0;
-	Viewer->GLVertices[3 * Index + 6] = X + Viewer->PointSize / 2;
-	Viewer->GLVertices[3 * Index + 7] = Y + Viewer->PointSize * 0.33;
+	Viewer->GLVertices[3 * Index + 6] = X + POINT_SIZE / 2;
+	Viewer->GLVertices[3 * Index + 7] = Y + POINT_SIZE * 0.33;
 	Viewer->GLVertices[3 * Index + 8] = 0.0;
 	Viewer->GLColours[4 * Index + 0] = Node->R;
 	Viewer->GLColours[4 * Index + 1] = Node->G;
@@ -687,13 +1078,58 @@ static int redraw_point(viewer_t *Viewer, node_t *Node) {
 #else
 	double X = Viewer->Scale.X * (Node->X - Viewer->Min.X);
 	double Y = Viewer->Scale.Y * (Node->Y - Viewer->Min.Y);
-	cairo_t *Cairo = Viewer->Cairo;
+	int X0 = (X - POINT_SIZE / 2) + 0.5;
+	int Y0 = (Y - POINT_SIZE / 2) + 0.5;
+	int Stride = Viewer->CachedStride;
+	unsigned int *Pixels = Viewer->CachedPixels + X0;
+	Pixels = (unsigned int *)((char *)Pixels + Y0 * Stride);
+	unsigned int Colour = Node->Colour;
+	int PointSize = POINT_SIZE;
+	for (int J = PointSize; --J >= 0;) {
+		for (int I = 0; I < PointSize; ++I) Pixels[I] = Colour;
+		Pixels = (unsigned int *)((char *)Pixels + Stride);
+	}
+	/*cairo_t *Cairo = Viewer->Cairo;
 	cairo_new_path(Cairo);
-	cairo_rectangle(Cairo, X - Viewer->PointSize / 2, Y - Viewer->PointSize / 2, Viewer->PointSize, Viewer->PointSize);
+	cairo_rectangle(Cairo, X - POINT_SIZE / 2, Y - POINT_SIZE / 2, POINT_SIZE, POINT_SIZE);
 	cairo_set_source_rgb(Cairo, Node->R, Node->G, Node->B);
-	cairo_fill(Cairo);
+	cairo_fill(Cairo);*/
 #endif
 	return 0;
+}
+
+static void redraw_viewer_background(viewer_t *Viewer) {
+#ifdef USE_GL
+	Viewer->GLCount = 0;
+	clock_t Start = clock();
+	printf("\n\n%s:%d\n", __FUNCTION__, __LINE__);
+	foreach_node(Viewer, Viewer->Min.X, Viewer->Min.Y, Viewer->Max.X, Viewer->Max.Y, Viewer, (node_callback_t *)redraw_point);
+	printf("foreach_node took %d\n", clock() - Start);
+	printf("rendered %d points\n", Viewer->GLCount);
+	if (Viewer->GLReady) {
+		gtk_gl_area_make_current(GTK_GL_AREA(Viewer->DrawingArea));
+		glBindBuffer(GL_ARRAY_BUFFER, Viewer->GLBuffers[0]);
+		glBufferData(GL_ARRAY_BUFFER, Viewer->GLCount * 3 * sizeof(float), Viewer->GLVertices, GL_STATIC_DRAW);
+		glBindBuffer(GL_ARRAY_BUFFER, Viewer->GLBuffers[1]);
+		glBufferData(GL_ARRAY_BUFFER, Viewer->GLCount * 4 * sizeof(float), Viewer->GLColours, GL_STATIC_DRAW);
+		glBindBuffer(GL_ARRAY_BUFFER, 0);
+	}
+#else
+	Viewer->RedrawBackground = 1;
+	/*guint Width = cairo_image_surface_get_width(Viewer->CachedBackground);
+	guint Height = cairo_image_surface_get_height(Viewer->CachedBackground);
+	cairo_t *Cairo = cairo_create(Viewer->CachedBackground);
+	cairo_set_source_rgb(Cairo, 1.0, 1.0, 1.0);
+	cairo_rectangle(Cairo, 0.0, 0.0, Width, Height);
+	cairo_fill(Cairo);
+	Viewer->Cairo = Cairo;
+	clock_t Start = clock();
+	printf("\n\n%s:%d\n", __FUNCTION__, __LINE__);
+	foreach_node(Viewer, Viewer->Min.X, Viewer->Min.Y, Viewer->Max.X, Viewer->Max.Y, Viewer, (node_callback_t *)redraw_point);
+	printf("foreach_node took %lu\n", clock() - Start);
+	Viewer->Cairo = 0;
+	cairo_destroy(Cairo);*/
+#endif
 }
 
 #ifdef USE_GL
@@ -741,10 +1177,10 @@ static gboolean render_viewer(GtkGLArea *Widget, GdkGLContext *Context, viewer_t
 	glDisableVertexAttribArray(0);
 	glBindBuffer(GL_ARRAY_BUFFER, 0);
 
-	float BoxX1 = Viewer->Pointer.X - Viewer->BoxSize / 2;
-	float BoxY1 = Viewer->Pointer.Y - Viewer->BoxSize / 2;
-	float BoxX2 = Viewer->Pointer.X + Viewer->BoxSize / 2;
-	float BoxY2 = Viewer->Pointer.Y + Viewer->BoxSize / 2;
+	float BoxX1 = Viewer->Pointer.X - BOX_SIZE / 2;
+	float BoxY1 = Viewer->Pointer.Y - BOX_SIZE / 2;
+	float BoxX2 = Viewer->Pointer.X + BOX_SIZE / 2;
+	float BoxY2 = Viewer->Pointer.Y + BOX_SIZE / 2;
 
 	float BoxVertices[] = {
 		BoxX1, BoxY1, 0.1,
@@ -858,7 +1294,7 @@ static void load_gl_shaders(viewer_t *Viewer) {
 	Viewer->GLTransformLocation = glGetUniformLocation(ProgramID, "transform");
 }
 
-static void realize_viewer(GtkGLArea *Widget, viewer_t *Viewer) {
+static void realize_viewer_gl(GtkGLArea *Widget, viewer_t *Viewer) {
 	puts("realize_viewer");
 	guint Width = gtk_widget_get_allocated_width(Viewer->DrawingArea);
 	guint Height = gtk_widget_get_allocated_height(Viewer->DrawingArea);
@@ -879,20 +1315,42 @@ static void realize_viewer(GtkGLArea *Widget, viewer_t *Viewer) {
 	Viewer->GLReady = 1;
 }
 #else
+static void realize_viewer(GtkWidget *Widget, viewer_t *Viewer) {
+	gdk_window_set_cursor(gtk_widget_get_window(Viewer->DrawingArea), Viewer->Cursor);
+}
+
 static void redraw_viewer(GtkWidget *Widget, cairo_t *Cairo, viewer_t *Viewer) {
+	if (Viewer->RedrawBackground) {
+		Viewer->RedrawBackground = 1;
+		guint Width = cairo_image_surface_get_width(Viewer->CachedBackground);
+		guint Height = cairo_image_surface_get_height(Viewer->CachedBackground);
+		cairo_t *Cairo = cairo_create(Viewer->CachedBackground);
+		cairo_set_source_rgb(Cairo, 1.0, 1.0, 1.0);
+		cairo_rectangle(Cairo, 0.0, 0.0, Width, Height);
+		cairo_fill(Cairo);
+		Viewer->Cairo = Cairo;
+		clock_t Start = clock();
+		printf("\n\n%s:%d\n", __FUNCTION__, __LINE__);
+		foreach_node(Viewer, Viewer->Min.X, Viewer->Min.Y, Viewer->Max.X, Viewer->Max.Y, Viewer, (node_callback_t *)redraw_point);
+		printf("foreach_node took %lu\n", clock() - Start);
+		Viewer->Cairo = 0;
+		cairo_destroy(Cairo);
+	}
 	cairo_set_source_surface(Cairo, Viewer->CachedBackground, 0.0, 0.0);
 	cairo_paint(Cairo);
-	cairo_new_path(Cairo);
-	cairo_rectangle(Cairo,
-		Viewer->Pointer.X - Viewer->BoxSize / 2,
-		Viewer->Pointer.Y - Viewer->BoxSize / 2,
-		Viewer->BoxSize,
-		Viewer->BoxSize
-	);
-	cairo_set_source_rgb(Cairo, 0.5, 0.5, 1.0);
-	cairo_stroke_preserve(Cairo);
-	cairo_set_source_rgba(Cairo, 0.5, 0.5, 1.0, 0.5);
-	cairo_fill(Cairo);
+	if (Viewer->ShowBox) {
+		cairo_new_path(Cairo);
+		cairo_rectangle(Cairo,
+			Viewer->Pointer.X - BOX_SIZE / 2,
+			Viewer->Pointer.Y - BOX_SIZE / 2,
+			BOX_SIZE,
+			BOX_SIZE
+		);
+		cairo_set_source_rgb(Cairo, 1.0, 1.0, 0.5);
+		cairo_stroke_preserve(Cairo);
+		cairo_set_source_rgba(Cairo, 1.0, 1.0, 0.5, 0.5);
+		cairo_fill(Cairo);
+	}
 }
 #endif
 
@@ -944,37 +1402,6 @@ static void pan_viewer(viewer_t *Viewer, double DeltaX, double DeltaY) {
 	}
 }
 
-static void redraw_viewer_background(viewer_t *Viewer) {
-#ifdef USE_GL
-	Viewer->GLCount = 0;
-	clock_t Start = clock();
-	foreach_node(Viewer->Root, Viewer->Min.X, Viewer->Min.Y, Viewer->Max.X, Viewer->Max.Y, Viewer, (node_callback_t *)redraw_point);
-	printf("foreach_node took %d\n", clock() - Start);
-	printf("rendered %d points\n", Viewer->GLCount);
-	if (Viewer->GLReady) {
-		gtk_gl_area_make_current(GTK_GL_AREA(Viewer->DrawingArea));
-		glBindBuffer(GL_ARRAY_BUFFER, Viewer->GLBuffers[0]);
-		glBufferData(GL_ARRAY_BUFFER, Viewer->GLCount * 3 * sizeof(float), Viewer->GLVertices, GL_STATIC_DRAW);
-		glBindBuffer(GL_ARRAY_BUFFER, Viewer->GLBuffers[1]);
-		glBufferData(GL_ARRAY_BUFFER, Viewer->GLCount * 4 * sizeof(float), Viewer->GLColours, GL_STATIC_DRAW);
-		glBindBuffer(GL_ARRAY_BUFFER, 0);
-	}
-#else
-	guint Width = cairo_image_surface_get_width(Viewer->CachedBackground);
-	guint Height = cairo_image_surface_get_height(Viewer->CachedBackground);
-	cairo_t *Cairo = cairo_create(Viewer->CachedBackground);
-	cairo_set_source_rgb(Cairo, 1.0, 1.0, 1.0);
-	cairo_rectangle(Cairo, 0.0, 0.0, Width, Height);
-	cairo_fill(Cairo);
-	Viewer->Cairo = Cairo;
-	clock_t Start = clock();
-	foreach_node(Viewer->Root, Viewer->Min.X, Viewer->Min.Y, Viewer->Max.X, Viewer->Max.Y, Viewer, (node_callback_t *)redraw_point);
-	printf("foreach_node took %d\n", clock() - Start);
-	Viewer->Cairo = 0;
-	cairo_destroy(Cairo);
-#endif
-}
-
 static void resize_viewer(GtkWidget *Widget, GdkRectangle *Allocation, viewer_t *Viewer) {
 	Viewer->Scale.X = Allocation->width / (Viewer->Max.X - Viewer->Min.X);
 	Viewer->Scale.Y = Allocation->height / (Viewer->Max.Y - Viewer->Min.Y);
@@ -983,7 +1410,20 @@ static void resize_viewer(GtkWidget *Widget, GdkRectangle *Allocation, viewer_t 
 	if (Viewer->CachedBackground) {
 		cairo_surface_destroy(Viewer->CachedBackground);
 	}
-	Viewer->CachedBackground = cairo_image_surface_create(CAIRO_FORMAT_RGB24, Allocation->width, Allocation->height);
+	int PointSize = POINT_SIZE;
+	int BufferSize = PointSize + 2;
+	unsigned char *Pixels = GC_malloc_atomic((Allocation->width + 2 * BufferSize) * (Allocation->height + 2 * BufferSize) * sizeof(int));
+	int Stride = (Allocation->width + 2 * BufferSize) * sizeof(unsigned int);
+	Viewer->CachedBackground = cairo_image_surface_create_for_data(
+		Pixels + BufferSize * Stride + BufferSize * sizeof(int),
+		CAIRO_FORMAT_ARGB32,
+		Allocation->width,
+		Allocation->height,
+		Stride
+	);
+	//cairo_image_surface_create(CAIRO_FORMAT_RGB24, Allocation->width, Allocation->height);
+	Viewer->CachedPixels = (unsigned int *)cairo_image_surface_get_data(Viewer->CachedBackground);
+	Viewer->CachedStride = cairo_image_surface_get_stride(Viewer->CachedBackground);
 #endif
 	redraw_viewer_background(Viewer);
 	//update_preview(Viewer);
@@ -991,6 +1431,7 @@ static void resize_viewer(GtkWidget *Widget, GdkRectangle *Allocation, viewer_t 
 }
 
 static gboolean scroll_viewer(GtkWidget *Widget, GdkEventScroll *Event, viewer_t *Viewer) {
+	printf("scroll_viewer()\n");
 	double X = Viewer->Min.X + (Event->x / Viewer->Scale.X);
 	double Y = Viewer->Min.Y + (Event->y / Viewer->Scale.Y);
 	if (Event->direction == GDK_SCROLL_DOWN) {
@@ -1008,79 +1449,75 @@ static gboolean button_press_viewer(GtkWidget *Widget, GdkEventButton *Event, vi
 	if (Event->button == 1) {
 		Viewer->Pointer.X = Event->x;
 		Viewer->Pointer.Y = Event->y;
-		return FALSE;
+		update_preview(Viewer);
+		Viewer->ShowBox = 0;
+		gtk_widget_queue_draw(Widget);
+	} else if (Event->button == 2) {
+		Viewer->Pointer.X = Event->x;
+		Viewer->Pointer.Y = Event->y;
 	} else if (Event->button == 3) {
+		Viewer->Pointer.X = Event->x;
+		Viewer->Pointer.Y = Event->y;
 		edit_node_values(Viewer);
 		redraw_viewer_background(Viewer);
 		gtk_widget_queue_draw(Widget);
-		return FALSE;
 	}
-	return TRUE;
+	return FALSE;
+}
+
+static gboolean button_release_viewer(GtkWidget *Widget, GdkEventButton *Event, viewer_t *Viewer) {
+	if (Event->button == 1) {
+		Viewer->ShowBox = 1;
+		gtk_widget_queue_draw(Widget);
+	}
+	return FALSE;
 }
 
 static gboolean motion_notify_viewer(GtkWidget *Widget, GdkEventMotion *Event, viewer_t *Viewer) {
-	if (Event->state & GDK_BUTTON1_MASK) {
+	if (Event->state & GDK_BUTTON2_MASK) {
 		double DeltaX = (Viewer->Pointer.X - Event->x) / Viewer->Scale.X;
 		double DeltaY = (Viewer->Pointer.Y - Event->y) / Viewer->Scale.Y;
 		pan_viewer(Viewer, DeltaX, DeltaY);
 		redraw_viewer_background(Viewer);
+		Viewer->Pointer.X = Event->x;
+		Viewer->Pointer.Y = Event->y;
+		gtk_widget_queue_draw(Widget);
+	} else if (Event->state & GDK_BUTTON1_MASK) {
+		Viewer->Pointer.X = Event->x;
+		Viewer->Pointer.Y = Event->y;
+		update_preview(Viewer);
+	} else if (Event->state & GDK_SHIFT_MASK) {
+		double DeltaX = (Viewer->Pointer.X - Event->x) / Viewer->Scale.X;
+		double DeltaY = (Viewer->Pointer.Y - Event->y) / Viewer->Scale.Y;
+		pan_viewer(Viewer, DeltaX, DeltaY);
+		redraw_viewer_background(Viewer);
+		Viewer->Pointer.X = Event->x;
+		Viewer->Pointer.Y = Event->y;
+		gtk_widget_queue_draw(Widget);
 	}
-	Viewer->Pointer.X = Event->x;
-	Viewer->Pointer.Y = Event->y;
-	update_preview(Viewer);
-	gtk_widget_queue_draw(Widget);
 	return FALSE;
 }
 
+static void images_selected_foreach(GtkIconView *ImagesView, GtkTreePath *Path, viewer_t *Viewer) {
+	GtkTreeIter Iter[1];
+	gtk_tree_model_get_iter(GTK_TREE_MODEL(Viewer->ImagesStore), Iter, Path);
+	const char *Value = 0;
+	gtk_tree_model_get(GTK_TREE_MODEL(Viewer->ImagesStore), Iter, 0, &Value, -1);
+	gtk_clipboard_set_text(Viewer->Clipboard, Value, -1);
+	g_free((void *)Value);
+}
+
 static gboolean key_press_viewer(GtkWidget *Widget, GdkEventKey *Event, viewer_t *Viewer) {
+	printf("key_press_viewer()\n");
 	switch (Event->keyval) {
-	case GDK_KEY_x: {
-		set_viewer_indices(Viewer, (Viewer->XIndex + 1) % Viewer->NumFields, Viewer->YIndex);
-		redraw_viewer_background(Viewer);
-		update_preview(Viewer);
-		gtk_widget_queue_draw(Widget);
-		break;
-	}
-	case GDK_KEY_X: {
-		set_viewer_indices(Viewer, (Viewer->XIndex + Viewer->NumFields - 1) % Viewer->NumFields, Viewer->YIndex);
-		redraw_viewer_background(Viewer);
-		update_preview(Viewer);
-		gtk_widget_queue_draw(Widget);
-		break;
-	}
-	case GDK_KEY_y: {
-		set_viewer_indices(Viewer, Viewer->XIndex, (Viewer->YIndex + 1) % Viewer->NumFields);
-		redraw_viewer_background(Viewer);
-		update_preview(Viewer);
-		gtk_widget_queue_draw(Widget);
-		break;
-	}
-	case GDK_KEY_Y: {
-		set_viewer_indices(Viewer, Viewer->XIndex, (Viewer->YIndex + Viewer->NumFields - 1) % Viewer->NumFields);
-		redraw_viewer_background(Viewer);
-		update_preview(Viewer);
-		gtk_widget_queue_draw(Widget);
-		break;
-	}
-	case GDK_KEY_c: {
-		set_viewer_colour_index(Viewer, (Viewer->CIndex + 1) % Viewer->NumFields);
-		redraw_viewer_background(Viewer);
-		update_preview(Viewer);
-		gtk_widget_queue_draw(Widget);
-		break;
-	}
-	case GDK_KEY_C: {
-		set_viewer_colour_index(Viewer, (Viewer->CIndex + Viewer->NumFields - 1) % Viewer->NumFields);
-		redraw_viewer_background(Viewer);
-		update_preview(Viewer);
-		gtk_widget_queue_draw(Widget);
-		break;
-	}
 	case GDK_KEY_s: {
+		if (Event->state & GDK_CONTROL_MASK) {
 #ifdef USE_GL
 #else
-		cairo_surface_write_to_png(Viewer->CachedBackground, "screenshot.png");
+			cairo_surface_write_to_png(Viewer->CachedBackground, "screenshot.png");
 #endif
+			return TRUE;
+		}
 		break;
 	}
 	}
@@ -1102,6 +1539,7 @@ static void y_field_changed(GtkComboBox *Widget, viewer_t *Viewer) {
 }
 
 static void c_field_changed(GtkComboBox *Widget, viewer_t *Viewer) {
+	++Viewer->FilterGeneration;
 	set_viewer_colour_index(Viewer, gtk_combo_box_get_active(Widget));
 	redraw_viewer_background(Viewer);
 	update_preview(Viewer);
@@ -1125,7 +1563,7 @@ typedef struct {
 } text_dialog_info_t;
 
 static void text_input_dialog_destroy(GtkWidget *Dialog, text_dialog_info_t *Info) {
-	free(Info);
+	GC_free(Info);
 }
 
 static void text_input_dialog_cancel(GtkWidget *Button, text_dialog_info_t *Info) {
@@ -1162,7 +1600,7 @@ static void text_input_dialog(const char *Title, viewer_t *Viewer, text_dialog_c
 	gtk_button_set_image(GTK_BUTTON(AcceptButton), gtk_image_new_from_icon_name("emblem-ok-symbolic", GTK_ICON_SIZE_BUTTON));
 	gtk_box_pack_start(GTK_BOX(ButtonBox), AcceptButton, FALSE, FALSE, 4);
 
-	text_dialog_info_t *Info = (text_dialog_info_t *)malloc(sizeof(text_dialog_info_t));
+	text_dialog_info_t *Info = (text_dialog_info_t *)GC_malloc(sizeof(text_dialog_info_t));
 	Info->Dialog = GTK_WIDGET(Dialog);
 	Info->Entry = Entry;
 	Info->Callback = Callback;
@@ -1182,23 +1620,27 @@ static void edit_value_changed(GtkComboBox *Widget, viewer_t *Viewer) {
 }
 
 static void add_field_callback(const char *Name, viewer_t *Viewer, void *Data) {
-	Name = strdup(Name);
-	gtk_list_store_insert_with_values(Viewer->FieldsStore, 0, -1, 0, Name, 1, Viewer->NumFields, -1);
+	Name = GC_strdup(Name);
+	gtk_list_store_insert_with_values(Viewer->FieldsStore, 0, -1, 0, Name, 1, Viewer->NumFields, 2, TRUE, -1);
 	int NumFields = Viewer->NumFields + 1;
-	field_t **Fields = (field_t **)malloc(NumFields * sizeof(field_t *));
-	field_t *Field = (field_t *)malloc(sizeof(field_t) + Viewer->NumNodes * sizeof(double));
+	field_t **Fields = (field_t **)GC_malloc(NumFields * sizeof(field_t *));
+	field_t *Field = (field_t *)GC_malloc(sizeof(field_t) + Viewer->NumNodes * sizeof(double));
 	Field->EnumStore = gtk_list_store_new(2, G_TYPE_STRING, G_TYPE_DOUBLE);
-	Field->EnumNames = (const char **)malloc(sizeof(const char *));
+	Field->EnumNames = (const char **)GC_malloc(sizeof(const char *));
+	Field->EnumValues = (int *)GC_malloc_atomic(sizeof(int));
 	Field->EnumNames[0] = "";
+	Field->EnumSize = 1;
 	Field->Name = Name;
-	Field->Range.Min = Field->Range.Max = 0;
-	Field->PreviewIndex = -1;
 	Field->PreviewColumn = 0;
+	Field->PreviewVisible = 1;
+	Field->FilterGeneration = 0;
+	Field->Sum = Field->Sum2 = 0.0;
 	gtk_list_store_insert_with_values(Field->EnumStore, 0, -1, 0, "", 1, 0.0, -1);
 	memset(Field->Values, 0, Viewer->NumNodes * sizeof(double));
 	for (int I = 0; I < Viewer->NumFields; ++I) Fields[I] = Viewer->Fields[I];
 	Fields[Viewer->NumFields] = Field;
-	free(Viewer->Fields);
+	stringmap_insert(Viewer->FieldsByName, Field->Name, Field);
+	GC_free(Viewer->Fields);
 	Viewer->Fields = Fields;
 	Viewer->NumFields = NumFields;
 	gtk_combo_box_set_active(GTK_COMBO_BOX(Viewer->EditFieldComboBox), NumFields - 1);
@@ -1211,17 +1653,20 @@ static void add_field_clicked(GtkWidget *Button, viewer_t *Viewer) {
 static void add_value_callback(const char *Name, viewer_t *Viewer, void *Data) {
 	field_t *Field = Viewer->EditField;
 	if (!Field || !Field->EnumStore) return;
-	Name = strdup(Name);
+	Name = GC_strdup(Name);
 	double Value = Viewer->EditValue = gtk_tree_model_iter_n_children(GTK_TREE_MODEL(Field->EnumStore), 0);
 	gtk_list_store_insert_with_values(Field->EnumStore, 0, -1, 0, Name, 1, Value, -1);
-	const char **EnumNames = (const char **)malloc((Value + 1) * sizeof(const char *));
+	const char **EnumNames = (const char **)GC_malloc((Value + 1) * sizeof(const char *));
 	memcpy(EnumNames, Field->EnumNames, Value * sizeof(const char *));
 	EnumNames[(int)Value] = Name;
-	free(Field->EnumNames);
+	GC_free(Field->EnumNames);
 	Field->EnumNames = EnumNames;
-	Field->Range.Max = Value;
-	gtk_combo_box_set_active(GTK_COMBO_BOX(Viewer->EditValueComboBox), Value - 1);
+	GC_free(Field->EnumValues);
+	Field->EnumSize = Value + 1;
+	Field->EnumValues = (int *)GC_malloc_atomic(Field->EnumSize * sizeof(int));
+	gtk_combo_box_set_active(GTK_COMBO_BOX(Viewer->EditValueComboBox), Value);
 	if (Field == Viewer->Fields[Viewer->CIndex]) {
+		++Viewer->FilterGeneration;
 		set_viewer_colour_index(Viewer, Viewer->CIndex);
 		redraw_viewer_background(Viewer);
 		gtk_widget_queue_draw(Viewer->DrawingArea);
@@ -1239,9 +1684,13 @@ static void save_csv(GtkWidget *Button, viewer_t *Viewer) {
 		GTK_FILE_CHOOSER_ACTION_SAVE,
 		"Cancel", GTK_RESPONSE_CANCEL,
 		"Save", GTK_RESPONSE_ACCEPT,
-		0
+		NULL
 	);
 	if (gtk_dialog_run(GTK_DIALOG(FileChooser)) == GTK_RESPONSE_ACCEPT) {
+		GtkWidget *ProgressBar = gtk_progress_bar_new();
+		gtk_progress_bar_set_show_text(GTK_PROGRESS_BAR(ProgressBar), TRUE);
+		gtk_widget_show_all(ProgressBar);
+		gtk_file_chooser_set_extra_widget(GTK_FILE_CHOOSER(FileChooser), ProgressBar);
 		char *FileName = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(FileChooser));
 		FILE *File = fopen(FileName, "wb");
 		g_free(FileName);
@@ -1255,6 +1704,7 @@ static void save_csv(GtkWidget *Button, viewer_t *Viewer) {
 			csv_fwrite(File, Fields[I]->Name, strlen(Fields[I]->Name));
 		}
 		fputc('\n', File);
+		char ProgressText[64];
 		for (int J = 0; J < NumNodes; ++J) {
 			csv_fwrite(File, Nodes[J].FileName, strlen(Nodes[J].FileName));
 			for (int I = 0; I < NumFields; ++I) {
@@ -1268,15 +1718,24 @@ static void save_csv(GtkWidget *Button, viewer_t *Viewer) {
 				}
 			}
 			fputc('\n', File);
+			if (J % 10000 == 0) {
+				sprintf(ProgressText, "%d / %d rows", J, NumNodes);
+				gtk_progress_bar_set_text(GTK_PROGRESS_BAR(ProgressBar), ProgressText);
+				gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(ProgressBar), (double)J / NumNodes);
+				while (gtk_events_pending()) gtk_main_iteration();
+			}
 		}
 		fclose(File);
+		sprintf(ProgressText, "%d / %d rows", NumNodes, NumNodes);
+		gtk_progress_bar_set_text(GTK_PROGRESS_BAR(ProgressBar), ProgressText);
+		gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(ProgressBar), 1.0);
 	}
 	gtk_widget_destroy(FileChooser);
 }
 
 static void filter_operator_equal(int Count, node_t *Node, double *Input, double Value) {
 	while (--Count >= 0) {
-		if (!Node->Filtered) if (Input[0] != Value) Node->Filtered = 1;
+		if (Input[0] != Value) Node->Filtered = 0;
 		++Node;
 		++Input;
 	}
@@ -1284,7 +1743,7 @@ static void filter_operator_equal(int Count, node_t *Node, double *Input, double
 
 static void filter_operator_not_equal(int Count, node_t *Node, double *Input, double Value) {
 	while (--Count >= 0) {
-		if (!Node->Filtered) if (Input[0] == Value) Node->Filtered = 1;
+		if (Input[0] == Value) Node->Filtered = 0;
 		++Node;
 		++Input;
 	}
@@ -1292,7 +1751,7 @@ static void filter_operator_not_equal(int Count, node_t *Node, double *Input, do
 
 static void filter_operator_less(int Count, node_t *Node, double *Input, double Value) {
 	while (--Count >= 0) {
-		if (!Node->Filtered) if (Input[0] >= Value) Node->Filtered = 1;
+		if (Input[0] >= Value) Node->Filtered = 0;
 		++Node;
 		++Input;
 	}
@@ -1300,7 +1759,7 @@ static void filter_operator_less(int Count, node_t *Node, double *Input, double 
 
 static void filter_operator_greater(int Count, node_t *Node, double *Input, double Value) {
 	while (--Count >= 0) {
-		if (!Node->Filtered) if (Input[0] <= Value) Node->Filtered = 1;
+		if (Input[0] <= Value) Node->Filtered = 0;
 		++Node;
 		++Input;
 	}
@@ -1308,7 +1767,7 @@ static void filter_operator_greater(int Count, node_t *Node, double *Input, doub
 
 static void filter_operator_less_or_equal(int Count, node_t *Node, double *Input, double Value) {
 	while (--Count >= 0) {
-		if (!Node->Filtered) if (Input[0] > Value) Node->Filtered = 1;
+		if (Input[0] > Value) Node->Filtered = 0;
 		++Node;
 		++Input;
 	}
@@ -1316,7 +1775,7 @@ static void filter_operator_less_or_equal(int Count, node_t *Node, double *Input
 
 static void filter_operator_greater_or_equal(int Count, node_t *Node, double *Input, double Value) {
 	while (--Count >= 0) {
-		if (!Node->Filtered) if (Input[0] < Value) Node->Filtered = 1;
+		if (Input[0] < Value) Node->Filtered = 0;
 		++Node;
 		++Input;
 	}
@@ -1326,7 +1785,7 @@ static void viewer_filter_nodes(viewer_t *Viewer) {
 	int NumNodes = Viewer->NumNodes;
 	node_t *Node = Viewer->Nodes;
 	for (int I = NumNodes; --I >= 0;) {
-		Node->Filtered = 0;
+		Node->Filtered = 1;
 		++Node;
 	}
 	for (filter_t *Filter = Viewer->Filters; Filter; Filter = Filter->Next) {
@@ -1335,8 +1794,12 @@ static void viewer_filter_nodes(viewer_t *Viewer) {
 		}
 	}
 	++Viewer->FilterGeneration;
+	Node = Viewer->Nodes;
+	int NumFiltered = 0;
+	for (int I = NumNodes; --I >= 0; ++Node) if (Node->Filtered) ++NumFiltered;
+	Viewer->NumFiltered = NumFiltered;
 	set_viewer_colour_index(Viewer, Viewer->CIndex);
-	set_viewer_indices(Viewer, Viewer->XIndex, Viewer->YIndex);
+	update_node_tree(Viewer);
 	redraw_viewer_background(Viewer);
 	update_preview(Viewer);
 	gtk_widget_queue_draw(Viewer->DrawingArea);
@@ -1410,7 +1873,7 @@ static void filter_remove(GtkWidget *Button, filter_t *Filter) {
 }
 
 static void filter_create(GtkButton *Widget, viewer_t *Viewer) {
-	filter_t *Filter = (filter_t *)malloc(sizeof(filter_t));
+	filter_t *Filter = new(filter_t);
 	Filter->Viewer = Viewer;
 	GtkWidget *FilterBox = Filter->Widget = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
 	Filter->ValueWidget = 0;
@@ -1478,82 +1941,129 @@ static void show_filter_window(GtkButton *Widget, viewer_t *Viewer) {
 	gtk_widget_show_all(Viewer->FilterWindow);
 }
 
+static void image_node_activated(GtkIconView *View, GtkTreePath *Path, viewer_t *Viewer) {
+	printf("image_node_activated()\n");
+	GtkTreeIter Iter[1];
+	gtk_tree_model_get_iter(GTK_TREE_MODEL(Viewer->ImagesStore), Iter, Path);
+	gtk_tree_model_get(GTK_TREE_MODEL(Viewer->ImagesStore), Iter, 2, &Viewer->ActiveNode, -1);
+	ml_value_t *Result = ml_inline(Viewer->ActivationFn, 1, Viewer->ActiveNode);
+	console_log(Viewer->Console, Result);
+}
+
 static void view_images_clicked(GtkWidget *Button, viewer_t *Viewer) {
 	if (Viewer->ValuesStore) {
-		gtk_container_remove(GTK_CONTAINER(Viewer->MainVPaned), Viewer->PreviewWidget);
 		g_object_unref(G_OBJECT(Viewer->ValuesStore));
 		Viewer->ValuesStore = 0;
 	}
-	Viewer->ImagesStore = gtk_list_store_new(2, G_TYPE_STRING, GDK_TYPE_PIXBUF);
+	if (Viewer->ImagesStore) {
+		g_object_unref(G_OBJECT(Viewer->ImagesStore));
+		Viewer->ImagesStore = 0;
+	}
+	if (Viewer->PreviewWidget) gtk_container_remove(GTK_CONTAINER(Viewer->MainVPaned), Viewer->PreviewWidget);
+	Viewer->ImagesStore = gtk_list_store_new(3, G_TYPE_STRING, GDK_TYPE_PIXBUF, G_TYPE_POINTER);
 	GtkWidget *ImagesScrolledArea = Viewer->PreviewWidget = gtk_scrolled_window_new(0, 0);
 	GtkWidget *ImagesView = gtk_icon_view_new_with_model(GTK_TREE_MODEL(Viewer->ImagesStore));
+	gtk_icon_view_set_selection_mode(GTK_ICON_VIEW(ImagesView), GTK_SELECTION_BROWSE);
 	gtk_icon_view_set_text_column(GTK_ICON_VIEW(ImagesView), 0);
 	gtk_icon_view_set_pixbuf_column(GTK_ICON_VIEW(ImagesView), 1);
 	gtk_icon_view_set_item_width(GTK_ICON_VIEW(ImagesView), 72);
 	gtk_container_add(GTK_CONTAINER(ImagesScrolledArea), ImagesView);
 	gtk_paned_pack2(GTK_PANED(Viewer->MainVPaned), ImagesScrolledArea, TRUE, TRUE);
 	gtk_widget_show_all(ImagesScrolledArea);
-}
-
-static void data_column_remove_clicked(GtkWidget *Button, field_t *Field) {
-	Field->PreviewIndex = -1;
-	GtkTreeView *ValuesView = GTK_TREE_VIEW(gtk_tree_view_column_get_tree_view(Field->PreviewColumn));
-	gtk_tree_view_remove_column(ValuesView, Field->PreviewColumn);
-	Field->PreviewColumn = 0;
+	g_signal_connect(G_OBJECT(ImagesView), "item-activated", G_CALLBACK(image_node_activated), Viewer);
+	update_preview(Viewer);
 }
 
 static void view_data_clicked(GtkWidget *Button, viewer_t *Viewer) {
+	if (Viewer->ValuesStore) {
+		g_object_unref(G_OBJECT(Viewer->ValuesStore));
+		Viewer->ValuesStore = 0;
+	}
 	if (Viewer->ImagesStore) {
-		gtk_container_remove(GTK_CONTAINER(Viewer->MainVPaned), Viewer->PreviewWidget);
 		g_object_unref(G_OBJECT(Viewer->ImagesStore));
 		Viewer->ImagesStore = 0;
 	}
-
+	if (Viewer->PreviewWidget) gtk_container_remove(GTK_CONTAINER(Viewer->MainVPaned), Viewer->PreviewWidget);
 	int NumFields = Viewer->NumFields;
-	GType Types[NumFields * 2 - 2];
-	for (int I = 1; I < NumFields; ++I) {
+	GType Types[NumFields * 2];
+	for (int I = 0; I < NumFields; ++I) {
 		field_t *Field = Viewer->Fields[I];
-		Types[2 * I - 2] = Field->EnumStore ? G_TYPE_STRING : G_TYPE_DOUBLE;
-		Types[2 * I - 1] = GDK_TYPE_RGBA;
-		Field->PreviewIndex = 2 * I - 2;
+		Types[2 * I] = Field->EnumStore ? G_TYPE_STRING : G_TYPE_DOUBLE;
+		Types[2 * I + 1] = GDK_TYPE_RGBA;
 	}
 
-	Viewer->ValuesStore = gtk_list_store_newv(2 * NumFields - 2, Types);
+	Viewer->ValuesStore = gtk_list_store_newv(2 * NumFields, Types);
 	GtkWidget *ValuesScrolledArea = Viewer->PreviewWidget = gtk_scrolled_window_new(0, 0);
 	GtkWidget *ValuesView = gtk_tree_view_new_with_model(GTK_TREE_MODEL(Viewer->ValuesStore));
 
-	for (int I = 1; I < NumFields; ++I) {
+	for (int I = 0; I < NumFields; ++I) {
 		field_t *Field = Viewer->Fields[I];
 		GtkTreeViewColumn *Column = gtk_tree_view_column_new();
-		GtkWidget *Header = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
-		GtkWidget *Title = gtk_label_new(Field->Name);
-		gtk_box_pack_start(GTK_BOX(Header), Title, TRUE, TRUE, 2);
-		GtkWidget *RemoveButton = gtk_event_box_new();
-		gtk_container_add(GTK_CONTAINER(RemoveButton), gtk_image_new_from_icon_name("window-close", GTK_ICON_SIZE_SMALL_TOOLBAR));
-		gtk_box_pack_end(GTK_BOX(Header), RemoveButton, FALSE, FALSE, 2);
-		gtk_tree_view_column_set_widget(Column, Header);
-		gtk_widget_show_all(Header);
-		gtk_tree_view_column_set_clickable(Column, TRUE);
+		gtk_tree_view_column_set_title(Column, Field->Name);
 		gtk_tree_view_column_set_reorderable(Column, TRUE);
 		GtkCellRenderer *Renderer = gtk_cell_renderer_text_new();
 		gtk_tree_view_column_pack_start(Column, Renderer, TRUE);
-		gtk_tree_view_column_add_attribute(Column, Renderer, "text", Field->PreviewIndex);
-		gtk_tree_view_column_add_attribute(Column, Renderer, "background-rgba", Field->PreviewIndex + 1);
+		gtk_tree_view_column_add_attribute(Column, Renderer, "text", 2 * I);
+		gtk_tree_view_column_add_attribute(Column, Renderer, "background-rgba", 2 * I + 1);
 		gtk_tree_view_append_column(GTK_TREE_VIEW(ValuesView), Column);
+		gtk_tree_view_column_set_visible(Column, Field->PreviewVisible);
 		Field->PreviewColumn = Column;
-		g_signal_connect(Column, "clicked", G_CALLBACK(data_column_remove_clicked), Field);
 	}
 
 	gtk_container_add(GTK_CONTAINER(ValuesScrolledArea), ValuesView);
 	gtk_paned_pack2(GTK_PANED(Viewer->MainVPaned), ValuesScrolledArea, TRUE, TRUE);
 	gtk_widget_show_all(ValuesScrolledArea);
+
+	update_preview(Viewer);
+}
+
+static void view_console_clicked(GtkWidget *Button, viewer_t *Viewer) {
+	if (Viewer->ValuesStore) {
+		g_object_unref(G_OBJECT(Viewer->ValuesStore));
+		Viewer->ValuesStore = 0;
+	}
+	if (Viewer->ImagesStore) {
+		g_object_unref(G_OBJECT(Viewer->ImagesStore));
+		Viewer->ImagesStore = 0;
+	}
+	if (Viewer->PreviewWidget) gtk_container_remove(GTK_CONTAINER(Viewer->MainVPaned), Viewer->PreviewWidget);
+	GtkWidget *ConsoleWidget = Viewer->PreviewWidget = console_get_widget(Viewer->Console);
+	g_object_ref(ConsoleWidget);
+	gtk_paned_pack2(GTK_PANED(Viewer->MainVPaned), ConsoleWidget, TRUE, TRUE);
+	gtk_widget_show_all(ConsoleWidget);
+}
+
+static void preview_column_visible_toggled(GtkCellRendererToggle *Renderer, char *Path, viewer_t *Viewer) {
+	GtkTreeIter Iter[1];
+	gtk_tree_model_get_iter_from_string(GTK_TREE_MODEL(Viewer->FieldsStore), Iter, Path);
+	int Index;
+	gtk_tree_model_get(GTK_TREE_MODEL(Viewer->FieldsStore), Iter, 1, &Index, -1);
+	field_t *Field = Viewer->Fields[Index];
+	Field->PreviewVisible = !Field->PreviewVisible;
+	if (Viewer->ValuesStore) gtk_tree_view_column_set_visible(Field->PreviewColumn, Field->PreviewVisible);
+	gtk_list_store_set(Viewer->FieldsStore, Iter, 2, Field->PreviewVisible, -1);
+}
+
+static void show_columns_clicked(GtkWidget *Button, viewer_t *Viewer) {
+	GtkWidget *Window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+	gtk_window_set_transient_for(GTK_WINDOW(Window), GTK_WINDOW(Viewer->MainWindow));
+	gtk_container_set_border_width(GTK_CONTAINER(Window), 6);
+	GtkWidget *FieldsView = gtk_tree_view_new_with_model(GTK_TREE_MODEL(Viewer->FieldsStore));
+	GtkCellRenderer *VisibleRenderer = gtk_cell_renderer_toggle_new();
+	gtk_tree_view_append_column(GTK_TREE_VIEW(FieldsView), gtk_tree_view_column_new_with_attributes("Name", gtk_cell_renderer_text_new(), "text", 0, NULL));
+	gtk_tree_view_append_column(GTK_TREE_VIEW(FieldsView), gtk_tree_view_column_new_with_attributes("Visible", VisibleRenderer, "active", 2, NULL));
+	gtk_container_add(GTK_CONTAINER(Window), FieldsView);
+	g_signal_connect(G_OBJECT(VisibleRenderer), "toggled", G_CALLBACK(preview_column_visible_toggled), Viewer);
+	gtk_widget_show_all(Window);
+	g_signal_connect(G_OBJECT(Window), "delete-event", G_CALLBACK(gtk_widget_destroy), Viewer);
 }
 
 static GtkWidget *create_viewer_action_bar(viewer_t *Viewer) {
 	GtkActionBar *ActionBar = GTK_ACTION_BAR(gtk_action_bar_new());
 	//GtkToolItem *OpenCsvButton = gtk_tool_button_new(gtk_image_new_from_icon_name("gtk-open", GTK_ICON_SIZE_BUTTON), "Open");
 	GtkWidget *SaveCsvButton = gtk_button_new_with_label("Save");
-	gtk_button_set_image(GTK_BUTTON(SaveCsvButton), gtk_image_new_from_icon_name("document-save-as", GTK_ICON_SIZE_BUTTON));
+	gtk_button_set_image(GTK_BUTTON(SaveCsvButton), gtk_image_new_from_icon_name("document-save-as-symbolic", GTK_ICON_SIZE_BUTTON));
+	g_object_set(SaveCsvButton, "always-show-image", TRUE, NULL);
 	gtk_action_bar_pack_start(ActionBar, SaveCsvButton);
 
 	g_signal_connect(G_OBJECT(SaveCsvButton), "clicked", G_CALLBACK(save_csv), Viewer);
@@ -1576,8 +2086,11 @@ static GtkWidget *create_viewer_action_bar(viewer_t *Viewer) {
 	g_signal_connect(G_OBJECT(YComboBox), "changed", G_CALLBACK(y_field_changed), Viewer);
 	g_signal_connect(G_OBJECT(CComboBox), "changed", G_CALLBACK(c_field_changed), Viewer);
 
+	gtk_action_bar_pack_start(ActionBar, gtk_label_new("X"));
 	gtk_action_bar_pack_start(ActionBar, XComboBox);
+	gtk_action_bar_pack_start(ActionBar, gtk_label_new("Y"));
 	gtk_action_bar_pack_start(ActionBar, YComboBox);
+	gtk_action_bar_pack_start(ActionBar, gtk_label_new("Colour"));
 	gtk_action_bar_pack_start(ActionBar, CComboBox);
 
 
@@ -1594,14 +2107,18 @@ static GtkWidget *create_viewer_action_bar(viewer_t *Viewer) {
 	g_signal_connect(G_OBJECT(EditValueComboBox), "changed", G_CALLBACK(edit_value_changed), Viewer);
 
 	GtkWidget *AddFieldButton = gtk_button_new_with_label("Add Field");
-	gtk_button_set_image(GTK_BUTTON(AddFieldButton), gtk_image_new_from_icon_name("list-add", GTK_ICON_SIZE_BUTTON));
+	gtk_button_set_image(GTK_BUTTON(AddFieldButton), gtk_image_new_from_icon_name("list-add-symbolic", GTK_ICON_SIZE_BUTTON));
+	g_object_set(AddFieldButton, "always-show-image", TRUE, NULL);
 
 	GtkWidget *AddValueButton = gtk_button_new_with_label("Add Value");
-	gtk_button_set_image(GTK_BUTTON(AddValueButton), gtk_image_new_from_icon_name("list-add", GTK_ICON_SIZE_BUTTON));
+	gtk_button_set_image(GTK_BUTTON(AddValueButton), gtk_image_new_from_icon_name("list-add-symbolic", GTK_ICON_SIZE_BUTTON));
+	g_object_set(AddValueButton, "always-show-image", TRUE, NULL);
 
+	gtk_action_bar_pack_start(ActionBar, gtk_label_new("Edit"));
 	gtk_action_bar_pack_start(ActionBar, EditFieldComboBox);
 	gtk_action_bar_pack_start(ActionBar, AddFieldButton);
 
+	gtk_action_bar_pack_start(ActionBar, gtk_label_new("Value"));
 	gtk_action_bar_pack_start(ActionBar, EditValueComboBox);
 	gtk_action_bar_pack_start(ActionBar, AddValueButton);
 
@@ -1611,22 +2128,37 @@ static GtkWidget *create_viewer_action_bar(viewer_t *Viewer) {
 	create_filter_window(Viewer);
 
 	GtkWidget *FilterButton = gtk_button_new_with_label("Filter");
-	gtk_button_set_image(GTK_BUTTON(FilterButton), gtk_image_new_from_icon_name("edit-find-replace", GTK_ICON_SIZE_BUTTON));
+	gtk_button_set_image(GTK_BUTTON(FilterButton), gtk_image_new_from_icon_name("edit-find-replace-symbolic", GTK_ICON_SIZE_BUTTON));
+	g_object_set(FilterButton, "always-show-image", TRUE, NULL);
 	gtk_action_bar_pack_start(ActionBar, FilterButton);
 
 	g_signal_connect(G_OBJECT(FilterButton), "clicked", G_CALLBACK(show_filter_window), Viewer);
 
-	GtkWidget *ViewImagesButton = gtk_button_new_with_label("View Images");
-	gtk_button_set_image(GTK_BUTTON(ViewImagesButton), gtk_image_new_from_icon_name("image-x-generic", GTK_ICON_SIZE_BUTTON));
+	GtkWidget *ViewImagesButton = gtk_button_new_with_label("Images");
+	gtk_button_set_image(GTK_BUTTON(ViewImagesButton), gtk_image_new_from_icon_name("view-grid-symbolic", GTK_ICON_SIZE_BUTTON));
+	g_object_set(ViewImagesButton, "always-show-image", TRUE, NULL);
 
-	GtkWidget *ViewDataButton = gtk_button_new_with_label("View Data");
-	gtk_button_set_image(GTK_BUTTON(AddValueButton), gtk_image_new_from_icon_name("view-list", GTK_ICON_SIZE_BUTTON));
+	GtkWidget *ViewDataButton = gtk_button_new_with_label("Data");
+	gtk_button_set_image(GTK_BUTTON(ViewDataButton), gtk_image_new_from_icon_name("view-list-symbolic", GTK_ICON_SIZE_BUTTON));
+	g_object_set(ViewDataButton, "always-show-image", TRUE, NULL);
+
+	GtkWidget *ViewConsoleButton = gtk_button_new_with_label("Console");
+	gtk_button_set_image(GTK_BUTTON(ViewConsoleButton), gtk_image_new_from_icon_name("utilites-terminal-symbolic", GTK_ICON_SIZE_BUTTON));
+	g_object_set(ViewConsoleButton, "always-show-image", TRUE, NULL);
+
+	GtkWidget *ShowColumnsButton = gtk_button_new_with_label("Columns");
+	gtk_button_set_image(GTK_BUTTON(ShowColumnsButton), gtk_image_new_from_icon_name("object-select-symbolic", GTK_ICON_SIZE_BUTTON));
+	g_object_set(ShowColumnsButton, "always-show-image", TRUE, NULL);
 
 	gtk_action_bar_pack_start(ActionBar, ViewImagesButton);
 	gtk_action_bar_pack_start(ActionBar, ViewDataButton);
+	gtk_action_bar_pack_start(ActionBar, ShowColumnsButton);
+	gtk_action_bar_pack_start(ActionBar, ViewConsoleButton);
 
 	g_signal_connect(G_OBJECT(ViewImagesButton), "clicked", G_CALLBACK(view_images_clicked), Viewer);
 	g_signal_connect(G_OBJECT(ViewDataButton), "clicked", G_CALLBACK(view_data_clicked), Viewer);
+	g_signal_connect(G_OBJECT(ShowColumnsButton), "clicked", G_CALLBACK(show_columns_clicked), Viewer);
+	g_signal_connect(G_OBJECT(ViewConsoleButton), "clicked", G_CALLBACK(view_console_clicked), Viewer);
 
 	GtkWidget *NumVisibleLabel = gtk_label_new(0);
 	gtk_action_bar_pack_end(ActionBar, NumVisibleLabel);
@@ -1635,25 +2167,110 @@ static GtkWidget *create_viewer_action_bar(viewer_t *Viewer) {
 	return GTK_WIDGET(ActionBar);
 }
 
-static viewer_t *create_viewer(const char *CsvFileName) {
-	viewer_t *Viewer = (viewer_t *)malloc(sizeof(viewer_t));
+static ml_value_t *viewer_global_get(viewer_t *Viewer, const char *Name) {
+	return stringmap_search(Viewer->Globals, Name) ?: MLNil;
+}
+
+static ml_value_t *node_field_fn(void *Data, int Count, ml_value_t **Args) {
+	node_t *Node = (node_t *)Args[0];
+	const char *Name = ml_string_value(Args[1]);
+	viewer_t *Viewer = Node->Viewer;
+	field_t *Field = stringmap_search(Viewer->FieldsByName, Name);
+	if (!Field) return ml_error("FieldError", "no such field %s", Name);
+	int Index = Node - Viewer->Nodes;
+	if (Field->EnumNames) {
+		int Value = Field->Values[Index];
+		if (Value) {
+			return ml_string(Field->EnumNames[Value], -1);
+		} else {
+			return MLNil;
+		}
+	} else {
+		return ml_real(Field->Values[Index]);
+	}
+}
+
+static ml_value_t *node_image_fn(void *Data, int Count, ml_value_t **Args) {
+	node_t *Node = (node_t *)Args[0];
+	return ml_string(Node->FileName, -1);
+}
+
+static ml_value_t *clipboard_fn(viewer_t *Viewer, int Count, ml_value_t **Args) {
+	ml_value_t *AppendMethod = ml_method("append");
+	ML_CHECK_ARG_COUNT(1);
+	ml_stringbuffer_t Buffer[1] = {ML_STRINGBUFFER_INIT};
+	for (int I = 0; I < Count; ++I) {
+		ml_value_t *Result = ml_inline(AppendMethod, 2, Buffer, Args[I]);
+		if (Result->Type == MLErrorT) return Result;
+		if (Result != MLNil) ml_stringbuffer_add(Buffer, " ", 1);
+	}
+	int Length = Buffer->Length;
+	const char *Text = ml_stringbuffer_get(Buffer);
+	gtk_clipboard_set_text(Viewer->Clipboard, Text, Length);
+	return MLNil;
+}
+
+static ml_value_t *execute_fn(void *Data, int Count, ml_value_t **Args) {
+	ml_value_t *AppendMethod = ml_method("append");
+	ML_CHECK_ARG_COUNT(1);
+	ml_stringbuffer_t Buffer[1] = {ML_STRINGBUFFER_INIT};
+	for (int I = 0; I < Count; ++I) {
+		ml_value_t *Result = ml_inline(AppendMethod, 2, Buffer, Args[I]);
+		if (Result->Type == MLErrorT) return Result;
+		if (Result != MLNil) ml_stringbuffer_add(Buffer, " ", 1);
+	}
+	const char *Command = ml_stringbuffer_get(Buffer);
+	clock_t Start = clock();
+	FILE *File = popen(Command, "r");
+	char Chars[ML_STRINGBUFFER_NODE_SIZE];
+	while (!feof(File)) {
+		ssize_t Size = fread(Chars, 1, ML_STRINGBUFFER_NODE_SIZE, File);
+		if (Size == -1) break;
+		if (Size > 0) ml_stringbuffer_add(Buffer, Chars, Size);
+	}
+	int Result = pclose(File);
+	clock_t End = clock();
+	if (WIFEXITED(Result)) {
+		if (WEXITSTATUS(Result) != 0) {
+			return ml_error("ExecuteError", "process returned non-zero exit code");
+		} else {
+			size_t Length = Buffer->Length;
+			ml_value_t *Result = ml_string(ml_stringbuffer_get(Buffer), Length);
+			return Result;
+		}
+	} else {
+		return ml_error("ExecuteError", "process exited abnormally");
+	}
+}
+
+static viewer_t *create_viewer(int Argc, char *Argv[]) {
+	viewer_t *Viewer = new(viewer_t);
 #ifdef USE_GL
-	Viewer->PointSize = 6.0;
-	Viewer->BoxSize = 40.0;
 	Viewer->GLVertices = 0;
 	Viewer->GLColours = 0;
 	Viewer->GLReady = 0;
 #else
-	Viewer->PointSize = 4.0;
-	Viewer->BoxSize = 40.0;
 	Viewer->CachedBackground = 0;
 #endif
 	Viewer->CacheHead = Viewer->CacheTail = 0;
-	Viewer->NumCachedImages = 0;
+	Viewer->NumCached = 0;
 	Viewer->EditField = 0;
 	Viewer->Filters = 0;
 	Viewer->FilterGeneration = 1;
-	Viewer->FieldsStore = gtk_list_store_new(2, G_TYPE_STRING, G_TYPE_INT);
+	Viewer->LoadGeneration = 0;
+	Viewer->LoadCache = (node_t **)GC_malloc(MAX_CACHED_IMAGES * sizeof(node_t *));
+	Viewer->LoadCacheIndex = 0;
+	Viewer->ShowBox = 0;
+	Viewer->RedrawBackground = 0;
+	Viewer->FieldsStore = gtk_list_store_new(3, G_TYPE_STRING, G_TYPE_INT, G_TYPE_BOOLEAN);
+	Viewer->Console = console_new((ml_getter_t)viewer_global_get, Viewer);
+	Viewer->ActivationFn = MLNil;
+	Viewer->PreviewWidget = 0;
+
+	stringmap_insert(Viewer->Globals, "activate", ml_reference(&Viewer->ActivationFn));
+	stringmap_insert(Viewer->Globals, "print", ml_function(Viewer->Console, (void *)console_print));
+	stringmap_insert(Viewer->Globals, "clipboard", ml_function(Viewer, (void *)clipboard_fn));
+	stringmap_insert(Viewer->Globals, "execute", ml_function(Viewer, (void *)execute_fn));
 
 	GtkWidget *MainWindow = Viewer->MainWindow = gtk_window_new(GTK_WINDOW_TOPLEVEL);
 #ifdef USE_GL
@@ -1662,6 +2279,7 @@ static viewer_t *create_viewer(const char *CsvFileName) {
 	Viewer->DrawingArea = gtk_drawing_area_new();
 #endif
 
+	Viewer->Clipboard = gtk_clipboard_get(GDK_SELECTION_CLIPBOARD);
 	GtkWidget *MainVBox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
 	gtk_container_add(GTK_CONTAINER(MainWindow), MainVBox);
 
@@ -1673,35 +2291,61 @@ static viewer_t *create_viewer(const char *CsvFileName) {
 
 	gtk_paned_pack1(GTK_PANED(Viewer->MainVPaned), Viewer->DrawingArea, TRUE, TRUE);
 
-	Viewer->ImagesStore = gtk_list_store_new(2, G_TYPE_STRING, GDK_TYPE_PIXBUF);
-	GtkWidget *ImagesScrolledArea = Viewer->PreviewWidget = gtk_scrolled_window_new(0, 0);
-	GtkWidget *ImagesView = gtk_icon_view_new_with_model(GTK_TREE_MODEL(Viewer->ImagesStore));
-	gtk_icon_view_set_text_column(GTK_ICON_VIEW(ImagesView), 0);
-	gtk_icon_view_set_pixbuf_column(GTK_ICON_VIEW(ImagesView), 1);
-	gtk_icon_view_set_item_width(GTK_ICON_VIEW(ImagesView), 72);
-	gtk_container_add(GTK_CONTAINER(ImagesScrolledArea), ImagesView);
-	gtk_paned_pack2(GTK_PANED(Viewer->MainVPaned), ImagesScrolledArea, TRUE, TRUE);
+	cairo_surface_t *CursorSurface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, BOX_SIZE, BOX_SIZE);
+	cairo_t *CursorCairo = cairo_create(CursorSurface);
+	cairo_new_path(CursorCairo);
+	cairo_rectangle(CursorCairo, 0.0, 0.0, BOX_SIZE, BOX_SIZE);
+	cairo_set_source_rgb(CursorCairo, 0.5, 0.5, 1.0);
+	cairo_stroke_preserve(CursorCairo);
+	cairo_set_source_rgba(CursorCairo, 0.5, 0.5, 1.0, 0.5);
+	cairo_fill(CursorCairo);
+	Viewer->Cursor = gdk_cursor_new_from_surface(gdk_display_get_default(), CursorSurface, BOX_SIZE / 2.0, BOX_SIZE / 2.0);
+
+	Viewer->ImagesStore = 0;
+	Viewer->ValuesStore = 0;
+	view_images_clicked(NULL, Viewer);
 
 	gtk_widget_add_events(Viewer->DrawingArea, GDK_SCROLL_MASK);
 	gtk_widget_add_events(Viewer->DrawingArea, GDK_POINTER_MOTION_MASK);
 	gtk_widget_add_events(Viewer->DrawingArea, GDK_BUTTON_PRESS_MASK);
 	gtk_widget_add_events(Viewer->DrawingArea, GDK_BUTTON_RELEASE_MASK);
-	gtk_widget_add_events(Viewer->DrawingArea, GDK_KEY_PRESS);
+	//gtk_widget_add_events(Viewer->DrawingArea, GDK_KEY_PRESS);
 #ifdef USE_GL
 	g_signal_connect(G_OBJECT(Viewer->DrawingArea), "render", G_CALLBACK(render_viewer), Viewer);
-	g_signal_connect(G_OBJECT(Viewer->DrawingArea), "realize", G_CALLBACK(realize_viewer), Viewer);
+	g_signal_connect(G_OBJECT(Viewer->DrawingArea), "realize", G_CALLBACK(realize_viewer_gl), Viewer);
 #else
 	g_signal_connect(G_OBJECT(Viewer->DrawingArea), "draw", G_CALLBACK(redraw_viewer), Viewer);
+	g_signal_connect(G_OBJECT(Viewer->DrawingArea), "realize", G_CALLBACK(realize_viewer), Viewer);
 #endif
 	g_signal_connect(G_OBJECT(Viewer->DrawingArea), "size-allocate", G_CALLBACK(resize_viewer), Viewer);
 	g_signal_connect(G_OBJECT(Viewer->DrawingArea), "scroll-event", G_CALLBACK(scroll_viewer), Viewer);
 	g_signal_connect(G_OBJECT(Viewer->DrawingArea), "button-press-event", G_CALLBACK(button_press_viewer), Viewer);
+	g_signal_connect(G_OBJECT(Viewer->DrawingArea), "button-release-event", G_CALLBACK(button_release_viewer), Viewer);
 	g_signal_connect(G_OBJECT(Viewer->DrawingArea), "motion-notify-event", G_CALLBACK(motion_notify_viewer), Viewer);
-	g_signal_connect(G_OBJECT(Viewer->DrawingArea), "key-press-event", G_CALLBACK(key_press_viewer), Viewer);
+	g_signal_connect(G_OBJECT(Viewer->MainWindow), "key-press-event", G_CALLBACK(key_press_viewer), Viewer);
 	g_signal_connect(G_OBJECT(Viewer->MainWindow), "destroy", G_CALLBACK(gtk_main_quit), 0);
 
+	const char *CsvFileName = 0;
+	const char *ImagePrefix = 0;
+	for (int I = 1; I < Argc; ++I) {
+		if (Argv[I][0] == '-') {
+			if (Argv[I][1] == 'p') {
+				if (++I >= Argc) {
+					puts("Missing image path");
+					exit(1);
+				}
+				ImagePrefix = Argv[I];
+			}
+		} else {
+			CsvFileName = Argv[I];
+		}
+	}
 
-	viewer_open_file(Viewer, CsvFileName);
+	if (!CsvFileName) {
+		puts("Missing CSV file name");
+		exit(1);
+	}
+	viewer_open_file(Viewer, CsvFileName, ImagePrefix);
 
 	gtk_window_resize(GTK_WINDOW(Viewer->MainWindow), 640, 480);
 	gtk_paned_set_position(GTK_PANED(Viewer->MainVPaned), 320);
@@ -1714,8 +2358,13 @@ static viewer_t *create_viewer(const char *CsvFileName) {
 }
 
 int main(int Argc, char *Argv[]) {
+	GC_INIT();
 	gtk_init(&Argc, &Argv);
-	viewer_t *Viewer = create_viewer(Argv[1]);
+	ml_init();
+	NodeT = ml_class(MLAnyT, "node");
+	ml_method_by_name(".", 0, node_field_fn, NodeT, MLStringT, NULL);
+	ml_method_by_name("image", 0, node_image_fn, NodeT, NULL);
+	viewer_t *Viewer = create_viewer(Argc, Argv);
 	gtk_main();
 	return 0;
 }
