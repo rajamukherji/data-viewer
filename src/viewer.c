@@ -2252,7 +2252,7 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 	Viewer->RedrawBackground = 0;
 	Viewer->FieldsStore = gtk_list_store_new(3, G_TYPE_STRING, G_TYPE_INT, G_TYPE_BOOLEAN);
 	Viewer->Console = console_new((ml_getter_t)viewer_global_get, Viewer);
-	Viewer->ActivationFn = MLNil;
+	Viewer->ActivationFn = ml_function(Viewer->Console, (void *)console_print);
 	Viewer->PreviewWidget = 0;
 
 	stringmap_insert(Viewer->Globals, "activate", ml_reference(&Viewer->ActivationFn));
@@ -2352,6 +2352,7 @@ int main(int Argc, char *Argv[]) {
 	NodeT = ml_class(MLAnyT, "node");
 	ml_method_by_name(".", 0, node_field_fn, NodeT, MLStringT, NULL);
 	ml_method_by_name("image", 0, node_image_fn, NodeT, NULL);
+	ml_method_by_name("string", 0, node_image_fn, NodeT, NULL);
 	viewer_t *Viewer = create_viewer(Argc, Argv);
 	gtk_main();
 	return 0;
