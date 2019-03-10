@@ -108,6 +108,7 @@ static void console_submit(GtkWidget *Button, console_t *Console) {
 		Scanner->Next = "";
 	} else {
 		for (;;) {
+			Function->Top = Function->Size = 0;
 			mlc_expr_t *Expr = ml_accept_command(Scanner, Console->Globals);
 			if (Expr == (mlc_expr_t *)-1) break;
 			mlc_compiled_t Compiled = ml_compile(Function, Expr, HashContext);
