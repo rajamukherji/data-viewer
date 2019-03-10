@@ -129,14 +129,14 @@ static void console_submit(GtkWidget *Button, console_t *Console) {
 static gboolean console_keypress(GtkWidget *Widget, GdkEventKey *Event, console_t *Console) {
 	switch (Event->keyval) {
 	case GDK_KEY_Return: {
-		if (Event->state & GDK_CONTROL_MASK) {
+		if (Event->state & GDK_SHIFT_MASK) {
 			console_submit(NULL, Console);
 			return TRUE;
 		}
 		break;
 	}
 	case GDK_KEY_Up: {
-		if (Event->state & GDK_CONTROL_MASK) {
+		if (Event->state & GDK_SHIFT_MASK) {
 			int HistoryIndex = (Console->HistoryIndex + MAX_HISTORY - 1) % MAX_HISTORY;
 			if (Console->History[HistoryIndex]) {
 				gtk_text_buffer_set_text(gtk_text_view_get_buffer(GTK_TEXT_VIEW(Console->InputView)), Console->History[HistoryIndex], -1);
@@ -147,7 +147,7 @@ static gboolean console_keypress(GtkWidget *Widget, GdkEventKey *Event, console_
 		break;
 	}
 	case GDK_KEY_Down: {
-		if (Event->state & GDK_CONTROL_MASK) {
+		if (Event->state & GDK_SHIFT_MASK) {
 			int HistoryIndex = (Console->HistoryIndex + 1) % MAX_HISTORY;
 			if (Console->History[HistoryIndex]) {
 				gtk_text_buffer_set_text(gtk_text_view_get_buffer(GTK_TEXT_VIEW(Console->InputView)), Console->History[HistoryIndex], -1);
@@ -163,9 +163,14 @@ static gboolean console_keypress(GtkWidget *Widget, GdkEventKey *Event, console_
 
 
 void console_show(console_t *Console, GtkWindow *Parent) {
-	gtk_window_set_transient_for(Parent, GTK_WINDOW(Console->Window));
+	gtk_window_set_transient_for(GTK_WINDOW(Console->Window), Parent);
 	gtk_widget_show_all(Console->Window);
 	gtk_widget_grab_focus(Console->InputView);
+}
+
+static gboolean console_hide(GtkWidget *Widget, GdkEvent *Event, console_t *Console) {
+	gtk_widget_hide(Widget);
+	return TRUE;
 }
 
 void console_append(console_t *Console, const char *Buffer, int Length) {
@@ -339,5 +344,6 @@ console_t *console_new(ml_getter_t GlobalGet, void *Globals) {
 	Console->Window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
 	gtk_container_add(GTK_CONTAINER(Console->Window), Container);
 	gtk_window_set_default_size(GTK_WINDOW(Console->Window), 640, 480);
+	g_signal_connect(G_OBJECT(Console->Window), "delete-event", G_CALLBACK(console_hide), Console);
 	return Console;
 }
