@@ -2416,7 +2416,7 @@ int main(int Argc, char *Argv[]) {
 	ml_init();
 	ml_file_init();
 	NodeT = ml_class(MLAnyT, "node");
-	ml_method_by_name(".", 0, node_field_fn, NodeT, MLStringT, NULL);
+	ml_method_by_name("[]", 0, node_field_fn, NodeT, MLStringT, NULL);
 	ml_method_by_name("image", 0, node_image_fn, NodeT, NULL);
 	ml_method_by_name("string", 0, node_image_fn, NodeT, NULL);
 	viewer_t *Viewer = create_viewer(Argc, Argv);
