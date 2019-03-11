@@ -20,6 +20,7 @@ static ml_value_t *StringMethod;
 struct console_t {
 	GtkWidget *Window, *LogScrolled, *LogView, *InputView;
 	GtkTextTag *OutputTag, *ResultTag, *ErrorTag;
+	GtkTextMark *EndMark;
 	ml_getter_t ParentGetter;
 	void *ParentGlobals;
 	mlc_scanner_t *Scanner;
@@ -74,6 +75,7 @@ void console_log(console_t *Console, ml_value_t *Value) {
 		}
 		gtk_text_buffer_insert_with_tags(LogBuffer, End, Buffer, Length, Console->ResultTag, NULL);
 	}
+	gtk_text_view_scroll_mark_onscreen(GTK_TEXT_VIEW(Console->LogView), Console->EndMark);
 }
 
 static void console_submit(GtkWidget *Button, console_t *Console) {
@@ -89,6 +91,7 @@ static void console_submit(GtkWidget *Button, console_t *Console) {
 	GtkTextIter End[1];
 	GtkTextBuffer *LogBuffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(Console->LogView));
 	gtk_text_buffer_get_end_iter(LogBuffer, End);
+	gtk_source_buffer_create_source_mark(GTK_SOURCE_BUFFER(LogBuffer), NULL, "result", End);
 	gtk_text_buffer_insert_range(LogBuffer, End, InputStart, InputEnd);
 	gtk_text_buffer_insert(LogBuffer, End, "\n", -1);
 	gtk_text_buffer_set_text(InputBuffer, "", 0);
@@ -121,8 +124,7 @@ static void console_submit(GtkWidget *Button, console_t *Console) {
 			ml_value_t *Result = ml_closure_call((ml_value_t *)Closure, 0, NULL);
 			console_log(Console, Result);
 		}
-		GtkAdjustment *Adjustment = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(Console->LogScrolled));
-		gtk_adjustment_set_value(Adjustment, gtk_adjustment_get_upper(Adjustment));
+		gtk_text_view_scroll_mark_onscreen(GTK_TEXT_VIEW(Console->LogView), Console->EndMark);
 	}
 	gtk_widget_grab_focus(Console->InputView);
 }
@@ -211,7 +213,7 @@ console_t *console_new(ml_getter_t GlobalGet, void *Globals) {
 	GResource *Resources = resources_get_resource();
 	char Buffer[256];
 	GFile *File = g_file_new_build_filename(TempDir, "wrapl.xml", NULL);
-	GInputStream *InputStream = g_resource_open_stream(Resources, "/gtksourceview/wrapl.xml", G_RESOURCE_LOOKUP_FLAGS_NONE, &Error);
+	GInputStream *InputStream = g_resource_open_stream(Resources, "/gtksourceview/base16-google.light-2.xml", G_RESOURCE_LOOKUP_FLAGS_NONE, &Error);
 	if (Error) {
 		printf("Error: %s\n", Error->message);
 		exit(1);
@@ -286,7 +288,7 @@ console_t *console_new(ml_getter_t GlobalGet, void *Globals) {
 	gtk_source_buffer_set_language(GTK_SOURCE_BUFFER(gtk_text_view_get_buffer(GTK_TEXT_VIEW(Console->InputView))), Language);
 	GtkSourceStyleSchemeManager *StyleManager = gtk_source_style_scheme_manager_get_default();
 	gtk_source_style_scheme_manager_prepend_search_path(StyleManager, TempDir);
-	GtkSourceStyleScheme *StyleScheme = gtk_source_style_scheme_manager_get_scheme(StyleManager, "wrapl");
+	GtkSourceStyleScheme *StyleScheme = gtk_source_style_scheme_manager_get_scheme(StyleManager, "base16-google-light-2");
 	gtk_source_buffer_set_style_scheme(GTK_SOURCE_BUFFER(gtk_text_view_get_buffer(GTK_TEXT_VIEW(Console->InputView))), StyleScheme);
 	GtkTextTagTable *TagTable = gtk_text_buffer_get_tag_table(gtk_text_view_get_buffer(GTK_TEXT_VIEW(Console->InputView)));
 	Console->OutputTag = gtk_text_tag_new("log-output");
@@ -321,6 +323,16 @@ console_t *console_new(ml_getter_t GlobalGet, void *Globals) {
 	gtk_text_view_set_monospace(GTK_TEXT_VIEW(Console->LogView), TRUE);
 	gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(Console->LogView), TRUE);
 	gtk_source_view_set_tab_width(GTK_SOURCE_VIEW(Console->LogView), 4);
+	GtkTextIter End[1];
+	gtk_text_buffer_get_end_iter(GTK_TEXT_BUFFER(LogBuffer), End);
+	Console->EndMark = gtk_text_buffer_create_mark(GTK_TEXT_BUFFER(LogBuffer), "end", End, FALSE);
+
+	GtkSourceMarkAttributes *MarkAttributes = gtk_source_mark_attributes_new();
+	GdkPixbuf *MarkPixbuf = gdk_pixbuf_new(GDK_COLORSPACE_RGB, TRUE, 8, 32, 32);
+	gdk_pixbuf_fill(MarkPixbuf, 0xFF8000FF);
+	gtk_source_mark_attributes_set_pixbuf(MarkAttributes, MarkPixbuf);
+	gtk_source_view_set_mark_attributes(GTK_SOURCE_VIEW(Console->LogView), "result", MarkAttributes, 10);
+	gtk_source_view_set_show_line_marks(GTK_SOURCE_VIEW(Console->LogView), TRUE);
 
 	gtk_text_view_set_top_margin(GTK_TEXT_VIEW(Console->InputView), 4);
 	gtk_text_view_set_bottom_margin(GTK_TEXT_VIEW(Console->InputView), 4);
@@ -329,6 +341,8 @@ console_t *console_new(ml_getter_t GlobalGet, void *Globals) {
 	gtk_text_view_set_monospace(GTK_TEXT_VIEW(Console->InputView), TRUE);
 	gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(Console->InputView), TRUE);
 	gtk_source_view_set_tab_width(GTK_SOURCE_VIEW(Console->InputView), 4);
+	gtk_source_view_set_show_line_numbers(GTK_SOURCE_VIEW(Console->InputView), TRUE);
+
 	GtkWidget *InputPanel = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
 	GtkWidget *SubmitButton = gtk_button_new();
 	gtk_button_set_image(GTK_BUTTON(SubmitButton), gtk_image_new_from_icon_name("go-jump-symbolic", GTK_ICON_SIZE_BUTTON));

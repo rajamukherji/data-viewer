@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <gresources>
 	<gresource prefix="/">
-		<file preprocess="xml-stripblanks">gtksourceview/wrapl.xml</file>
+		<file preprocess="xml-stripblanks">gtksourceview/base16-google.light-2.xml</file>
 		<file>gtksourceview/minilang.lang</file>
 	</gresource>
 </gresources>
