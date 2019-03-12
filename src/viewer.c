@@ -8,6 +8,7 @@
 #include "libcsv/csv.h"
 #include <gc/gc.h>
 #include <minilang.h>
+#include <ml_file.h>
 #include "console.h"
 #include <stringmap.h>
 
@@ -2018,19 +2019,7 @@ static void view_data_clicked(GtkWidget *Button, viewer_t *Viewer) {
 }
 
 static void view_console_clicked(GtkWidget *Button, viewer_t *Viewer) {
-	if (Viewer->ValuesStore) {
-		g_object_unref(G_OBJECT(Viewer->ValuesStore));
-		Viewer->ValuesStore = 0;
-	}
-	if (Viewer->ImagesStore) {
-		g_object_unref(G_OBJECT(Viewer->ImagesStore));
-		Viewer->ImagesStore = 0;
-	}
-	if (Viewer->PreviewWidget) gtk_container_remove(GTK_CONTAINER(Viewer->MainVPaned), Viewer->PreviewWidget);
-	GtkWidget *ConsoleWidget = Viewer->PreviewWidget = console_get_widget(Viewer->Console);
-	g_object_ref(ConsoleWidget);
-	gtk_paned_pack2(GTK_PANED(Viewer->MainVPaned), ConsoleWidget, TRUE, TRUE);
-	gtk_widget_show_all(ConsoleWidget);
+	console_show(Viewer->Console, GTK_WINDOW(Viewer->MainWindow));
 }
 
 static void preview_column_visible_toggled(GtkCellRendererToggle *Renderer, char *Path, viewer_t *Viewer) {
@@ -2143,7 +2132,7 @@ static GtkWidget *create_viewer_action_bar(viewer_t *Viewer) {
 	g_object_set(ViewDataButton, "always-show-image", TRUE, NULL);
 
 	GtkWidget *ViewConsoleButton = gtk_button_new_with_label("Console");
-	gtk_button_set_image(GTK_BUTTON(ViewConsoleButton), gtk_image_new_from_icon_name("utilites-terminal-symbolic", GTK_ICON_SIZE_BUTTON));
+	gtk_button_set_image(GTK_BUTTON(ViewConsoleButton), gtk_image_new_from_icon_name("utilities-terminal-symbolic", GTK_ICON_SIZE_BUTTON));
 	g_object_set(ViewConsoleButton, "always-show-image", TRUE, NULL);
 
 	GtkWidget *ShowColumnsButton = gtk_button_new_with_label("Columns");
@@ -2194,6 +2183,63 @@ static ml_value_t *node_image_fn(void *Data, int Count, ml_value_t **Args) {
 	node_t *Node = (node_t *)Args[0];
 	return ml_string(Node->FileName, -1);
 }
+
+typedef struct nodes_iter_t {
+	const ml_type_t *Type;
+	node_t *Nodes;
+	int NumNodes;
+} nodes_iter_t;
+
+static ml_value_t *nodes_iter_deref(ml_value_t *Ref) {
+	nodes_iter_t *Iter = (nodes_iter_t *)Ref;
+	return (ml_value_t *)Iter->Nodes;
+}
+
+static ml_value_t *nodes_iter_next(ml_value_t *Ref) {
+	nodes_iter_t *Iter = (nodes_iter_t *)Ref;
+	if (Iter->NumNodes) {
+		--Iter->NumNodes;
+		++Iter->Nodes;
+		return Ref;
+	} else {
+		return MLNil;
+	}
+}
+
+static ml_type_t NodesIterT[1] = {{
+	MLAnyT, "nodes-iter",
+	ml_default_hash,
+	ml_default_call,
+	nodes_iter_deref,
+	ml_default_assign,
+	ml_default_iterate,
+	nodes_iter_next,
+	ml_default_key
+}};
+
+static ml_value_t *nodes_iterate(ml_value_t *Value) {
+	nodes_iter_t *Nodes = (nodes_iter_t *)Value;
+	if (Nodes->NumNodes) {
+		nodes_iter_t *Iter = new(nodes_iter_t);
+		Iter->Type = NodesIterT;
+		Iter->Nodes = Nodes->Nodes;
+		Iter->NumNodes = Nodes->NumNodes - 1;
+		return (ml_value_t *)Iter;
+	} else {
+		return MLNil;
+	}
+}
+
+static ml_type_t NodesT[1] = {{
+	MLAnyT, "nodes",
+	ml_default_hash,
+	ml_default_call,
+	ml_default_deref,
+	ml_default_assign,
+	nodes_iterate,
+	ml_default_next,
+	ml_default_key
+}};
 
 static ml_value_t *clipboard_fn(viewer_t *Viewer, int Count, ml_value_t **Args) {
 	ml_value_t *AppendMethod = ml_method("append");
@@ -2264,13 +2310,14 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 	Viewer->RedrawBackground = 0;
 	Viewer->FieldsStore = gtk_list_store_new(3, G_TYPE_STRING, G_TYPE_INT, G_TYPE_BOOLEAN);
 	Viewer->Console = console_new((ml_getter_t)viewer_global_get, Viewer);
-	Viewer->ActivationFn = MLNil;
+	Viewer->ActivationFn = ml_function(Viewer->Console, (void *)console_print);
 	Viewer->PreviewWidget = 0;
 
 	stringmap_insert(Viewer->Globals, "activate", ml_reference(&Viewer->ActivationFn));
 	stringmap_insert(Viewer->Globals, "print", ml_function(Viewer->Console, (void *)console_print));
 	stringmap_insert(Viewer->Globals, "clipboard", ml_function(Viewer, (void *)clipboard_fn));
 	stringmap_insert(Viewer->Globals, "execute", ml_function(Viewer, (void *)execute_fn));
+	stringmap_insert(Viewer->Globals, "open", ml_function(Viewer, ml_file_open));
 
 	GtkWidget *MainWindow = Viewer->MainWindow = gtk_window_new(GTK_WINDOW_TOPLEVEL);
 #ifdef USE_GL
@@ -2347,6 +2394,12 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 	}
 	viewer_open_file(Viewer, CsvFileName, ImagePrefix);
 
+	nodes_iter_t *NodesIter = new(nodes_iter_t);
+	NodesIter->Type = NodesT;
+	NodesIter->Nodes = Viewer->Nodes;
+	NodesIter->NumNodes = Viewer->NumNodes;
+	stringmap_insert(Viewer->Globals, "Nodes", (ml_value_t *)NodesIter);
+
 	gtk_window_resize(GTK_WINDOW(Viewer->MainWindow), 640, 480);
 	gtk_paned_set_position(GTK_PANED(Viewer->MainVPaned), 320);
 	gtk_widget_show_all(Viewer->MainWindow);
@@ -2361,9 +2414,11 @@ int main(int Argc, char *Argv[]) {
 	GC_INIT();
 	gtk_init(&Argc, &Argv);
 	ml_init();
+	ml_file_init();
 	NodeT = ml_class(MLAnyT, "node");
-	ml_method_by_name(".", 0, node_field_fn, NodeT, MLStringT, NULL);
+	ml_method_by_name("[]", 0, node_field_fn, NodeT, MLStringT, NULL);
 	ml_method_by_name("image", 0, node_image_fn, NodeT, NULL);
+	ml_method_by_name("string", 0, node_image_fn, NodeT, NULL);
 	viewer_t *Viewer = create_viewer(Argc, Argv);
 	gtk_main();
 	return 0;

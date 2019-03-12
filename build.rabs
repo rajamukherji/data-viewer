@@ -2,6 +2,9 @@
 
 PLATFORM := defined("PLATFORM") or shell("uname"):trim
 DEBUG := defined("DEBUG")
+PREFIX := file(defined("PREFIX") or "/usr/local")
+
+INSTALL := meta("install")
 
 pkgconfig := fun(Args) do
 	expr('pkg-config {Args}') => fun() shell("pkg-config", Args):trim
@@ -53,8 +56,22 @@ c_program := fun(Executable, Objects, Libraries) do
 	DEFAULT[Executable]
 end
 
-BIN_DIR := file("bin")
-BIN_DIR:mkdir
+install := fun(Source, Target, Mode) do
+	print(Source, " -> ", Target, "\n")
+	Target[Source] => fun(Target) do
+		Target:dir:mkdir
+		Source:copy(Target)
+		Mode and execute("chmod", Mode, Target)
+	end
+	INSTALL[Target]
+end
+
+BIN_DIR := file("bin"):mkdir
+SHARE_DIR := file("share"):mkdir
+
+for var File in file("share/data-viewer"):ls do
+	install(File, PREFIX/'share/data-viewer/{File:basename}')
+end
 
 vmount("obj", "src")
 subdir("obj")
