@@ -4,3 +4,6 @@
 [submodule "src/minilang"]
 	path = src/minilang
 	url = https://github.com/wrapl/minilang
+[submodule "src/whereami"]
+	path = src/whereami
+	url = https://github.com/gpakosz/whereami.git

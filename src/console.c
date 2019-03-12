@@ -10,6 +10,8 @@
 #include <minilang.h>
 #include <stringmap.h>
 #include <ml_compiler.h>
+#include <whereami.h>
+#include <sys/stat.h>
 
 #include "console.h"
 
@@ -202,70 +204,90 @@ ml_value_t *console_print(console_t *Console, int Count, ml_value_t **Args) {
 
 extern GResource *resources_get_resource(void);
 
+static char *get_resources_path() {
+	// First try to find ../share/data-viewer folder
+	// If that fails then extract embedded files into temporary directory
+	int ExecutablePathLength = wai_getExecutablePath(NULL, 0, NULL);
+	char *ExecutablePath = GC_malloc_atomic(ExecutablePathLength + 1);
+	int ExecutableDirLength;
+	wai_getExecutablePath(ExecutablePath, ExecutablePathLength + 1, &ExecutableDirLength);
+	ExecutablePath[ExecutablePathLength] = 0;
+	int ResourcesPathLength = ExecutableDirLength + strlen("/../share/data-viewer");
+	char *ResourcesPath = GC_malloc_atomic(ResourcesPathLength + 1);
+	memcpy(ResourcesPath, ExecutablePath, ExecutableDirLength);
+	strcpy(ResourcesPath + ExecutableDirLength, "/../share/data-viewer");
+	struct stat Stat[1];
+	printf("Looking for resources in %s\n", ResourcesPath);
+	if (lstat(ResourcesPath, Stat) || !S_ISDIR(Stat->st_mode)) {
+		GError *Error = 0;
+		ResourcesPath = g_dir_make_tmp("data-viewer-XXXXXX", &Error);
+		if (Error) {
+			printf("Error: %s\n", Error->message);
+			exit(1);
+		}
+		GResource *Resources = resources_get_resource();
+		char Buffer[256];
+		GFile *File = g_file_new_build_filename(ResourcesPath, "wrapl.xml", NULL);
+		GInputStream *InputStream = g_resource_open_stream(Resources, "/gtksourceview/base16-google.light-2.xml", G_RESOURCE_LOOKUP_FLAGS_NONE, &Error);
+		if (Error) {
+			printf("Error: %s\n", Error->message);
+			exit(1);
+		}
+		GOutputStream *OutputStream = G_OUTPUT_STREAM(g_file_create(File, G_FILE_CREATE_NONE, NULL, &Error));
+		if (Error) {
+			printf("Error: %s\n", Error->message);
+			exit(1);
+		}
+		for (;;) {
+			gssize Read = g_input_stream_read(InputStream, Buffer, 256, NULL, &Error);
+			if (Error) {
+				printf("Error: %s\n", Error->message);
+				exit(1);
+			}
+			if (Read == 0) break;
+			gsize Written;
+			g_output_stream_write_all(OutputStream, Buffer, Read, &Written, NULL, &Error);
+			if (Error) {
+				printf("Error: %s\n", Error->message);
+				exit(1);
+			}
+		}
+		g_input_stream_close(InputStream, NULL, &Error);
+		g_output_stream_close(OutputStream, NULL, &Error);
+		File = g_file_new_build_filename(ResourcesPath, "minilang.lang", NULL);
+		InputStream = g_resource_open_stream(Resources, "/gtksourceview/minilang.lang", G_RESOURCE_LOOKUP_FLAGS_NONE, &Error);
+		if (Error) {
+			printf("Error: %s\n", Error->message);
+			exit(1);
+		}
+		OutputStream = G_OUTPUT_STREAM(g_file_create(File, G_FILE_CREATE_NONE, NULL, &Error));
+		if (Error) {
+			printf("Error: %s\n", Error->message);
+			exit(1);
+		}
+		for (;;) {
+			gssize Read = g_input_stream_read(InputStream, Buffer, 256, NULL, &Error);
+			if (Error) {
+				printf("Error: %s\n", Error->message);
+				exit(1);
+			}
+			if (Read <= 0) break;
+			gsize Written;
+			g_output_stream_write_all(OutputStream, Buffer, Read, &Written, NULL, &Error);
+			if (Error) {
+				printf("Error: %s\n", Error->message);
+				exit(1);
+			}
+		}
+		g_input_stream_close(InputStream, NULL, &Error);
+		g_output_stream_close(OutputStream, NULL, &Error);
+	}
+	return ResourcesPath;
+}
+
 console_t *console_new(ml_getter_t GlobalGet, void *Globals) {
 	StringMethod = ml_method("string");
-	GError *Error = 0;
-	char *TempDir = g_dir_make_tmp("data-viewer-XXXXXX", &Error);
-	if (Error) {
-		printf("Error: %s\n", Error->message);
-		exit(1);
-	}
-	GResource *Resources = resources_get_resource();
-	char Buffer[256];
-	GFile *File = g_file_new_build_filename(TempDir, "wrapl.xml", NULL);
-	GInputStream *InputStream = g_resource_open_stream(Resources, "/gtksourceview/base16-google.light-2.xml", G_RESOURCE_LOOKUP_FLAGS_NONE, &Error);
-	if (Error) {
-		printf("Error: %s\n", Error->message);
-		exit(1);
-	}
-	GOutputStream *OutputStream = G_OUTPUT_STREAM(g_file_create(File, G_FILE_CREATE_NONE, NULL, &Error));
-	if (Error) {
-		printf("Error: %s\n", Error->message);
-		exit(1);
-	}
-	for (;;) {
-		gssize Read = g_input_stream_read(InputStream, Buffer, 256, NULL, &Error);
-		if (Error) {
-			printf("Error: %s\n", Error->message);
-			exit(1);
-		}
-		if (Read == 0) break;
-		gsize Written;
-		g_output_stream_write_all(OutputStream, Buffer, Read, &Written, NULL, &Error);
-		if (Error) {
-			printf("Error: %s\n", Error->message);
-			exit(1);
-		}
-	}
-	g_input_stream_close(InputStream, NULL, &Error);
-	g_output_stream_close(OutputStream, NULL, &Error);
-	File = g_file_new_build_filename(TempDir, "minilang.lang", NULL);
-	InputStream = g_resource_open_stream(Resources, "/gtksourceview/minilang.lang", G_RESOURCE_LOOKUP_FLAGS_NONE, &Error);
-	if (Error) {
-		printf("Error: %s\n", Error->message);
-		exit(1);
-	}
-	OutputStream = G_OUTPUT_STREAM(g_file_create(File, G_FILE_CREATE_NONE, NULL, &Error));
-	if (Error) {
-		printf("Error: %s\n", Error->message);
-		exit(1);
-	}
-	for (;;) {
-		gssize Read = g_input_stream_read(InputStream, Buffer, 256, NULL, &Error);
-		if (Error) {
-			printf("Error: %s\n", Error->message);
-			exit(1);
-		}
-		if (Read <= 0) break;
-		gsize Written;
-		g_output_stream_write_all(OutputStream, Buffer, Read, &Written, NULL, &Error);
-		if (Error) {
-			printf("Error: %s\n", Error->message);
-			exit(1);
-		}
-	}
-	g_input_stream_close(InputStream, NULL, &Error);
-	g_output_stream_close(OutputStream, NULL, &Error);
+
 	console_t *Console = new(console_t);
 	Console->ParentGetter = GlobalGet;
 	Console->ParentGlobals = Globals;
@@ -276,18 +298,20 @@ console_t *console_new(ml_getter_t GlobalGet, void *Globals) {
 	GtkWidget *Container = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
 	Console->InputView = gtk_source_view_new();
 
+	char *ResourcesPath = get_resources_path();
+	printf("Using resources at %s\n", ResourcesPath);
 	GtkSourceLanguageManager *LanguageManager = gtk_source_language_manager_get_default();
 	const gchar * const *OldPath = gtk_source_language_manager_get_search_path(LanguageManager);
 	int PathSize = 0;
 	while (OldPath[PathSize]) ++PathSize;
 	gchar **NewPath = GC_malloc((PathSize + 1) * sizeof(gchar *));
-	NewPath[0] = TempDir;
+	NewPath[0] = ResourcesPath;
 	memcpy(NewPath + 1, OldPath, PathSize * sizeof(gchar *));
 	gtk_source_language_manager_set_search_path(LanguageManager, NewPath);
 	GtkSourceLanguage *Language = gtk_source_language_manager_get_language(LanguageManager, "minilang");
 	gtk_source_buffer_set_language(GTK_SOURCE_BUFFER(gtk_text_view_get_buffer(GTK_TEXT_VIEW(Console->InputView))), Language);
 	GtkSourceStyleSchemeManager *StyleManager = gtk_source_style_scheme_manager_get_default();
-	gtk_source_style_scheme_manager_prepend_search_path(StyleManager, TempDir);
+	gtk_source_style_scheme_manager_prepend_search_path(StyleManager, ResourcesPath);
 	GtkSourceStyleScheme *StyleScheme = gtk_source_style_scheme_manager_get_scheme(StyleManager, "base16-google-light-2");
 	gtk_source_buffer_set_style_scheme(GTK_SOURCE_BUFFER(gtk_text_view_get_buffer(GTK_TEXT_VIEW(Console->InputView))), StyleScheme);
 	GtkTextTagTable *TagTable = gtk_text_buffer_get_tag_table(gtk_text_view_get_buffer(GTK_TEXT_VIEW(Console->InputView)));
