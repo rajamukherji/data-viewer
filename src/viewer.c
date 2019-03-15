@@ -138,6 +138,15 @@ struct viewer_t {
 #endif
 };
 
+#ifdef MINGW
+static char *stpcpy(char *Dest, const char *Source) {
+	while (*Source) *Dest++ = *Source++;
+	return Dest;
+}
+
+#define lstat stat
+#endif
+
 typedef struct node_foreach_t {
 	void *Data;
 	node_callback_t *Callback;
@@ -2255,6 +2264,11 @@ static ml_value_t *clipboard_fn(viewer_t *Viewer, int Count, ml_value_t **Args) 
 	gtk_clipboard_set_text(Viewer->Clipboard, Text, Length);
 	return MLNil;
 }
+
+#ifdef __MINGW32__
+#define WIFEXITED(Status) (((Status) & 0x7f) == 0)
+#define WEXITSTATUS(Status) (((Status) & 0xff00) >> 8)
+#endif
 
 static ml_value_t *execute_fn(void *Data, int Count, ml_value_t **Args) {
 	ml_value_t *AppendMethod = ml_method("append");
