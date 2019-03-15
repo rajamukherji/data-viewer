@@ -32,6 +32,15 @@ struct console_t {
 	stringmap_t Globals[1];
 };
 
+#ifdef MINGW
+static char *stpcpy(char *Dest, const char *Source) {
+	while (*Source) *Dest++ = *Source++;
+	return Dest;
+}
+
+#define lstat stat
+#endif
+
 static ml_value_t *console_global_get(console_t *Console, const char *Name) {
 return stringmap_search(Console->Globals, Name) ?: (Console->ParentGetter)(Console->ParentGlobals, Name);
 }

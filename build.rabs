@@ -4,24 +4,31 @@ PLATFORM := defined("PLATFORM") or shell("uname"):trim
 DEBUG := defined("DEBUG")
 PREFIX := file(defined("PREFIX") or "/usr/local")
 
+CC := if defined("MINGW") then "x86_64-w64-mingw32-gcc" else "gcc" end
+PKG_CONFIG := if defined("MINGW") then "x86_64-w64-mingw32-pkg-config" else "pkg-config" end
+
 INSTALL := meta("install")
 
 pkgconfig := fun(Args) do
-	expr('pkg-config {Args}') => fun() shell("pkg-config", Args):trim
+	expr('pkg-config {Args}') => fun() shell(PKG_CONFIG, Args):trim
 end
 
 CFLAGS := []
 LDFLAGS := []
 PREBUILDS := []
 
+if defined("MINGW") then
+	CFLAGS := old + ["-DMINGW"]
+end
+
 c_compile := fun(Object) do
 	var Source := Object % "c"
-	execute('gcc -c {CFLAGS} -o{Object} {Source}')
+	execute(CC, '-c {CFLAGS} -o{Object} {Source}')
 end
 
 c_includes := fun(Target) do
 	var Files := []
-	var Lines := shell('gcc -c {CFLAGS} -M -MG {Target:source}')
+	var Lines := shell(CC, '-c {CFLAGS} -M -MG {Target:source}')
 	var Files := Lines:trim:replace(r"\\\n ", "") / r"[^\\]( +)"
 	Files:pop
 	for File in Files do
@@ -35,6 +42,9 @@ SourceTypes := {
 }
 
 c_program := fun(Executable, Objects, Libraries) do
+	if defined("MINGW") then
+		Executable := old % "exe"
+	end
 	Objects := Objects or []
 	Libraries := Libraries or []
 	var Sources := []
@@ -50,7 +60,7 @@ c_program := fun(Executable, Objects, Libraries) do
 		end
 	end
 	Executable[Objects, Libraries] => fun(Executable) do
-		execute('gcc', '-o', Executable, Objects, Libraries, LDFLAGS)
+		execute(CC, '-o', Executable, Objects, Libraries, LDFLAGS)
 		DEBUG or execute('strip', Executable)
 	end
 	DEFAULT[Executable]
