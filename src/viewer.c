@@ -8,6 +8,7 @@
 #include "libcsv/csv.h"
 #include <gc/gc.h>
 #include <minilang.h>
+#include <ml_macros.h>
 #include <ml_file.h>
 #include "console.h"
 #include <stringmap.h>
@@ -44,10 +45,12 @@ typedef struct {
 } range_t;
 
 static ml_type_t *NodeT;
+static ml_type_t *FieldT;
 
 struct node_t {
 	const ml_type_t *Type;
 	node_t *Children[2];
+	node_t *Next;
 	viewer_t *Viewer;
 	const char *FileName;
 	GdkPixbuf *Pixbuf;
@@ -66,6 +69,7 @@ struct node_t {
 };
 
 struct field_t {
+	const ml_type_t *Type;
 	const char *Name;
 	GHashTable *EnumHash;
 	GtkListStore *EnumStore;
@@ -103,13 +107,14 @@ struct viewer_t {
 	GtkListStore *FieldsStore;
 	GtkListStore *OperatorsStore;
 	GtkClipboard *Clipboard;
-	node_t *Nodes, *Root;
+	node_t *Nodes, *Root, *Selected;
 	node_t **Sorted, **SortBuffer;
 	node_t **SortedX, **SortedY;
 	cairo_t *Cairo;
 	node_t **LoadCache;
 	node_t *ActiveNode;
 	ml_value_t *ActivationFn;
+	ml_value_t *HotkeyFns[10];
 	const char *ActivationCode;
 	console_t *Console;
 	stringmap_t Globals[1];
@@ -786,6 +791,7 @@ static void viewer_open_file(viewer_t *Viewer, const char *CsvFileName, const ch
 	field_t **Fields = Viewer->Fields = (field_t **)GC_malloc(NumFields * sizeof(field_t *));
 	for (int I = 0; I < NumFields; ++I) {
 		field_t *Field = Fields[I] = (field_t *)GC_malloc(sizeof(field_t) + NumNodes * sizeof(double));
+		Field->Type = FieldT;
 		Field->EnumHash = 0;
 		Field->Range.Min = INFINITY;
 		Field->Range.Max = -INFINITY;
@@ -917,6 +923,8 @@ static void draw_node_file_opened(GObject *Source, GAsyncResult *Result, node_t 
 }
 
 static int draw_node_image(viewer_t *Viewer, node_t *Node) {
+	Node->Next = Viewer->Selected;
+	Viewer->Selected = Node;
 	++Viewer->NumVisible;
 	if (Viewer->NumVisible <= MAX_VISIBLE_IMAGES) {
 		Node->LoadGeneration = Viewer->LoadGeneration;
@@ -951,6 +959,8 @@ static int draw_node_image(viewer_t *Viewer, node_t *Node) {
 }
 
 static int draw_node_value(viewer_t *Viewer, node_t *Node) {
+	Node->Next = Viewer->Selected;
+	Viewer->Selected = Node;
 	++Viewer->NumVisible;
 	field_t **Fields = Viewer->Fields;
 	int NumFields = Viewer->NumFields;
@@ -1009,6 +1019,7 @@ static void update_preview(viewer_t *Viewer) {
 	double Y1 = Viewer->Min.Y + (Viewer->Pointer.Y - BOX_SIZE / 2) / Viewer->Scale.Y;
 	double X2 = Viewer->Min.X + (Viewer->Pointer.X + BOX_SIZE / 2) / Viewer->Scale.X;
 	double Y2 = Viewer->Min.Y + (Viewer->Pointer.Y + BOX_SIZE / 2) / Viewer->Scale.Y;
+	Viewer->Selected = 0;
 	if (Viewer->ImagesStore) {
 		++Viewer->LoadGeneration;
 		gtk_list_store_clear(Viewer->ImagesStore);
@@ -1459,8 +1470,13 @@ static gboolean button_press_viewer(GtkWidget *Widget, GdkEventButton *Event, vi
 	if (Event->button == 1) {
 		Viewer->Pointer.X = Event->x;
 		Viewer->Pointer.Y = Event->y;
-		update_preview(Viewer);
-		Viewer->ShowBox = 0;
+		if (Event->state & GDK_CONTROL_MASK) {
+			edit_node_values(Viewer);
+			redraw_viewer_background(Viewer);
+		} else {
+			update_preview(Viewer);
+			Viewer->ShowBox = 0;
+		}
 		gtk_widget_queue_draw(Widget);
 	} else if (Event->button == 2) {
 		Viewer->Pointer.X = Event->x;
@@ -1519,16 +1535,26 @@ static void images_selected_foreach(GtkIconView *ImagesView, GtkTreePath *Path, 
 
 static gboolean key_press_viewer(GtkWidget *Widget, GdkEventKey *Event, viewer_t *Viewer) {
 	printf("key_press_viewer()\n");
+	if (!(Event->state & GDK_CONTROL_MASK)) return FALSE;
 	switch (Event->keyval) {
 	case GDK_KEY_s: {
-		if (Event->state & GDK_CONTROL_MASK) {
 #ifdef USE_GL
 #else
-			cairo_surface_write_to_png(Viewer->CachedBackground, "screenshot.png");
+		cairo_surface_write_to_png(Viewer->CachedBackground, "screenshot.png");
 #endif
-			return TRUE;
+		return TRUE;
+	}
+	case GDK_KEY_0: case GDK_KEY_1: case GDK_KEY_2: case GDK_KEY_3:
+	case GDK_KEY_4: case GDK_KEY_5: case GDK_KEY_6: case GDK_KEY_7:
+	case GDK_KEY_8: case GDK_KEY_9: {
+		ml_value_t *HotkeyFn = Viewer->HotkeyFns[Event->keyval - GDK_KEY_0];
+		for (node_t *Node = Viewer->Selected; Node; Node = Node->Next) {
+			ml_inline(HotkeyFn, 1, Node);
 		}
-		break;
+		++Viewer->FilterGeneration;
+		set_viewer_colour_index(Viewer, Viewer->CIndex);
+		viewer_filter_nodes(Viewer);
+		return TRUE;
 	}
 	}
 	return FALSE;
@@ -1635,6 +1661,7 @@ static void add_field_callback(const char *Name, viewer_t *Viewer, void *Data) {
 	int NumFields = Viewer->NumFields + 1;
 	field_t **Fields = (field_t **)GC_malloc(NumFields * sizeof(field_t *));
 	field_t *Field = (field_t *)GC_malloc(sizeof(field_t) + Viewer->NumNodes * sizeof(double));
+	Field->Type = FieldT;
 	Field->EnumStore = gtk_list_store_new(2, G_TYPE_STRING, G_TYPE_DOUBLE);
 	Field->EnumNames = (const char **)GC_malloc(sizeof(const char *));
 	Field->EnumValues = (int *)GC_malloc_atomic(sizeof(int));
@@ -2169,23 +2196,85 @@ static ml_value_t *viewer_global_get(viewer_t *Viewer, const char *Name) {
 	return stringmap_search(Viewer->Globals, Name) ?: MLNil;
 }
 
+typedef struct node_ref_t {
+	const ml_type_t *Type;
+	field_t *Field;
+	node_t *Node;
+} node_ref_t;
+
+static ml_value_t *node_ref_deref(node_ref_t *Ref) {
+	field_t *Field = Ref->Field;
+	double Value = Field->Values[Ref->Node - Ref->Node->Viewer->Nodes];
+	if (Field->EnumNames) {
+		if (Value) {
+			return ml_string(Field->EnumNames[(int)Value], -1);
+		} else {
+			return MLNil;
+		}
+	} else {
+		return ml_real(Value);
+	}
+}
+
+static ml_value_t *node_ref_assign(node_ref_t *Ref, ml_value_t *Value) {
+	field_t *Field = Ref->Field;
+	if (Field->EnumHash) {
+		int Index;
+		if (Value->Type == MLIntegerT) {
+			Index = ml_integer_value(Value);
+			if (Index < 0 || Index >= Field->EnumSize) return ml_error("RangeError", "enum index out of range");
+		} else if (Value->Type == MLRealT) {
+			Index = ml_real_value(Value);
+			if (Index < 0 || Index >= Field->EnumSize) return ml_error("RangeError", "enum index out of range");
+		} else if (Value->Type == MLStringT) {
+			gpointer *Ref2 = g_hash_table_lookup(Field->EnumHash, ml_string_value(Value));
+			if (Ref2) {
+				Index = *(double *)Ref2;
+			} else {
+				return ml_error("RangeError", "enum name not found");
+			}
+		} else {
+			return ml_error("TypeError", "invalid value for assignment");
+		}
+		Field->Values[Ref->Node - Ref->Node->Viewer->Nodes] = Index;
+	} else {
+		double Value2;
+		if (Value->Type == MLIntegerT) {
+			Value2 = ml_integer_value(Value);
+		} else if (Value->Type == MLRealT) {
+			Value2 = ml_real_value(Value);
+		} else {
+			return ml_error("TypeError", "invalid value for assignment");
+		}
+		Field->Values[Ref->Node - Ref->Node->Viewer->Nodes] = Value2;
+		if (Value2 < Field->Range.Min) Field->Range.Min = Value2;
+		if (Value2 > Field->Range.Max) Field->Range.Max = Value2;
+	}
+	return Value;
+}
+
+static ml_type_t NodeRefT[1] = {{
+	MLAnyT, "node-ref",
+	ml_default_hash,
+	ml_default_call,
+	(void *)node_ref_deref,
+	(void *)node_ref_assign,
+	ml_default_iterate,
+	ml_default_next,
+	ml_default_key
+}};
+
 static ml_value_t *node_field_fn(void *Data, int Count, ml_value_t **Args) {
 	node_t *Node = (node_t *)Args[0];
 	const char *Name = ml_string_value(Args[1]);
 	viewer_t *Viewer = Node->Viewer;
 	field_t *Field = stringmap_search(Viewer->FieldsByName, Name);
 	if (!Field) return ml_error("FieldError", "no such field %s", Name);
-	int Index = Node - Viewer->Nodes;
-	if (Field->EnumNames) {
-		int Value = Field->Values[Index];
-		if (Value) {
-			return ml_string(Field->EnumNames[Value], -1);
-		} else {
-			return MLNil;
-		}
-	} else {
-		return ml_real(Field->Values[Index]);
-	}
+	node_ref_t *Ref = new(node_ref_t);
+	Ref->Type = NodeRefT;
+	Ref->Node = Node;
+	Ref->Field = Field;
+	return (ml_value_t *)Ref;
 }
 
 static ml_value_t *node_image_fn(void *Data, int Count, ml_value_t **Args) {
@@ -2249,6 +2338,69 @@ static ml_type_t NodesT[1] = {{
 	ml_default_next,
 	ml_default_key
 }};
+
+typedef struct fields_t {
+	const ml_type_t *Type;
+	viewer_t *Viewer;
+} fields_t;
+
+static ml_value_t *fields_get_by_name(void *Data, int Count, ml_value_t **Args) {
+	viewer_t *Viewer = ((fields_t *)Args[0])->Viewer;
+	const char *Name = ml_string_value(Args[1]);
+	return (ml_value_t *)stringmap_search(Viewer->FieldsByName, Name) ?: MLNil;
+}
+
+static ml_type_t FieldsT[1] = {{
+	MLAnyT, "fields",
+	ml_default_hash,
+	ml_default_call,
+	ml_default_deref,
+	ml_default_assign,
+	ml_default_iterate,
+	ml_default_next,
+	ml_default_key
+}};
+
+static ml_value_t *field_name_fn(void *Data, int Count, ml_value_t **Args) {
+	field_t *Field = (field_t *)Args[0];
+	return ml_string(Field->Name, -1);
+}
+
+static ml_value_t *field_enum_value_fn(void *Data, int Count, ml_value_t **Args) {
+	field_t *Field = (field_t *)Args[0];
+	if (!Field->EnumHash) return ml_error("TypeError", "field is not an enum");
+	const char *Name = ml_string_value(Args[1]);
+	gpointer *Ref = g_hash_table_lookup(Field->EnumHash, Name);
+	if (Ref) {
+		return ml_real(*(double *)Ref);
+	} else {
+		return ml_error("RangeError", "enum name not found");
+	}
+}
+
+static ml_value_t *field_enum_name_fn(void *Data, int Count, ml_value_t **Args) {
+	field_t *Field = (field_t *)Args[0];
+	if (!Field->EnumHash) return ml_error("TypeError", "field is not an enumeration");
+	int Value = ml_integer_value(Args[1]);
+	if (Value < 0 || Value >= Field->EnumSize) return ml_error("RangeError", "enum value out of range");
+	return ml_string(Field->EnumNames[Value], -1);
+}
+
+static ml_value_t *field_enum_size_fn(void *Data, int Count, ml_value_t **Args) {
+	field_t *Field = (field_t *)Args[0];
+	if (!Field->EnumHash) return ml_error("TypeError", "field is not an enumeration");
+	return ml_integer(Field->EnumSize);
+}
+
+static ml_value_t *field_range_min_fn(void *Data, int Count, ml_value_t **Args) {
+	field_t *Field = (field_t *)Args[0];
+	return ml_real(Field->Range.Min);
+}
+
+static ml_value_t *field_range_max_fn(void *Data, int Count, ml_value_t **Args) {
+	field_t *Field = (field_t *)Args[0];
+	return ml_real(Field->Range.Max);
+}
 
 static ml_value_t *clipboard_fn(viewer_t *Viewer, int Count, ml_value_t **Args) {
 	ml_value_t *AppendMethod = ml_method("append");
@@ -2325,9 +2477,20 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 	Viewer->FieldsStore = gtk_list_store_new(3, G_TYPE_STRING, G_TYPE_INT, G_TYPE_BOOLEAN);
 	Viewer->Console = console_new((ml_getter_t)viewer_global_get, Viewer);
 	Viewer->ActivationFn = ml_function(Viewer->Console, (void *)console_print);
+	for (int I = 0; I < 10; ++I) Viewer->HotkeyFns[I] = Viewer->ActivationFn;
 	Viewer->PreviewWidget = 0;
 
 	stringmap_insert(Viewer->Globals, "activate", ml_reference(&Viewer->ActivationFn));
+	stringmap_insert(Viewer->Globals, "hotkey0", ml_reference(&Viewer->HotkeyFns[0]));
+	stringmap_insert(Viewer->Globals, "hotkey1", ml_reference(&Viewer->HotkeyFns[1]));
+	stringmap_insert(Viewer->Globals, "hotkey2", ml_reference(&Viewer->HotkeyFns[2]));
+	stringmap_insert(Viewer->Globals, "hotkey3", ml_reference(&Viewer->HotkeyFns[3]));
+	stringmap_insert(Viewer->Globals, "hotkey4", ml_reference(&Viewer->HotkeyFns[4]));
+	stringmap_insert(Viewer->Globals, "hotkey5", ml_reference(&Viewer->HotkeyFns[5]));
+	stringmap_insert(Viewer->Globals, "hotkey6", ml_reference(&Viewer->HotkeyFns[6]));
+	stringmap_insert(Viewer->Globals, "hotkey7", ml_reference(&Viewer->HotkeyFns[7]));
+	stringmap_insert(Viewer->Globals, "hotkey8", ml_reference(&Viewer->HotkeyFns[8]));
+	stringmap_insert(Viewer->Globals, "hotkey9", ml_reference(&Viewer->HotkeyFns[9]));
 	stringmap_insert(Viewer->Globals, "print", ml_function(Viewer->Console, (void *)console_print));
 	stringmap_insert(Viewer->Globals, "clipboard", ml_function(Viewer, (void *)clipboard_fn));
 	stringmap_insert(Viewer->Globals, "execute", ml_function(Viewer, (void *)execute_fn));
@@ -2414,6 +2577,11 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 	NodesIter->NumNodes = Viewer->NumNodes;
 	stringmap_insert(Viewer->Globals, "Nodes", (ml_value_t *)NodesIter);
 
+	fields_t *Fields = new(fields_t);
+	Fields->Type = FieldsT;
+	Fields->Viewer = Viewer;
+	stringmap_insert(Viewer->Globals, "Fields", (ml_value_t *)Fields);
+
 	gtk_window_resize(GTK_WINDOW(Viewer->MainWindow), 640, 480);
 	gtk_paned_set_position(GTK_PANED(Viewer->MainVPaned), 320);
 	gtk_widget_show_all(Viewer->MainWindow);
@@ -2429,10 +2597,18 @@ int main(int Argc, char *Argv[]) {
 	gtk_init(&Argc, &Argv);
 	ml_init();
 	ml_file_init();
-	NodeT = ml_class(MLAnyT, "node");
+	NodeT = ml_type(MLAnyT, "node");
 	ml_method_by_name("[]", 0, node_field_fn, NodeT, MLStringT, NULL);
 	ml_method_by_name("image", 0, node_image_fn, NodeT, NULL);
 	ml_method_by_name("string", 0, node_image_fn, NodeT, NULL);
+	FieldT = ml_type(MLAnyT, "field");
+	ml_method_by_name("string", 0, field_name_fn, FieldT, NULL);
+	ml_method_by_name("[]", 0, field_enum_value_fn, FieldT, MLStringT, NULL);
+	ml_method_by_name("[]", 0, field_enum_name_fn, FieldT, MLIntegerT, NULL);
+	ml_method_by_name("size", 0, field_enum_size_fn, FieldT, NULL);
+	ml_method_by_name("min", 0, field_range_min_fn, FieldT, NULL);
+	ml_method_by_name("max", 0, field_range_max_fn, FieldT, NULL);
+	ml_method_by_name("[]", 0, fields_get_by_name, FieldsT, MLStringT, NULL);
 	viewer_t *Viewer = create_viewer(Argc, Argv);
 	gtk_main();
 	return 0;

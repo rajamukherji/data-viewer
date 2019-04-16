@@ -8,6 +8,7 @@
 #include "libcsv/csv.h"
 #include <gc/gc.h>
 #include <minilang.h>
+#include <ml_macros.h>
 #include <stringmap.h>
 #include <ml_compiler.h>
 #include <whereami.h>
@@ -30,6 +31,7 @@ struct console_t {
 	char *History[MAX_HISTORY];
 	int HistoryIndex, HistoryEnd;
 	stringmap_t Globals[1];
+	mlc_error_t Error[1];
 };
 
 #ifdef MINGW
@@ -108,16 +110,16 @@ static void console_submit(GtkWidget *Button, console_t *Console) {
 	gtk_text_buffer_set_text(InputBuffer, "", 0);
 
 	mlc_scanner_t *Scanner = Console->Scanner;
-	mlc_function_t Function[1] = {{(void *)console_global_get, Console, NULL,}};
+	mlc_function_t Function[1] = {{Console->Error, (void *)console_global_get, Console, NULL,}};
 	SHA256_CTX HashContext[1];
 	sha256_init(HashContext);
-	if (setjmp(Scanner->OnError)) {
+	if (setjmp(Console->Error->Handler)) {
 		char *Buffer;
-		int Length = asprintf(&Buffer, "Error: %s\n", ml_error_message(Scanner->Error));
+		int Length = asprintf(&Buffer, "Error: %s\n", ml_error_message(Console->Error->Message));
 		gtk_text_buffer_insert(LogBuffer, End, Buffer, Length);
 		const char *Source;
 		int Line;
-		for (int I = 0; ml_error_trace(Scanner->Error, I, &Source, &Line); ++I) printf("\t%s:%d\n", Source, Line);
+		for (int I = 0; ml_error_trace(Console->Error->Message, I, &Source, &Line); ++I) printf("\t%s:%d\n", Source, Line);
 		Scanner->Token = MLT_NONE;
 		Scanner->Next = "";
 	} else {
@@ -303,7 +305,7 @@ console_t *console_new(ml_getter_t GlobalGet, void *Globals) {
 	Console->Input = 0;
 	Console->HistoryIndex = 0;
 	Console->HistoryEnd = 0;
-	Console->Scanner = ml_scanner("Console", Console, (void *)console_read);
+	Console->Scanner = ml_scanner("Console", Console, (void *)console_read, Console->Error);
 	GtkWidget *Container = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
 	Console->InputView = gtk_source_view_new();
 
