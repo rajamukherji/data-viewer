@@ -67,7 +67,6 @@ c_program := fun(Executable, Objects, Libraries) do
 end
 
 install := fun(Source, Target, Mode) do
-	print(Source, " -> ", Target, "\n")
 	Target[Source] => fun(Target) do
 		Target:dir:mkdir
 		Source:copy(Target)
