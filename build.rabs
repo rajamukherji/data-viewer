@@ -78,7 +78,7 @@ end
 BIN_DIR := file("bin"):mkdir
 SHARE_DIR := file("share"):mkdir
 
-for var File in file("share/data-viewer"):ls do
+for File in file("share/data-viewer"):ls do
 	install(File, PREFIX/'share/data-viewer/{File:basename}')
 end
 

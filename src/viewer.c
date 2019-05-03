@@ -2260,6 +2260,7 @@ static ml_type_t NodeRefT[1] = {{
 	(void *)node_ref_deref,
 	(void *)node_ref_assign,
 	ml_default_iterate,
+	ml_default_current,
 	ml_default_next,
 	ml_default_key
 }};
@@ -2288,7 +2289,7 @@ typedef struct nodes_iter_t {
 	int NumNodes;
 } nodes_iter_t;
 
-static ml_value_t *nodes_iter_deref(ml_value_t *Ref) {
+static ml_value_t *nodes_iter_current(ml_value_t *Ref) {
 	nodes_iter_t *Iter = (nodes_iter_t *)Ref;
 	return (ml_value_t *)Iter->Nodes;
 }
@@ -2308,9 +2309,10 @@ static ml_type_t NodesIterT[1] = {{
 	MLAnyT, "nodes-iter",
 	ml_default_hash,
 	ml_default_call,
-	nodes_iter_deref,
+	ml_default_deref,
 	ml_default_assign,
 	ml_default_iterate,
+	nodes_iter_current,
 	nodes_iter_next,
 	ml_default_key
 }};
@@ -2335,6 +2337,7 @@ static ml_type_t NodesT[1] = {{
 	ml_default_deref,
 	ml_default_assign,
 	nodes_iterate,
+	ml_default_current,
 	ml_default_next,
 	ml_default_key
 }};
@@ -2357,6 +2360,7 @@ static ml_type_t FieldsT[1] = {{
 	ml_default_deref,
 	ml_default_assign,
 	ml_default_iterate,
+	ml_default_current,
 	ml_default_next,
 	ml_default_key
 }};
