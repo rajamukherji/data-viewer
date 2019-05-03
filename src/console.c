@@ -110,9 +110,6 @@ static void console_submit(GtkWidget *Button, console_t *Console) {
 	gtk_text_buffer_set_text(InputBuffer, "", 0);
 
 	mlc_scanner_t *Scanner = Console->Scanner;
-	mlc_function_t Function[1] = {{Console->Error, (void *)console_global_get, Console, NULL,}};
-	SHA256_CTX HashContext[1];
-	sha256_init(HashContext);
 	if (setjmp(Console->Error->Handler)) {
 		char *Buffer;
 		int Length = asprintf(&Buffer, "Error: %s\n", ml_error_message(Console->Error->Message));
@@ -120,21 +117,14 @@ static void console_submit(GtkWidget *Button, console_t *Console) {
 		const char *Source;
 		int Line;
 		for (int I = 0; ml_error_trace(Console->Error->Message, I, &Source, &Line); ++I) printf("\t%s:%d\n", Source, Line);
-		Scanner->Token = MLT_NONE;
-		Scanner->Next = "";
+		ml_scanner_reset(Scanner);
 	} else {
 		for (;;) {
-			Function->Top = Function->Size = 0;
 			mlc_expr_t *Expr = ml_accept_command(Scanner, Console->Globals);
 			if (Expr == (mlc_expr_t *)-1) break;
-			mlc_compiled_t Compiled = ml_compile(Function, Expr, HashContext);
-			mlc_connect(Compiled.Exits, NULL);
-			ml_closure_t *Closure = new(ml_closure_t);
-			ml_closure_info_t *Info = Closure->Info = new(ml_closure_info_t);
-			Closure->Type = MLClosureT;
-			Info->Entry = Compiled.Start;
-			Info->FrameSize = Function->Size;
-			ml_value_t *Result = ml_closure_call((ml_value_t *)Closure, 0, NULL);
+			ml_value_t *Closure = ml_compile(Expr, (void *)console_global_get, Console, Console->Error);
+			ml_value_t *Result = ml_call(Closure, 0, NULL);
+			Result = Result->Type->deref(Result);
 			console_log(Console, Result);
 		}
 		gtk_text_view_scroll_mark_onscreen(GTK_TEXT_VIEW(Console->LogView), Console->EndMark);
