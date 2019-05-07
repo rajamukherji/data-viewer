@@ -16,10 +16,30 @@ file("libcsv.o") => fun(Object) do
 	execute(CC, '-c {CFLAGS} -o{Object} -I{Source:dir} {Source}')
 end
 
+GC_VERSION := old or "8.0.4"
+GC := meta("gc"):scan("install") => fun() do
+	var Config := {
+		"--enable-munmap" is 4,
+		"--enable-large-config",
+		"--enable-shared" is :true,
+		"--with-libatomic-ops=none",
+		"--enable-parallel-mark",
+		"--disable-gcj-support",
+		"--enable-redirect-malloc",
+		'--prefix={BUILDDIR}'
+	}
+	file("gc"):rmdir:mkdir:chdir
+	execute('wget -nv https://github.com/ivmai/bdwgc/releases/download/v{GC_VERSION}/gc-{GC_VERSION}.tar.gz -O- | tar xzP --strip-components=1')
+	execute("./configure", Config)
+	execute("make")
+	execute("make install")
+	ret [PATH/"lib/libgc.a", PATH/"lib/libcord.a"]
+end
+
 file("minilang"):mkdir
 file("whereami/src"):mkdir
-CFLAGS := old + ['-D_GNU_SOURCE', '-I{file("minilang/minilang.h"):dirname}', '-I{file("whereami/src/whereami.h"):dirname}']
-LDFLAGS := old + ["-lgc"]
+CFLAGS := old + ['-D_GNU_SOURCE', "-Iinclude", '-I{file("minilang/minilang.h"):dirname}', '-I{file("whereami/src/whereami.h"):dirname}']
+LDFLAGS := old + ["-lgc", "-ldl"]
 
 file("resources.c")[file("resources.xml")] => fun(Target) do
 	execute("glib-compile-resources", '--sourcedir={file("build.rabs"):dir(:true)}', file("resources.xml"), "--generate-source", '--target={Target}')
