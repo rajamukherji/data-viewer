@@ -10,6 +10,7 @@
 #include <minilang.h>
 #include <ml_macros.h>
 #include <ml_file.h>
+#include <ml_object.h>
 #include "console.h"
 #include <stringmap.h>
 
@@ -2252,6 +2253,7 @@ static ml_value_t *node_ref_assign(node_ref_t *Ref, ml_value_t *Value) {
 }
 
 static ml_type_t NodeRefT[1] = {{
+	MLTypeT,
 	MLAnyT, "node-ref",
 	ml_default_hash,
 	ml_default_call,
@@ -2304,6 +2306,7 @@ static ml_value_t *nodes_iter_next(ml_value_t *Ref) {
 }
 
 static ml_type_t NodesIterT[1] = {{
+	MLTypeT,
 	MLAnyT, "nodes-iter",
 	ml_default_hash,
 	ml_default_call,
@@ -2329,6 +2332,7 @@ static ml_value_t *nodes_iterate(ml_value_t *Value) {
 }
 
 static ml_type_t NodesT[1] = {{
+	MLTypeT,
 	MLAnyT, "nodes",
 	ml_default_hash,
 	ml_default_call,
@@ -2352,6 +2356,7 @@ static ml_value_t *fields_get_by_name(void *Data, int Count, ml_value_t **Args) 
 }
 
 static ml_type_t FieldsT[1] = {{
+	MLTypeT,
 	MLAnyT, "fields",
 	ml_default_hash,
 	ml_default_call,
@@ -2482,6 +2487,7 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 	for (int I = 0; I < 10; ++I) Viewer->HotkeyFns[I] = Viewer->ActivationFn;
 	Viewer->PreviewWidget = 0;
 
+	ml_object_init(Viewer->Globals);
 	stringmap_insert(Viewer->Globals, "activate", ml_reference(&Viewer->ActivationFn));
 	stringmap_insert(Viewer->Globals, "hotkey0", ml_reference(&Viewer->HotkeyFns[0]));
 	stringmap_insert(Viewer->Globals, "hotkey1", ml_reference(&Viewer->HotkeyFns[1]));
