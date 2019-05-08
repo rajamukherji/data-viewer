@@ -10,6 +10,7 @@
 #include <minilang.h>
 #include <ml_macros.h>
 #include <ml_file.h>
+#include <ml_object.h>
 #include "console.h"
 #include <stringmap.h>
 
@@ -71,7 +72,7 @@ struct node_t {
 struct field_t {
 	const ml_type_t *Type;
 	const char *Name;
-	GHashTable *EnumHash;
+	stringmap_t *EnumMap;
 	GtkListStore *EnumStore;
 	const char **EnumNames;
 	int *EnumValues;
@@ -687,18 +688,15 @@ static void load_nodes_field_callback(void *Text, size_t Size, csv_node_loader_t
 			field_t *Field = Loader->Fields[Index];
 			double Value;
 			insert:
-			if (Field->EnumHash) {
+			if (Field->EnumMap) {
 				if (Size) {
-					gpointer *Ref = g_hash_table_lookup(Field->EnumHash, Text);
+					double *Ref = stringmap_search(Field->EnumMap, Text);
 					if (Ref) {
 						Value = *(double *)Ref;
 					} else {
-						char *EnumName = GC_malloc(Size + 1);
-						memcpy(EnumName, Text, Size);
-						EnumName[Size] = 0;
-						Ref = (void *)&Field->Values[Loader->Row - 1];
-						g_hash_table_insert(Field->EnumHash, EnumName, Ref);
-						Value = g_hash_table_size(Field->EnumHash);
+						Ref = new(double);
+						stringmap_insert(Field->EnumMap, GC_strdup(Text), Ref);
+						*(double *)Ref = Value = Field->EnumMap->Size;
 					}
 				} else {
 					Value = 0.0;
@@ -713,7 +711,7 @@ static void load_nodes_field_callback(void *Text, size_t Size, csv_node_loader_t
 						exit(1);
 					}
 					Field->Range.Min = 0.0;
-					Field->EnumHash = g_hash_table_new(g_str_hash, g_str_equal);
+					Field->EnumMap = new(stringmap_t);
 					goto insert;
 				}
 			}
@@ -746,8 +744,9 @@ static void count_nodes_row_callback(int Char, csv_node_loader_t *Loader) {
 	if (Loader->Row % 10000 == 0) printf("Counted row %d\n", Loader->Row);
 }
 
-static void set_enum_name_fn(const char *Name, const double *Value, const char **Names) {
+static int set_enum_name_fn(const char *Name, const double *Value, const char **Names) {
 	Names[(int)Value[0]] = Name;
+	return 0;
 }
 
 static void viewer_open_file(viewer_t *Viewer, const char *CsvFileName, const char *ImagePrefix) {
@@ -792,7 +791,7 @@ static void viewer_open_file(viewer_t *Viewer, const char *CsvFileName, const ch
 	for (int I = 0; I < NumFields; ++I) {
 		field_t *Field = Fields[I] = (field_t *)GC_malloc(sizeof(field_t) + NumNodes * sizeof(double));
 		Field->Type = FieldT;
-		Field->EnumHash = 0;
+		Field->EnumMap = 0;
 		Field->Range.Min = INFINITY;
 		Field->Range.Max = -INFINITY;
 		Field->PreviewColumn = 0;
@@ -824,11 +823,11 @@ static void viewer_open_file(viewer_t *Viewer, const char *CsvFileName, const ch
 		field_t *Field = Fields[I];
 		gtk_list_store_insert_with_values(Viewer->FieldsStore, 0, -1, 0, Field->Name, 1, I, 2, TRUE, -1);
 		stringmap_insert(Viewer->FieldsByName, Field->Name, Field);
-		if (Field->EnumHash) {
-			int EnumSize = Field->EnumSize = g_hash_table_size(Field->EnumHash) + 1;
+		if (Field->EnumMap) {
+			int EnumSize = Field->EnumSize = Field->EnumMap->Size + 1;
 			const char **EnumNames = (const char **)GC_malloc(EnumSize * sizeof(const char *));
 			EnumNames[0] = "";
-			g_hash_table_foreach(Field->EnumHash, (void *)set_enum_name_fn, EnumNames);
+			stringmap_foreach(Field->EnumMap, EnumNames, (void *)set_enum_name_fn);
 			Field->EnumNames = EnumNames;
 			GtkListStore *EnumStore = Field->EnumStore = gtk_list_store_new(2, G_TYPE_STRING, G_TYPE_DOUBLE);
 			for (int J = 0; J < EnumSize; ++J) {
@@ -1848,7 +1847,7 @@ static void filter_enum_value_changed(GtkComboBox *Widget, filter_t *Filter) {
 }
 
 static void filter_enum_entry_changed(GtkEntry *Widget, filter_t *Filter) {
-	gpointer *Ref = g_hash_table_lookup(Filter->Field->EnumHash, gtk_entry_get_text(GTK_ENTRY(Widget)));
+	double *Ref = stringmap_search(Filter->Field->EnumMap, gtk_entry_get_text(GTK_ENTRY(Widget)));
 	if (Ref) {
 		Filter->Value = *(double *)Ref;
 		viewer_filter_nodes(Filter->Viewer);
@@ -1865,7 +1864,7 @@ static void filter_field_changed(GtkComboBox *Widget, filter_t *Filter) {
 	field_t *Field = Filter->Field = Viewer->Fields[gtk_combo_box_get_active(GTK_COMBO_BOX(Widget))];
 	if (Filter->ValueWidget) gtk_widget_destroy(Filter->ValueWidget);
 	if (Field->EnumStore) {
-		if (gtk_tree_model_iter_n_children(GTK_TREE_MODEL(Field->EnumStore), 0) < 100) {
+		if (Field->EnumSize < 100) {
 			GtkWidget *ValueComboBox = Filter->ValueWidget = gtk_combo_box_new_with_model(GTK_TREE_MODEL(Field->EnumStore));
 			GtkCellRenderer *FieldRenderer = gtk_cell_renderer_text_new();
 			gtk_cell_layout_pack_end(GTK_CELL_LAYOUT(ValueComboBox), FieldRenderer, TRUE);
@@ -2218,7 +2217,7 @@ static ml_value_t *node_ref_deref(node_ref_t *Ref) {
 
 static ml_value_t *node_ref_assign(node_ref_t *Ref, ml_value_t *Value) {
 	field_t *Field = Ref->Field;
-	if (Field->EnumHash) {
+	if (Field->EnumMap) {
 		int Index;
 		if (Value->Type == MLIntegerT) {
 			Index = ml_integer_value(Value);
@@ -2227,7 +2226,7 @@ static ml_value_t *node_ref_assign(node_ref_t *Ref, ml_value_t *Value) {
 			Index = ml_real_value(Value);
 			if (Index < 0 || Index >= Field->EnumSize) return ml_error("RangeError", "enum index out of range");
 		} else if (Value->Type == MLStringT) {
-			gpointer *Ref2 = g_hash_table_lookup(Field->EnumHash, ml_string_value(Value));
+			double *Ref2 = stringmap_search(Field->EnumMap, ml_string_value(Value));
 			if (Ref2) {
 				Index = *(double *)Ref2;
 			} else {
@@ -2254,6 +2253,7 @@ static ml_value_t *node_ref_assign(node_ref_t *Ref, ml_value_t *Value) {
 }
 
 static ml_type_t NodeRefT[1] = {{
+	MLTypeT,
 	MLAnyT, "node-ref",
 	ml_default_hash,
 	ml_default_call,
@@ -2306,6 +2306,7 @@ static ml_value_t *nodes_iter_next(ml_value_t *Ref) {
 }
 
 static ml_type_t NodesIterT[1] = {{
+	MLTypeT,
 	MLAnyT, "nodes-iter",
 	ml_default_hash,
 	ml_default_call,
@@ -2331,6 +2332,7 @@ static ml_value_t *nodes_iterate(ml_value_t *Value) {
 }
 
 static ml_type_t NodesT[1] = {{
+	MLTypeT,
 	MLAnyT, "nodes",
 	ml_default_hash,
 	ml_default_call,
@@ -2354,6 +2356,7 @@ static ml_value_t *fields_get_by_name(void *Data, int Count, ml_value_t **Args) 
 }
 
 static ml_type_t FieldsT[1] = {{
+	MLTypeT,
 	MLAnyT, "fields",
 	ml_default_hash,
 	ml_default_call,
@@ -2372,11 +2375,11 @@ static ml_value_t *field_name_fn(void *Data, int Count, ml_value_t **Args) {
 
 static ml_value_t *field_enum_value_fn(void *Data, int Count, ml_value_t **Args) {
 	field_t *Field = (field_t *)Args[0];
-	if (!Field->EnumHash) return ml_error("TypeError", "field is not an enum");
+	if (!Field->EnumMap) return ml_error("TypeError", "field is not an enum");
 	const char *Name = ml_string_value(Args[1]);
-	gpointer *Ref = g_hash_table_lookup(Field->EnumHash, Name);
+	double *Ref = stringmap_search(Field->EnumMap, Name);
 	if (Ref) {
-		return ml_real(*(double *)Ref);
+		return ml_real(*Ref);
 	} else {
 		return ml_error("RangeError", "enum name not found");
 	}
@@ -2384,7 +2387,7 @@ static ml_value_t *field_enum_value_fn(void *Data, int Count, ml_value_t **Args)
 
 static ml_value_t *field_enum_name_fn(void *Data, int Count, ml_value_t **Args) {
 	field_t *Field = (field_t *)Args[0];
-	if (!Field->EnumHash) return ml_error("TypeError", "field is not an enumeration");
+	if (!Field->EnumMap) return ml_error("TypeError", "field is not an enumeration");
 	int Value = ml_integer_value(Args[1]);
 	if (Value < 0 || Value >= Field->EnumSize) return ml_error("RangeError", "enum value out of range");
 	return ml_string(Field->EnumNames[Value], -1);
@@ -2392,7 +2395,7 @@ static ml_value_t *field_enum_name_fn(void *Data, int Count, ml_value_t **Args) 
 
 static ml_value_t *field_enum_size_fn(void *Data, int Count, ml_value_t **Args) {
 	field_t *Field = (field_t *)Args[0];
-	if (!Field->EnumHash) return ml_error("TypeError", "field is not an enumeration");
+	if (!Field->EnumMap) return ml_error("TypeError", "field is not an enumeration");
 	return ml_integer(Field->EnumSize);
 }
 
@@ -2484,6 +2487,7 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 	for (int I = 0; I < 10; ++I) Viewer->HotkeyFns[I] = Viewer->ActivationFn;
 	Viewer->PreviewWidget = 0;
 
+	ml_object_init(Viewer->Globals);
 	stringmap_insert(Viewer->Globals, "activate", ml_reference(&Viewer->ActivationFn));
 	stringmap_insert(Viewer->Globals, "hotkey0", ml_reference(&Viewer->HotkeyFns[0]));
 	stringmap_insert(Viewer->Globals, "hotkey1", ml_reference(&Viewer->HotkeyFns[1]));
