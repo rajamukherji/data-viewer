@@ -1548,7 +1548,11 @@ static gboolean key_press_viewer(GtkWidget *Widget, GdkEventKey *Event, viewer_t
 	case GDK_KEY_8: case GDK_KEY_9: {
 		ml_value_t *HotkeyFn = Viewer->HotkeyFns[Event->keyval - GDK_KEY_0];
 		for (node_t *Node = Viewer->Selected; Node; Node = Node->Next) {
-			ml_inline(HotkeyFn, 1, Node);
+			ml_value_t *Result = ml_inline(HotkeyFn, 1, Node);
+			if (Result->Type == MLErrorT) {
+				console_log(Viewer->Console, Result);
+				break;
+			}
 		}
 		++Viewer->FilterGeneration;
 		set_viewer_colour_index(Viewer, Viewer->CIndex);
@@ -1662,10 +1666,12 @@ static void add_field_callback(const char *Name, viewer_t *Viewer, void *Data) {
 	field_t *Field = (field_t *)GC_malloc(sizeof(field_t) + Viewer->NumNodes * sizeof(double));
 	Field->Type = FieldT;
 	Field->EnumStore = gtk_list_store_new(2, G_TYPE_STRING, G_TYPE_DOUBLE);
+
 	Field->EnumNames = (const char **)GC_malloc(sizeof(const char *));
 	Field->EnumValues = (int *)GC_malloc_atomic(sizeof(int));
 	Field->EnumNames[0] = "";
 	Field->EnumSize = 1;
+	Field->EnumMap = new(stringmap_t);
 	Field->Name = Name;
 	Field->PreviewColumn = 0;
 	Field->PreviewVisible = 1;
@@ -1700,6 +1706,9 @@ static void add_value_callback(const char *Name, viewer_t *Viewer, void *Data) {
 	GC_free(Field->EnumValues);
 	Field->EnumSize = Value + 1;
 	Field->EnumValues = (int *)GC_malloc_atomic(Field->EnumSize * sizeof(int));
+	double *Ref = new(double);
+	*Ref = Value;
+	stringmap_insert(Field->EnumMap, Name, Ref);
 	gtk_combo_box_set_active(GTK_COMBO_BOX(Viewer->EditValueComboBox), Value);
 	if (Field == Viewer->Fields[Viewer->CIndex]) {
 		++Viewer->FilterGeneration;
