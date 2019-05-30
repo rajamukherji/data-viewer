@@ -2496,7 +2496,7 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 	for (int I = 0; I < 10; ++I) Viewer->HotkeyFns[I] = Viewer->ActivationFn;
 	Viewer->PreviewWidget = 0;
 
-	ml_object_init(Viewer->Globals);
+	ml_object_init(Viewer->Globals, (ml_setter_t)stringmap_insert);
 	stringmap_insert(Viewer->Globals, "activate", ml_reference(&Viewer->ActivationFn));
 	stringmap_insert(Viewer->Globals, "hotkey0", ml_reference(&Viewer->HotkeyFns[0]));
 	stringmap_insert(Viewer->Globals, "hotkey1", ml_reference(&Viewer->HotkeyFns[1]));
