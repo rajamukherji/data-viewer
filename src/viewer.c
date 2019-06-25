@@ -599,9 +599,43 @@ static ml_value_t *node_field_fn(void *Data, int Count, ml_value_t **Args) {
 	return (ml_value_t *)Ref;
 }
 
+typedef struct node_image_t {
+	const ml_type_t *Type;
+	node_t *Node;
+} node_image_t;
+
+static ml_value_t *node_image_deref(node_image_t *Ref) {
+	return ml_string(Ref->Node->FileName, -1);
+}
+
+static ml_value_t *node_image_assign(node_image_t *Ref, ml_value_t *Value) {
+	if (Value->Type != MLStringT) return ml_error("TypeError", "Node image must be a string");
+	node_t *Node = Ref->Node;
+	Node->FileName = ml_string_value(Value);
+	g_object_unref(Node->File);
+	Node->File = g_file_new_for_path(Node->FileName);
+	return Value;
+}
+
+static ml_type_t NodeImageT[1] = {{
+	MLTypeT,
+	MLAnyT, "node-image",
+	ml_default_hash,
+	ml_default_call,
+	(void *)node_image_deref,
+	(void *)node_image_assign,
+	ml_default_iterate,
+	ml_default_current,
+	ml_default_next,
+	ml_default_key
+}};
+
 static ml_value_t *node_image_fn(void *Data, int Count, ml_value_t **Args) {
 	node_t *Node = (node_t *)Args[0];
-	return ml_string(Node->FileName, -1);
+	node_image_t *Ref = new(node_image_t);
+	Ref->Type = NodeImageT;
+	Ref->Node = Node;
+	return (ml_value_t *)Ref;
 }
 
 typedef struct nodes_iter_t {
