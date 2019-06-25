@@ -1608,32 +1608,44 @@ static gboolean key_press_viewer(GtkWidget *Widget, GdkEventKey *Event, viewer_t
 }
 
 static void x_field_changed(GtkComboBox *Widget, viewer_t *Viewer) {
-	set_viewer_indices(Viewer, gtk_combo_box_get_active(Widget), Viewer->YIndex);
-	redraw_viewer_background(Viewer);
-	update_preview(Viewer);
-	gtk_widget_queue_draw(Viewer->DrawingArea);
+	int XIndex = gtk_combo_box_get_active(Widget);
+	if (XIndex >= 0) {
+		set_viewer_indices(Viewer, XIndex, Viewer->YIndex);
+		redraw_viewer_background(Viewer);
+		update_preview(Viewer);
+		gtk_widget_queue_draw(Viewer->DrawingArea);
+	}
 }
 
 static void y_field_changed(GtkComboBox *Widget, viewer_t *Viewer) {
-	set_viewer_indices(Viewer, Viewer->XIndex, gtk_combo_box_get_active(Widget));
-	redraw_viewer_background(Viewer);
-	update_preview(Viewer);
-	gtk_widget_queue_draw(Viewer->DrawingArea);
+	int YIndex = gtk_combo_box_get_active(Widget);
+	if (YIndex >= 0) {
+		set_viewer_indices(Viewer, Viewer->XIndex, YIndex);
+		redraw_viewer_background(Viewer);
+		update_preview(Viewer);
+		gtk_widget_queue_draw(Viewer->DrawingArea);
+	}
 }
 
 static void c_field_changed(GtkComboBox *Widget, viewer_t *Viewer) {
-	++Viewer->FilterGeneration;
-	set_viewer_colour_index(Viewer, gtk_combo_box_get_active(Widget));
-	redraw_viewer_background(Viewer);
-	update_preview(Viewer);
-	gtk_widget_queue_draw(Viewer->DrawingArea);
+	int CIndex = gtk_combo_box_get_active(Widget);
+	if (CIndex >= 0) {
+		++Viewer->FilterGeneration;
+		set_viewer_colour_index(Viewer, CIndex);
+		redraw_viewer_background(Viewer);
+		update_preview(Viewer);
+		gtk_widget_queue_draw(Viewer->DrawingArea);
+	}
 }
 
 static void edit_field_changed(GtkComboBox *Widget, viewer_t *Viewer) {
-	field_t *Field = Viewer->EditField = Viewer->Fields[gtk_combo_box_get_active(GTK_COMBO_BOX(Widget))];
-	gtk_combo_box_set_model(GTK_COMBO_BOX(Viewer->EditValueComboBox), GTK_TREE_MODEL(Field->EnumStore));
-	Viewer->EditValue = 0.0;
-	gtk_combo_box_set_active(GTK_COMBO_BOX(Viewer->EditValueComboBox), -1);
+	int EditIndex = gtk_combo_box_get_active(GTK_COMBO_BOX(Widget));
+	if (EditIndex >= 0) {
+		field_t *Field = Viewer->EditField = Viewer->Fields[EditIndex];
+		gtk_combo_box_set_model(GTK_COMBO_BOX(Viewer->EditValueComboBox), GTK_TREE_MODEL(Field->EnumStore));
+		Viewer->EditValue = 0.0;
+		gtk_combo_box_set_active(GTK_COMBO_BOX(Viewer->EditValueComboBox), -1);
+	}
 }
 
 typedef void text_dialog_callback_t(const char *Result, viewer_t *Viewer, void *Data);
@@ -2327,6 +2339,7 @@ static void viewer_load_file(viewer_t *Viewer, const char *CsvFileName, const ch
 	gtk_progress_bar_set_fraction(Loader->ProgressBar, 1.0);
 	while (gtk_events_pending()) gtk_main_iteration();
 
+	gtk_list_store_clear(Viewer->FieldsStore);
 	for (int I = 0; I < NumFields; ++I) {
 		field_t *Field = Fields[I];
 		gtk_list_store_insert_with_values(Viewer->FieldsStore, 0, -1, 0, Field->Name, 1, I, 2, TRUE, -1);
@@ -2365,6 +2378,12 @@ static void viewer_load_file(viewer_t *Viewer, const char *CsvFileName, const ch
 
 	gtk_widget_destroy(GTK_WIDGET(Loader->ProgressBar));
 	gtk_widget_hide(Viewer->InfoBar);
+	redraw_viewer_background(Viewer);
+	gtk_widget_queue_draw(Viewer->DrawingArea);
+	const char *Basename = g_path_get_basename(CsvFileName);
+	char Title[strlen(Basename) + strlen(" - DataViewer") + 1];
+	sprintf(Title, "%s - DataViewer", Basename);
+	gtk_window_set_title(GTK_WINDOW(Viewer->MainWindow), Title);
 }
 
 static void viewer_open_file(GtkWidget *Button, viewer_t *Viewer) {
@@ -2603,6 +2622,7 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 	stringmap_insert(Viewer->Globals, "open", ml_function(Viewer, ml_file_open));
 
 	GtkWidget *MainWindow = Viewer->MainWindow = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+	gtk_window_set_title(GTK_WINDOW(Viewer->MainWindow), "DataViewer");
 #ifdef USE_GL
 	Viewer->DrawingArea = gtk_gl_area_new();
 #else

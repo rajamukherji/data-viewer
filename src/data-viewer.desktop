@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Exec=data-viewer %f
+Icon=applications-science
+StartupNotify=true
+Terminal=false
+Categories=Graphics;GTK;
+Name=Data Viewer
+Comment=View data
+GenericName=Data Viewer
+

@@ -68,4 +68,5 @@ if USE_GL then
 else
 	c_program(BIN_DIR/"data-viewer", Objects)
 	install(BIN_DIR/"data-viewer", PREFIX/"bin/data-viewer", "+x")
+	install(file("data-viewer.desktop"), PREFIX/'share/applications/data-viewer.desktop')
 end
