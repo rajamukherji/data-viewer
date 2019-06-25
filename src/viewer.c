@@ -2390,6 +2390,10 @@ static void viewer_load_file(viewer_t *Viewer, const char *CsvFileName, const ch
 	gtk_window_set_title(GTK_WINDOW(Viewer->MainWindow), Title);
 }
 
+static void prefix_directory_set(GtkFileChooser *Widget, GtkEntry *Entry) {
+	gtk_entry_set_text(Entry, gtk_file_chooser_get_filename(Widget));
+}
+
 static void viewer_open_file(GtkWidget *Button, viewer_t *Viewer) {
 	GtkWidget *FileChooser = gtk_file_chooser_dialog_new(
 		"Open a CSV file",
@@ -2403,8 +2407,11 @@ static void viewer_open_file(GtkWidget *Button, viewer_t *Viewer) {
 		gtk_widget_destroy(FileChooser);
 		return;
 	}
-	char *FileName = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(FileChooser));
+	const char *FileName = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(FileChooser));
+	const char *CurrentFolder = gtk_file_chooser_get_current_folder(GTK_FILE_CHOOSER(FileChooser));
 	gtk_widget_destroy(FileChooser);
+	const char *ImagePrefix = 0;
+
 	GtkWidget *Dialog = gtk_dialog_new_with_buttons(
 		"Set load options",
 		GTK_WINDOW(Viewer->MainWindow),
@@ -2419,15 +2426,19 @@ static void viewer_open_file(GtkWidget *Button, viewer_t *Viewer) {
 	GtkWidget *PrefixEntry = gtk_entry_new();
 	gtk_grid_attach(GTK_GRID(LoadOptions), gtk_label_new("Image Prefix"), 0, 0, 1, 1);
 	gtk_grid_attach(GTK_GRID(LoadOptions), PrefixEntry, 1, 0, 1, 1);
+
+	GtkWidget *PrefixChooser = gtk_file_chooser_button_new("Image prefix directory", GTK_FILE_CHOOSER_ACTION_SELECT_FOLDER);
+	gtk_file_chooser_set_current_folder(GTK_FILE_CHOOSER(PrefixChooser), CurrentFolder);
+	g_signal_connect(G_OBJECT(PrefixChooser), "file-set", G_CALLBACK(prefix_directory_set), PrefixEntry);
+	gtk_grid_attach(GTK_GRID(LoadOptions), PrefixChooser, 2, 0, 1, 1);
+
 	GtkContainer *ContentArea = GTK_CONTAINER(gtk_dialog_get_content_area(GTK_DIALOG(Dialog)));
 	gtk_container_set_border_width(ContentArea, 6);
 	gtk_box_pack_start(GTK_BOX(ContentArea), LoadOptions, TRUE, TRUE, 6);
 	gtk_widget_show_all(LoadOptions);
-	if (gtk_dialog_run(GTK_DIALOG(Dialog)) != GTK_RESPONSE_ACCEPT) {
-		gtk_widget_destroy(Dialog);
-		return;
+	if (gtk_dialog_run(GTK_DIALOG(Dialog)) == GTK_RESPONSE_ACCEPT) {
+		ImagePrefix = GC_strdup(gtk_entry_get_text(GTK_ENTRY(PrefixEntry)));
 	}
-	const char *ImagePrefix = gtk_entry_get_text(GTK_ENTRY(PrefixEntry));
 	gtk_widget_destroy(Dialog);
 	while (gtk_events_pending()) gtk_main_iteration();
 	viewer_load_file(Viewer, FileName, ImagePrefix);
