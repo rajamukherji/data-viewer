@@ -103,6 +103,7 @@ struct viewer_t {
 	GtkWidget *DrawingArea, *ImagesView;
 	GtkWidget *PreviewWidget;
 	GtkWidget *XComboBox, *YComboBox, *CComboBox, *EditFieldComboBox, *EditValueComboBox;
+	GtkWidget *InfoBar;
 	GdkCursor *Cursor;
 	GtkListStore *ImagesStore, *ValuesStore;
 	GtkListStore *FieldsStore;
@@ -127,12 +128,11 @@ struct viewer_t {
 	unsigned int *CachedPixels;
 	int CachedStride;
 #endif
-	node_t *CacheHead, *CacheTail;
 	field_t **Fields, *EditField;
 	filter_t *Filters;
 	point_t Min, Max, Scale, DataMin, DataMax, Pointer;
 	double EditValue;
-	int NumNodes, NumFields, NumCached, NumFiltered, NumVisible, NumUpdated;
+	int NumNodes, NumFields, NumFiltered, NumVisible, NumUpdated;
 	int XIndex, YIndex, CIndex;
 	int FilterGeneration, LoadGeneration;
 	int LoadCacheIndex;
@@ -512,6 +512,239 @@ static node_t *merge_sort_list_y(node_t *Start, node_t *End) {
 	return Head;
 }
 
+static ml_value_t *viewer_global_get(viewer_t *Viewer, const char *Name) {
+	return stringmap_search(Viewer->Globals, Name) ?: MLNil;
+}
+
+typedef struct node_ref_t {
+	const ml_type_t *Type;
+	field_t *Field;
+	node_t *Node;
+} node_ref_t;
+
+static ml_value_t *node_ref_deref(node_ref_t *Ref) {
+	field_t *Field = Ref->Field;
+	double Value = Field->Values[Ref->Node - Ref->Node->Viewer->Nodes];
+	if (Field->EnumNames) {
+		if (Value) {
+			return ml_string(Field->EnumNames[(int)Value], -1);
+		} else {
+			return MLNil;
+		}
+	} else {
+		return ml_real(Value);
+	}
+}
+
+static ml_value_t *node_ref_assign(node_ref_t *Ref, ml_value_t *Value) {
+	field_t *Field = Ref->Field;
+	if (Field->EnumMap) {
+		int Index;
+		if (Value->Type == MLIntegerT) {
+			Index = ml_integer_value(Value);
+			if (Index < 0 || Index >= Field->EnumSize) return ml_error("RangeError", "enum index out of range");
+		} else if (Value->Type == MLRealT) {
+			Index = ml_real_value(Value);
+			if (Index < 0 || Index >= Field->EnumSize) return ml_error("RangeError", "enum index out of range");
+		} else if (Value->Type == MLStringT) {
+			double *Ref2 = stringmap_search(Field->EnumMap, ml_string_value(Value));
+			if (Ref2) {
+				Index = *(double *)Ref2;
+			} else {
+				return ml_error("RangeError", "enum name not found");
+			}
+		} else {
+			return ml_error("TypeError", "invalid value for assignment");
+		}
+		Field->Values[Ref->Node - Ref->Node->Viewer->Nodes] = Index;
+	} else {
+		double Value2;
+		if (Value->Type == MLIntegerT) {
+			Value2 = ml_integer_value(Value);
+		} else if (Value->Type == MLRealT) {
+			Value2 = ml_real_value(Value);
+		} else {
+			return ml_error("TypeError", "invalid value for assignment");
+		}
+		Field->Values[Ref->Node - Ref->Node->Viewer->Nodes] = Value2;
+		if (Value2 < Field->Range.Min) Field->Range.Min = Value2;
+		if (Value2 > Field->Range.Max) Field->Range.Max = Value2;
+	}
+	return Value;
+}
+
+static ml_type_t NodeRefT[1] = {{
+	MLTypeT,
+	MLAnyT, "node-ref",
+	ml_default_hash,
+	ml_default_call,
+	(void *)node_ref_deref,
+	(void *)node_ref_assign,
+	ml_default_iterate,
+	ml_default_current,
+	ml_default_next,
+	ml_default_key
+}};
+
+static ml_value_t *node_field_fn(void *Data, int Count, ml_value_t **Args) {
+	node_t *Node = (node_t *)Args[0];
+	const char *Name = ml_string_value(Args[1]);
+	viewer_t *Viewer = Node->Viewer;
+	field_t *Field = stringmap_search(Viewer->FieldsByName, Name);
+	if (!Field) return ml_error("FieldError", "no such field %s", Name);
+	node_ref_t *Ref = new(node_ref_t);
+	Ref->Type = NodeRefT;
+	Ref->Node = Node;
+	Ref->Field = Field;
+	return (ml_value_t *)Ref;
+}
+
+static ml_value_t *node_image_fn(void *Data, int Count, ml_value_t **Args) {
+	node_t *Node = (node_t *)Args[0];
+	return ml_string(Node->FileName, -1);
+}
+
+typedef struct nodes_iter_t {
+	const ml_type_t *Type;
+	node_t *Nodes;
+	int NumNodes;
+} nodes_iter_t;
+
+static ml_value_t *nodes_iter_current(ml_value_t *Ref) {
+	nodes_iter_t *Iter = (nodes_iter_t *)Ref;
+	return (ml_value_t *)Iter->Nodes;
+}
+
+static ml_value_t *nodes_iter_next(ml_value_t *Ref) {
+	nodes_iter_t *Iter = (nodes_iter_t *)Ref;
+	if (Iter->NumNodes) {
+		--Iter->NumNodes;
+		++Iter->Nodes;
+		return Ref;
+	} else {
+		return MLNil;
+	}
+}
+
+static ml_type_t NodesIterT[1] = {{
+	MLTypeT,
+	MLAnyT, "nodes-iter",
+	ml_default_hash,
+	ml_default_call,
+	ml_default_deref,
+	ml_default_assign,
+	ml_default_iterate,
+	nodes_iter_current,
+	nodes_iter_next,
+	ml_default_key
+}};
+
+static ml_value_t *nodes_iterate(ml_value_t *Value) {
+	nodes_iter_t *Nodes = (nodes_iter_t *)Value;
+	if (Nodes->NumNodes) {
+		nodes_iter_t *Iter = new(nodes_iter_t);
+		Iter->Type = NodesIterT;
+		Iter->Nodes = Nodes->Nodes;
+		Iter->NumNodes = Nodes->NumNodes - 1;
+		return (ml_value_t *)Iter;
+	} else {
+		return MLNil;
+	}
+}
+
+static ml_type_t NodesT[1] = {{
+	MLTypeT,
+	MLAnyT, "nodes",
+	ml_default_hash,
+	ml_default_call,
+	ml_default_deref,
+	ml_default_assign,
+	nodes_iterate,
+	ml_default_current,
+	ml_default_next,
+	ml_default_key
+}};
+
+typedef struct fields_t {
+	const ml_type_t *Type;
+	viewer_t *Viewer;
+} fields_t;
+
+static ml_value_t *fields_get_by_name(void *Data, int Count, ml_value_t **Args) {
+	viewer_t *Viewer = ((fields_t *)Args[0])->Viewer;
+	const char *Name = ml_string_value(Args[1]);
+	return (ml_value_t *)stringmap_search(Viewer->FieldsByName, Name) ?: MLNil;
+}
+
+static ml_type_t FieldsT[1] = {{
+	MLTypeT,
+	MLAnyT, "fields",
+	ml_default_hash,
+	ml_default_call,
+	ml_default_deref,
+	ml_default_assign,
+	ml_default_iterate,
+	ml_default_current,
+	ml_default_next,
+	ml_default_key
+}};
+
+static ml_value_t *field_name_fn(void *Data, int Count, ml_value_t **Args) {
+	field_t *Field = (field_t *)Args[0];
+	return ml_string(Field->Name, -1);
+}
+
+static ml_value_t *field_enum_value_fn(void *Data, int Count, ml_value_t **Args) {
+	field_t *Field = (field_t *)Args[0];
+	if (!Field->EnumMap) return ml_error("TypeError", "field is not an enum");
+	const char *Name = ml_string_value(Args[1]);
+	double *Ref = stringmap_search(Field->EnumMap, Name);
+	if (Ref) {
+		return ml_real(*Ref);
+	} else {
+		return ml_error("RangeError", "enum name not found");
+	}
+}
+
+static ml_value_t *field_enum_name_fn(void *Data, int Count, ml_value_t **Args) {
+	field_t *Field = (field_t *)Args[0];
+	if (!Field->EnumMap) return ml_error("TypeError", "field is not an enumeration");
+	int Value = ml_integer_value(Args[1]);
+	if (Value < 0 || Value >= Field->EnumSize) return ml_error("RangeError", "enum value out of range");
+	return ml_string(Field->EnumNames[Value], -1);
+}
+
+static ml_value_t *field_enum_size_fn(void *Data, int Count, ml_value_t **Args) {
+	field_t *Field = (field_t *)Args[0];
+	if (!Field->EnumMap) return ml_error("TypeError", "field is not an enumeration");
+	return ml_integer(Field->EnumSize);
+}
+
+static ml_value_t *field_range_min_fn(void *Data, int Count, ml_value_t **Args) {
+	field_t *Field = (field_t *)Args[0];
+	return ml_real(Field->Range.Min);
+}
+
+static ml_value_t *field_range_max_fn(void *Data, int Count, ml_value_t **Args) {
+	field_t *Field = (field_t *)Args[0];
+	return ml_real(Field->Range.Max);
+}
+
+static ml_value_t *clipboard_fn(viewer_t *Viewer, int Count, ml_value_t **Args) {
+	ml_value_t *AppendMethod = ml_method("append");
+	ML_CHECK_ARG_COUNT(1);
+	ml_stringbuffer_t Buffer[1] = {ML_STRINGBUFFER_INIT};
+	for (int I = 0; I < Count; ++I) {
+		ml_value_t *Result = ml_inline(AppendMethod, 2, Buffer, Args[I]);
+		if (Result->Type == MLErrorT) return Result;
+		if (Result != MLNil) ml_stringbuffer_add(Buffer, " ", 1);
+	}
+	int Length = Buffer->Length;
+	const char *Text = ml_stringbuffer_get(Buffer);
+	gtk_clipboard_set_text(Viewer->Clipboard, Text, Length);
+	return MLNil;
+}
+
 static void set_viewer_indices(viewer_t *Viewer, int XIndex, int YIndex) {
 	Viewer->XIndex = XIndex;
 	Viewer->YIndex = YIndex;
@@ -650,198 +883,9 @@ static void set_viewer_colour_index(viewer_t *Viewer, int CIndex) {
 	}
 }
 
-typedef struct {
-	viewer_t *Viewer;
-	field_t **Fields;
-	node_t *Nodes;
-	const char *ImagePrefix;
-	int Index, Row, ImagePrefixLength;
-} csv_node_loader_t;
-
-static void load_nodes_field_callback(void *Text, size_t Size, csv_node_loader_t *Loader) {
-	if (!Loader->Row) {
-		if (Loader->Index) {
-			char *FieldName = GC_malloc(Size + 1);
-			memcpy(FieldName, Text, Size);
-			FieldName[Size] = 0;
-			Loader->Fields[Loader->Index - 1]->Name = FieldName;
-		}
-	} else {
-		if (!Loader->Index) {
-			char *FileName, *FilePath;
-			FileName = GC_malloc(Size + 1);
-			memcpy(FileName, Text, Size);
-			FileName[Size] = 0;
-			if (Loader->ImagePrefixLength) {
-				int Length = Loader->ImagePrefixLength + Size;
-				FilePath = GC_malloc(Length + 1);
-				memcpy(stpcpy(FilePath, Loader->ImagePrefix), Text, Size);
-				FilePath[Length] = 0;
-			} else {
-				FilePath = FileName;
-			}
-			Loader->Nodes[Loader->Row - 1].FileName = FileName;
-			Loader->Nodes[Loader->Row - 1].File = g_file_new_for_path(FilePath);
-			if (FilePath != FileName) GC_free(FilePath);
-		} else {
-			int Index = Loader->Index - 1;
-			field_t *Field = Loader->Fields[Index];
-			double Value;
-			insert:
-			if (Field->EnumMap) {
-				if (Size) {
-					double *Ref = stringmap_search(Field->EnumMap, Text);
-					if (Ref) {
-						Value = *(double *)Ref;
-					} else {
-						Ref = new(double);
-						stringmap_insert(Field->EnumMap, GC_strdup(Text), Ref);
-						*(double *)Ref = Value = Field->EnumMap->Size;
-					}
-				} else {
-					Value = 0.0;
-				}
-			} else {
-				char *End;
-				Value = strtod(Text, &End);
-				if (End == Text) {
-					if (Loader->Row != 1) {
-						// TODO: Convert all previously loaded values to enums
-						fprintf(stderr, "Convert previous values into enums has not been done yet!");
-						exit(1);
-					}
-					Field->Range.Min = 0.0;
-					Field->EnumMap = new(stringmap_t);
-					goto insert;
-				}
-			}
-			Field->Values[Loader->Row - 1] = Value;
-			if (Field->Range.Min > Value) Field->Range.Min = Value;
-			if (Field->Range.Max < Value) Field->Range.Max = Value;
-			Field->Sum += Value;
-			Field->Sum2 += Value * Value;
-		}
-	}
-	++Loader->Index;
-}
-
-static void load_nodes_row_callback(int Char, csv_node_loader_t *Loader) {
-	Loader->Index = 0;
-	++Loader->Row;
-	if (Loader->Row % 10000 == 0) printf("Loaded row %d\n", Loader->Row);
-}
-
-static void count_nodes_field_callback(void *Text, size_t Size, csv_node_loader_t *Loader) {
-	++Loader->Index;
-}
-
-static void count_nodes_row_callback(int Char, csv_node_loader_t *Loader) {
-	if (!Loader->Row) {
-		int NumValues = Loader->Viewer->NumFields = Loader->Index - 1;
-	}
-	Loader->Index = 0;
-	++Loader->Row;
-	if (Loader->Row % 10000 == 0) printf("Counted row %d\n", Loader->Row);
-}
-
 static int set_enum_name_fn(const char *Name, const double *Value, const char **Names) {
 	Names[(int)Value[0]] = Name;
 	return 0;
-}
-
-static void viewer_open_file(viewer_t *Viewer, const char *CsvFileName, const char *ImagePrefix) {
-	int ImagePrefixLength = ImagePrefix ? strlen(ImagePrefix) : 0;
-	csv_node_loader_t Loader[1] = {{Viewer, 0, 0, ImagePrefix, 0, 0, ImagePrefixLength}};
-	char Buffer[4096];
-	struct csv_parser Parser[1];
-
-	printf("Counting rows...\n");
-	FILE *File = fopen(CsvFileName, "r");
-	if (!File) {
-		fprintf(stderr, "Error reading from %s\n", CsvFileName);
-		exit(1);
-	}
-	csv_init(Parser, CSV_APPEND_NULL);
-	size_t Count = fread(Buffer, 1, 4096, File);
-	while (Count > 0) {
-		csv_parse(Parser, Buffer, Count, (void *)count_nodes_field_callback, (void *)count_nodes_row_callback, Loader);
-		Count = fread(Buffer, 1, 4096, File);
-	}
-	fclose(File);
-	csv_fini(Parser, (void *)count_nodes_field_callback, (void *)count_nodes_row_callback, Loader);
-	csv_free(Parser);
-
-	int NumNodes = Viewer->NumNodes = Loader->Row - 1;
-	int NumFields = Viewer->NumFields;
-	node_t *Nodes = Viewer->Nodes = (node_t *)GC_malloc(NumNodes * sizeof(node_t));
-	Viewer->Sorted = (node_t **)GC_malloc(NumNodes * sizeof(node_t *));
-	Viewer->SortedX = (node_t **)GC_malloc(NumNodes * sizeof(node_t *));
-	Viewer->SortedY = (node_t **)GC_malloc(NumNodes * sizeof(node_t *));
-	Viewer->SortBuffer = (node_t **)GC_malloc(NumNodes * sizeof(node_t *));
-	Viewer->NumFiltered = NumNodes;
-	memset(Nodes, 0, NumNodes * sizeof(node_t));
-	for (int I = 0; I < NumNodes; ++I) {
-		Nodes[I].Type = NodeT;
-		Nodes[I].Viewer = Viewer;
-		Nodes[I].Filtered = 1;
-		Viewer->SortedX[I] = &Nodes[I];
-		Viewer->SortedY[I] = &Nodes[I];
-	}
-	field_t **Fields = Viewer->Fields = (field_t **)GC_malloc(NumFields * sizeof(field_t *));
-	for (int I = 0; I < NumFields; ++I) {
-		field_t *Field = Fields[I] = (field_t *)GC_malloc(sizeof(field_t) + NumNodes * sizeof(double));
-		Field->Type = FieldT;
-		Field->EnumMap = 0;
-		Field->Range.Min = INFINITY;
-		Field->Range.Max = -INFINITY;
-		Field->PreviewColumn = 0;
-		Field->PreviewVisible = 1;
-		Field->FilterGeneration = 0;
-		Field->Sum = Field->Sum2 = 0.0;
-		Fields[I] = Field;
-	}
-#ifdef USE_GL
-	Viewer->GLVertices = (float *)GC_malloc_atomic(NumNodes * 3 * 3 * sizeof(float));
-	Viewer->GLColours = (float *)GC_malloc_atomic(NumNodes * 3 * 4 * sizeof(float));
-#endif
-	printf("Loading rows...\n");
-	fopen(CsvFileName, "r");
-	Loader->Nodes = Nodes;
-	Loader->Fields = Fields;
-	Loader->Row = Loader->Index = 0;
-	csv_init(Parser, CSV_APPEND_NULL);
-	Count = fread(Buffer, 1, 4096, File);
-	while (Count > 0) {
-		csv_parse(Parser, Buffer, Count, (void *)load_nodes_field_callback, (void *)load_nodes_row_callback, Loader);
-		Count = fread(Buffer, 1, 4096, File);
-	}
-	fclose(File);
-	csv_fini(Parser, (void *)load_nodes_field_callback, (void *)load_nodes_row_callback, Loader);
-	csv_free(Parser);
-
-	for (int I = 0; I < NumFields; ++I) {
-		field_t *Field = Fields[I];
-		gtk_list_store_insert_with_values(Viewer->FieldsStore, 0, -1, 0, Field->Name, 1, I, 2, TRUE, -1);
-		stringmap_insert(Viewer->FieldsByName, Field->Name, Field);
-		if (Field->EnumMap) {
-			int EnumSize = Field->EnumSize = Field->EnumMap->Size + 1;
-			const char **EnumNames = (const char **)GC_malloc(EnumSize * sizeof(const char *));
-			EnumNames[0] = "";
-			stringmap_foreach(Field->EnumMap, EnumNames, (void *)set_enum_name_fn);
-			Field->EnumNames = EnumNames;
-			GtkListStore *EnumStore = Field->EnumStore = gtk_list_store_new(2, G_TYPE_STRING, G_TYPE_DOUBLE);
-			for (int J = 0; J < EnumSize; ++J) {
-				gtk_list_store_insert_with_values(Field->EnumStore, 0, -1, 0, Field->EnumNames[J], 1, (double)(J + 1), -1);
-			}
-			Field->EnumValues = (int *)GC_malloc_atomic(EnumSize * sizeof(int));
-		} else {
-			double Mean = Field->Sum / Viewer->NumNodes;
-			Field->SD = sqrt((Field->Sum2 / Viewer->NumNodes) - Mean * Mean);
-		}
-	}
-
-	set_viewer_indices(Viewer, 0, 1);
-	set_viewer_colour_index(Viewer, Viewer->NumFields - 1);
 }
 
 static void draw_node_image_loaded(GObject *Source, GAsyncResult *Result, node_t *Node) {
@@ -900,7 +944,7 @@ static void draw_node_file_opened(GObject *Source, GAsyncResult *Result, node_t 
 		g_object_unref(G_OBJECT(Node->LoadCancel));
 		Node->LoadCancel = 0;
 		viewer_t *Viewer = Node->Viewer;
-		guchar *Pixels = GC_malloc_atomic(128 * 192 * 4);
+		guchar *Pixels = malloc(128 * 192 * 4);
 		cairo_surface_t *Surface = cairo_image_surface_create_for_data(Pixels, CAIRO_FORMAT_ARGB32, 128, 192, 128 * 4);
 		cairo_t *Cairo = cairo_create(Surface);
 		cairo_rectangle(Cairo, 0.0, 0.0, 128.0, 192.0);
@@ -1626,7 +1670,7 @@ static void text_input_dialog(const char *Title, viewer_t *Viewer, text_dialog_c
 	gtk_container_add(GTK_CONTAINER(Dialog), VBox);
 
 	GtkWidget *Entry = gtk_entry_new();
-	gtk_box_pack_start(GTK_BOX(VBox), Entry, TRUE, FALSE, 10);
+	gtk_box_pack_start(GTK_BOX(VBox), Entry, TRUE, FALSE, 6);
 
 	GtkWidget *ButtonBox = gtk_button_box_new(GTK_ORIENTATION_HORIZONTAL);
 	gtk_box_pack_start(GTK_BOX(VBox), ButtonBox, FALSE, FALSE, 4);
@@ -1649,7 +1693,6 @@ static void text_input_dialog(const char *Title, viewer_t *Viewer, text_dialog_c
 	g_signal_connect(G_OBJECT(CancelButton), "clicked", G_CALLBACK(text_input_dialog_cancel), Info);
 	g_signal_connect(G_OBJECT(AcceptButton), "clicked", G_CALLBACK(text_input_dialog_accept), Info);
 	g_signal_connect(G_OBJECT(Dialog), "destroy", G_CALLBACK(text_input_dialog_destroy), Info);
-
 
 	gtk_widget_show_all(GTK_WIDGET(Dialog));
 }
@@ -1720,62 +1763,6 @@ static void add_value_callback(const char *Name, viewer_t *Viewer, void *Data) {
 
 static void add_value_clicked(GtkWidget *Button, viewer_t *Viewer) {
 	text_input_dialog("Add Value", Viewer, (text_dialog_callback_t *)add_value_callback, 0);
-}
-
-static void save_csv(GtkWidget *Button, viewer_t *Viewer) {
-	GtkWidget *FileChooser = gtk_file_chooser_dialog_new(
-		"Save as CSV file",
-		GTK_WINDOW(Viewer->MainWindow),
-		GTK_FILE_CHOOSER_ACTION_SAVE,
-		"Cancel", GTK_RESPONSE_CANCEL,
-		"Save", GTK_RESPONSE_ACCEPT,
-		NULL
-	);
-	if (gtk_dialog_run(GTK_DIALOG(FileChooser)) == GTK_RESPONSE_ACCEPT) {
-		GtkWidget *ProgressBar = gtk_progress_bar_new();
-		gtk_progress_bar_set_show_text(GTK_PROGRESS_BAR(ProgressBar), TRUE);
-		gtk_widget_show_all(ProgressBar);
-		gtk_file_chooser_set_extra_widget(GTK_FILE_CHOOSER(FileChooser), ProgressBar);
-		char *FileName = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(FileChooser));
-		FILE *File = fopen(FileName, "wb");
-		g_free(FileName);
-		field_t **Fields = Viewer->Fields;
-		node_t *Nodes = Viewer->Nodes;
-		int NumFields = Viewer->NumFields;
-		int NumNodes = Viewer->NumNodes;
-		csv_fwrite(File, "filename", strlen("filename"));
-		for (int I = 0; I < NumFields; ++I) {
-			fputc(',', File);
-			csv_fwrite(File, Fields[I]->Name, strlen(Fields[I]->Name));
-		}
-		fputc('\n', File);
-		char ProgressText[64];
-		for (int J = 0; J < NumNodes; ++J) {
-			csv_fwrite(File, Nodes[J].FileName, strlen(Nodes[J].FileName));
-			for (int I = 0; I < NumFields; ++I) {
-				fputc(',', File);
-				field_t *Field = Fields[I];
-				if (Field->EnumNames) {
-					const char *Value = Field->EnumNames[(int)Field->Values[J]];
-					csv_fwrite(File, Value, strlen(Value));
-				} else {
-					fprintf(File, "%f", Field->Values[J]);
-				}
-			}
-			fputc('\n', File);
-			if (J % 10000 == 0) {
-				sprintf(ProgressText, "%d / %d rows", J, NumNodes);
-				gtk_progress_bar_set_text(GTK_PROGRESS_BAR(ProgressBar), ProgressText);
-				gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(ProgressBar), (double)J / NumNodes);
-				while (gtk_events_pending()) gtk_main_iteration();
-			}
-		}
-		fclose(File);
-		sprintf(ProgressText, "%d / %d rows", NumNodes, NumNodes);
-		gtk_progress_bar_set_text(GTK_PROGRESS_BAR(ProgressBar), ProgressText);
-		gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(ProgressBar), 1.0);
-	}
-	gtk_widget_destroy(FileChooser);
 }
 
 static void filter_operator_equal(int Count, node_t *Node, double *Input, double Value) {
@@ -2091,15 +2078,352 @@ static void show_columns_clicked(GtkWidget *Button, viewer_t *Viewer) {
 	g_signal_connect(G_OBJECT(Window), "delete-event", G_CALLBACK(gtk_widget_destroy), Viewer);
 }
 
+static void viewer_save_file(GtkWidget *Button, viewer_t *Viewer) {
+	GtkWidget *FileChooser = gtk_file_chooser_dialog_new(
+		"Save as CSV file",
+		GTK_WINDOW(Viewer->MainWindow),
+		GTK_FILE_CHOOSER_ACTION_SAVE,
+		"Cancel", GTK_RESPONSE_CANCEL,
+		"Save", GTK_RESPONSE_ACCEPT,
+		NULL
+	);
+	if (gtk_dialog_run(GTK_DIALOG(FileChooser)) != GTK_RESPONSE_ACCEPT) {
+		gtk_widget_destroy(FileChooser);
+		return;
+	}
+	char *FileName = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(FileChooser));
+	gtk_widget_destroy(FileChooser);
+
+	GtkProgressBar *ProgressBar = GTK_PROGRESS_BAR(gtk_progress_bar_new());
+	gtk_progress_bar_set_show_text(ProgressBar, TRUE);
+	GtkWidget *InfoContainerArea = gtk_info_bar_get_content_area(GTK_INFO_BAR(Viewer->InfoBar));
+	gtk_container_add(GTK_CONTAINER(InfoContainerArea), GTK_WIDGET(ProgressBar));
+	gtk_info_bar_set_message_type(GTK_INFO_BAR(Viewer->InfoBar), GTK_MESSAGE_INFO);
+	gtk_widget_show(GTK_WIDGET(ProgressBar));
+	gtk_widget_show(Viewer->InfoBar);
+	FILE *File = fopen(FileName, "wb");
+	g_free(FileName);
+	field_t **Fields = Viewer->Fields;
+	node_t *Nodes = Viewer->Nodes;
+	int NumFields = Viewer->NumFields;
+	int NumNodes = Viewer->NumNodes;
+	csv_fwrite(File, "filename", strlen("filename"));
+	for (int I = 0; I < NumFields; ++I) {
+		fputc(',', File);
+		csv_fwrite(File, Fields[I]->Name, strlen(Fields[I]->Name));
+	}
+	fputc('\n', File);
+	char ProgressText[32];
+	for (int J = 0; J < NumNodes; ++J) {
+		csv_fwrite(File, Nodes[J].FileName, strlen(Nodes[J].FileName));
+		for (int I = 0; I < NumFields; ++I) {
+			fputc(',', File);
+			field_t *Field = Fields[I];
+			if (Field->EnumNames) {
+				const char *Value = Field->EnumNames[(int)Field->Values[J]];
+				csv_fwrite(File, Value, strlen(Value));
+			} else {
+				fprintf(File, "%f", Field->Values[J]);
+			}
+		}
+		fputc('\n', File);
+		if (J % 10000 == 0) {
+			sprintf(ProgressText, "%d / %d rows", J, NumNodes);
+			gtk_progress_bar_set_text(ProgressBar, ProgressText);
+			gtk_progress_bar_set_fraction(ProgressBar, (double)J / NumNodes);
+			while (gtk_events_pending()) gtk_main_iteration();
+		}
+	}
+	fclose(File);
+	sprintf(ProgressText, "%d / %d rows", NumNodes, NumNodes);
+	gtk_progress_bar_set_text(ProgressBar, ProgressText);
+	gtk_progress_bar_set_fraction(ProgressBar, 1.0);
+	while (gtk_events_pending()) gtk_main_iteration();
+	gtk_widget_destroy(GTK_WIDGET(ProgressBar));
+	gtk_widget_hide(Viewer->InfoBar);
+}
+
+typedef struct {
+	viewer_t *Viewer;
+	GtkProgressBar *ProgressBar;
+	field_t **Fields;
+	node_t *Nodes;
+	const char *ImagePrefix;
+	int NumNodes, Index, Row, ImagePrefixLength;
+} csv_node_loader_t;
+
+static void load_nodes_field_callback(void *Text, size_t Size, csv_node_loader_t *Loader) {
+	if (!Loader->Row) {
+		if (Loader->Index) {
+			char *FieldName = GC_malloc(Size + 1);
+			memcpy(FieldName, Text, Size);
+			FieldName[Size] = 0;
+			Loader->Fields[Loader->Index - 1]->Name = FieldName;
+		}
+	} else {
+		if (!Loader->Index) {
+			char *FileName, *FilePath;
+			FileName = GC_malloc(Size + 1);
+			memcpy(FileName, Text, Size);
+			FileName[Size] = 0;
+			if (Loader->ImagePrefixLength) {
+				int Length = Loader->ImagePrefixLength + Size;
+				FilePath = GC_malloc(Length + 1);
+				memcpy(stpcpy(FilePath, Loader->ImagePrefix), Text, Size);
+				FilePath[Length] = 0;
+			} else {
+				FilePath = FileName;
+			}
+			Loader->Nodes[Loader->Row - 1].FileName = FileName;
+			Loader->Nodes[Loader->Row - 1].File = g_file_new_for_path(FilePath);
+			if (FilePath != FileName) GC_free(FilePath);
+		} else {
+			int Index = Loader->Index - 1;
+			field_t *Field = Loader->Fields[Index];
+			double Value;
+			insert:
+			if (Field->EnumMap) {
+				if (Size) {
+					double *Ref = stringmap_search(Field->EnumMap, Text);
+					if (Ref) {
+						Value = *(double *)Ref;
+					} else {
+						Ref = new(double);
+						stringmap_insert(Field->EnumMap, GC_strdup(Text), Ref);
+						*(double *)Ref = Value = Field->EnumMap->Size;
+					}
+				} else {
+					Value = 0.0;
+				}
+			} else {
+				char *End;
+				Value = strtod(Text, &End);
+				if (End == Text) {
+					if (Loader->Row != 1) {
+						// TODO: Convert all previously loaded values to enums
+						fprintf(stderr, "Convert previous values into enums has not been done yet!");
+						exit(1);
+					}
+					Field->Range.Min = 0.0;
+					Field->EnumMap = new(stringmap_t);
+					goto insert;
+				}
+			}
+			Field->Values[Loader->Row - 1] = Value;
+			if (Field->Range.Min > Value) Field->Range.Min = Value;
+			if (Field->Range.Max < Value) Field->Range.Max = Value;
+			Field->Sum += Value;
+			Field->Sum2 += Value * Value;
+		}
+	}
+	++Loader->Index;
+}
+
+static void load_nodes_row_callback(int Char, csv_node_loader_t *Loader) {
+	Loader->Index = 0;
+	++Loader->Row;
+	if (Loader->Row % 10000 == 0) {
+		char ProgressText[32];
+		sprintf(ProgressText, "%d / %d rows", Loader->Row, Loader->NumNodes);
+		gtk_progress_bar_set_text(Loader->ProgressBar, ProgressText);
+		gtk_progress_bar_set_fraction(Loader->ProgressBar, (double)Loader->Row / (double)Loader->NumNodes);
+		while (gtk_events_pending()) gtk_main_iteration();
+	}
+}
+
+static void count_nodes_field_callback(void *Text, size_t Size, csv_node_loader_t *Loader) {
+	++Loader->Index;
+}
+
+static void count_nodes_row_callback(int Char, csv_node_loader_t *Loader) {
+	if (!Loader->Row) {
+		int NumValues = Loader->Viewer->NumFields = Loader->Index - 1;
+	}
+	Loader->Index = 0;
+	++Loader->Row;
+	if (Loader->Row % 10000 == 0) printf("Counted row %d\n", Loader->Row);
+}
+
+static void viewer_load_file(viewer_t *Viewer, const char *CsvFileName, const char *ImagePrefix) {
+	int ImagePrefixLength = ImagePrefix ? strlen(ImagePrefix) : 0;
+	csv_node_loader_t Loader[1] = {{Viewer, 0, 0, 0, ImagePrefix, 0, 0, 0, ImagePrefixLength}};
+	char Buffer[4096];
+	struct csv_parser Parser[1];
+
+	printf("Counting rows...\n");
+	FILE *File = fopen(CsvFileName, "r");
+	if (!File) {
+		fprintf(stderr, "Error reading from %s\n", CsvFileName);
+		exit(1);
+	}
+	csv_init(Parser, CSV_APPEND_NULL);
+	size_t Count = fread(Buffer, 1, 4096, File);
+	while (Count > 0) {
+		csv_parse(Parser, Buffer, Count, (void *)count_nodes_field_callback, (void *)count_nodes_row_callback, Loader);
+		Count = fread(Buffer, 1, 4096, File);
+	}
+	fclose(File);
+	csv_fini(Parser, (void *)count_nodes_field_callback, (void *)count_nodes_row_callback, Loader);
+	csv_free(Parser);
+
+	int NumNodes = Viewer->NumNodes = Loader->Row - 1;
+	int NumFields = Viewer->NumFields;
+	node_t *Nodes = Viewer->Nodes = (node_t *)GC_malloc(NumNodes * sizeof(node_t));
+	Viewer->Sorted = (node_t **)GC_malloc(NumNodes * sizeof(node_t *));
+	Viewer->SortedX = (node_t **)GC_malloc(NumNodes * sizeof(node_t *));
+	Viewer->SortedY = (node_t **)GC_malloc(NumNodes * sizeof(node_t *));
+	Viewer->SortBuffer = (node_t **)GC_malloc(NumNodes * sizeof(node_t *));
+	Viewer->NumFiltered = NumNodes;
+	memset(Nodes, 0, NumNodes * sizeof(node_t));
+	for (int I = 0; I < NumNodes; ++I) {
+		Nodes[I].Type = NodeT;
+		Nodes[I].Viewer = Viewer;
+		Nodes[I].Filtered = 1;
+		Viewer->SortedX[I] = &Nodes[I];
+		Viewer->SortedY[I] = &Nodes[I];
+	}
+	field_t **Fields = Viewer->Fields = (field_t **)GC_malloc(NumFields * sizeof(field_t *));
+	for (int I = 0; I < NumFields; ++I) {
+		field_t *Field = Fields[I] = (field_t *)GC_malloc(sizeof(field_t) + NumNodes * sizeof(double));
+		Field->Type = FieldT;
+		Field->EnumMap = 0;
+		Field->Range.Min = INFINITY;
+		Field->Range.Max = -INFINITY;
+		Field->PreviewColumn = 0;
+		Field->PreviewVisible = 1;
+		Field->FilterGeneration = 0;
+		Field->Sum = Field->Sum2 = 0.0;
+		Fields[I] = Field;
+	}
+#ifdef USE_GL
+	Viewer->GLVertices = (float *)GC_malloc_atomic(NumNodes * 3 * 3 * sizeof(float));
+	Viewer->GLColours = (float *)GC_malloc_atomic(NumNodes * 3 * 4 * sizeof(float));
+#endif
+	printf("Loading rows...\n");
+	fopen(CsvFileName, "r");
+	Loader->Nodes = Nodes;
+	Loader->Fields = Fields;
+	Loader->Row = Loader->Index = 0;
+	Loader->NumNodes = NumNodes;
+	Loader->ProgressBar = GTK_PROGRESS_BAR(gtk_progress_bar_new());
+	gtk_progress_bar_set_show_text(Loader->ProgressBar, TRUE);
+	GtkWidget *InfoContainerArea = gtk_info_bar_get_content_area(GTK_INFO_BAR(Viewer->InfoBar));
+	gtk_container_add(GTK_CONTAINER(InfoContainerArea), GTK_WIDGET(Loader->ProgressBar));
+	gtk_info_bar_set_message_type(GTK_INFO_BAR(Viewer->InfoBar), GTK_MESSAGE_INFO);
+	gtk_widget_show(GTK_WIDGET(Loader->ProgressBar));
+	gtk_widget_show(Viewer->InfoBar);
+	csv_init(Parser, CSV_APPEND_NULL);
+	Count = fread(Buffer, 1, 4096, File);
+	while (Count > 0) {
+		csv_parse(Parser, Buffer, Count, (void *)load_nodes_field_callback, (void *)load_nodes_row_callback, Loader);
+		Count = fread(Buffer, 1, 4096, File);
+	}
+	fclose(File);
+	csv_fini(Parser, (void *)load_nodes_field_callback, (void *)load_nodes_row_callback, Loader);
+	csv_free(Parser);
+	char ProgressText[32];
+	sprintf(ProgressText, "%d / %d rows", NumNodes, NumNodes);
+	gtk_progress_bar_set_text(Loader->ProgressBar, ProgressText);
+	gtk_progress_bar_set_fraction(Loader->ProgressBar, 1.0);
+	while (gtk_events_pending()) gtk_main_iteration();
+
+	for (int I = 0; I < NumFields; ++I) {
+		field_t *Field = Fields[I];
+		gtk_list_store_insert_with_values(Viewer->FieldsStore, 0, -1, 0, Field->Name, 1, I, 2, TRUE, -1);
+		stringmap_insert(Viewer->FieldsByName, Field->Name, Field);
+		if (Field->EnumMap) {
+			int EnumSize = Field->EnumSize = Field->EnumMap->Size + 1;
+			const char **EnumNames = (const char **)GC_malloc(EnumSize * sizeof(const char *));
+			EnumNames[0] = "";
+			stringmap_foreach(Field->EnumMap, EnumNames, (void *)set_enum_name_fn);
+			Field->EnumNames = EnumNames;
+			GtkListStore *EnumStore = Field->EnumStore = gtk_list_store_new(2, G_TYPE_STRING, G_TYPE_DOUBLE);
+			for (int J = 0; J < EnumSize; ++J) {
+				gtk_list_store_insert_with_values(Field->EnumStore, 0, -1, 0, Field->EnumNames[J], 1, (double)(J + 1), -1);
+			}
+			Field->EnumValues = (int *)GC_malloc_atomic(EnumSize * sizeof(int));
+		} else {
+			double Mean = Field->Sum / Viewer->NumNodes;
+			Field->SD = sqrt((Field->Sum2 / Viewer->NumNodes) - Mean * Mean);
+		}
+	}
+
+	gtk_combo_box_set_active(GTK_COMBO_BOX(Viewer->XComboBox), 0);
+	gtk_combo_box_set_active(GTK_COMBO_BOX(Viewer->YComboBox), 1);
+	gtk_combo_box_set_active(GTK_COMBO_BOX(Viewer->CComboBox), Viewer->NumFields - 1);
+
+	nodes_iter_t *NodesIter = new(nodes_iter_t);
+	NodesIter->Type = NodesT;
+	NodesIter->Nodes = Viewer->Nodes;
+	NodesIter->NumNodes = Viewer->NumNodes;
+	stringmap_insert(Viewer->Globals, "Nodes", (ml_value_t *)NodesIter);
+
+	fields_t *FieldsValue = new(fields_t);
+	FieldsValue->Type = FieldsT;
+	FieldsValue->Viewer = Viewer;
+	stringmap_insert(Viewer->Globals, "Fields", (ml_value_t *)FieldsValue);
+
+	gtk_widget_destroy(GTK_WIDGET(Loader->ProgressBar));
+	gtk_widget_hide(Viewer->InfoBar);
+}
+
+static void viewer_open_file(GtkWidget *Button, viewer_t *Viewer) {
+	GtkWidget *FileChooser = gtk_file_chooser_dialog_new(
+		"Open a CSV file",
+		GTK_WINDOW(Viewer->MainWindow),
+		GTK_FILE_CHOOSER_ACTION_OPEN,
+		"Cancel", GTK_RESPONSE_CANCEL,
+		"Open", GTK_RESPONSE_ACCEPT,
+		NULL
+	);
+	if (gtk_dialog_run(GTK_DIALOG(FileChooser)) != GTK_RESPONSE_ACCEPT) {
+		gtk_widget_destroy(FileChooser);
+		return;
+	}
+	char *FileName = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(FileChooser));
+	gtk_widget_destroy(FileChooser);
+	GtkWidget *Dialog = gtk_dialog_new_with_buttons(
+		"Set load options",
+		GTK_WINDOW(Viewer->MainWindow),
+		GTK_DIALOG_MODAL,
+		"Cancel", GTK_RESPONSE_CANCEL,
+		"Open", GTK_RESPONSE_ACCEPT,
+		NULL
+	);
+	GtkWidget *LoadOptions = gtk_grid_new();
+	gtk_grid_set_row_spacing(GTK_GRID(LoadOptions), 6);
+	gtk_grid_set_column_spacing(GTK_GRID(LoadOptions), 6);
+	GtkWidget *PrefixEntry = gtk_entry_new();
+	gtk_grid_attach(GTK_GRID(LoadOptions), gtk_label_new("Image Prefix"), 0, 0, 1, 1);
+	gtk_grid_attach(GTK_GRID(LoadOptions), PrefixEntry, 1, 0, 1, 1);
+	GtkContainer *ContentArea = GTK_CONTAINER(gtk_dialog_get_content_area(GTK_DIALOG(Dialog)));
+	gtk_container_set_border_width(ContentArea, 6);
+	gtk_box_pack_start(GTK_BOX(ContentArea), LoadOptions, TRUE, TRUE, 6);
+	gtk_widget_show_all(LoadOptions);
+	if (gtk_dialog_run(GTK_DIALOG(Dialog)) != GTK_RESPONSE_ACCEPT) {
+		gtk_widget_destroy(Dialog);
+		return;
+	}
+	const char *ImagePrefix = gtk_entry_get_text(GTK_ENTRY(PrefixEntry));
+	gtk_widget_destroy(Dialog);
+	while (gtk_events_pending()) gtk_main_iteration();
+	viewer_load_file(Viewer, FileName, ImagePrefix);
+}
+
 static GtkWidget *create_viewer_action_bar(viewer_t *Viewer) {
 	GtkActionBar *ActionBar = GTK_ACTION_BAR(gtk_action_bar_new());
-	//GtkToolItem *OpenCsvButton = gtk_tool_button_new(gtk_image_new_from_icon_name("gtk-open", GTK_ICON_SIZE_BUTTON), "Open");
+
+	GtkWidget *OpenCsvButton = gtk_button_new_with_label("Open");
+	gtk_button_set_image(GTK_BUTTON(OpenCsvButton), gtk_image_new_from_icon_name("document-open-symbolic", GTK_ICON_SIZE_BUTTON));
+	g_object_set(OpenCsvButton, "always-show-image", TRUE, NULL);
+	gtk_action_bar_pack_start(ActionBar, OpenCsvButton);
+	g_signal_connect(G_OBJECT(OpenCsvButton), "clicked", G_CALLBACK(viewer_open_file), Viewer);
+
 	GtkWidget *SaveCsvButton = gtk_button_new_with_label("Save");
 	gtk_button_set_image(GTK_BUTTON(SaveCsvButton), gtk_image_new_from_icon_name("document-save-as-symbolic", GTK_ICON_SIZE_BUTTON));
 	g_object_set(SaveCsvButton, "always-show-image", TRUE, NULL);
 	gtk_action_bar_pack_start(ActionBar, SaveCsvButton);
-
-	g_signal_connect(G_OBJECT(SaveCsvButton), "clicked", G_CALLBACK(save_csv), Viewer);
+	g_signal_connect(G_OBJECT(SaveCsvButton), "clicked", G_CALLBACK(viewer_save_file), Viewer);
 
 	GtkCellRenderer *FieldRenderer;
 	GtkWidget *XComboBox = Viewer->XComboBox = gtk_combo_box_new_with_model(GTK_TREE_MODEL(Viewer->FieldsStore));
@@ -2200,239 +2524,6 @@ static GtkWidget *create_viewer_action_bar(viewer_t *Viewer) {
 	return GTK_WIDGET(ActionBar);
 }
 
-static ml_value_t *viewer_global_get(viewer_t *Viewer, const char *Name) {
-	return stringmap_search(Viewer->Globals, Name) ?: MLNil;
-}
-
-typedef struct node_ref_t {
-	const ml_type_t *Type;
-	field_t *Field;
-	node_t *Node;
-} node_ref_t;
-
-static ml_value_t *node_ref_deref(node_ref_t *Ref) {
-	field_t *Field = Ref->Field;
-	double Value = Field->Values[Ref->Node - Ref->Node->Viewer->Nodes];
-	if (Field->EnumNames) {
-		if (Value) {
-			return ml_string(Field->EnumNames[(int)Value], -1);
-		} else {
-			return MLNil;
-		}
-	} else {
-		return ml_real(Value);
-	}
-}
-
-static ml_value_t *node_ref_assign(node_ref_t *Ref, ml_value_t *Value) {
-	field_t *Field = Ref->Field;
-	if (Field->EnumMap) {
-		int Index;
-		if (Value->Type == MLIntegerT) {
-			Index = ml_integer_value(Value);
-			if (Index < 0 || Index >= Field->EnumSize) return ml_error("RangeError", "enum index out of range");
-		} else if (Value->Type == MLRealT) {
-			Index = ml_real_value(Value);
-			if (Index < 0 || Index >= Field->EnumSize) return ml_error("RangeError", "enum index out of range");
-		} else if (Value->Type == MLStringT) {
-			double *Ref2 = stringmap_search(Field->EnumMap, ml_string_value(Value));
-			if (Ref2) {
-				Index = *(double *)Ref2;
-			} else {
-				return ml_error("RangeError", "enum name not found");
-			}
-		} else {
-			return ml_error("TypeError", "invalid value for assignment");
-		}
-		Field->Values[Ref->Node - Ref->Node->Viewer->Nodes] = Index;
-	} else {
-		double Value2;
-		if (Value->Type == MLIntegerT) {
-			Value2 = ml_integer_value(Value);
-		} else if (Value->Type == MLRealT) {
-			Value2 = ml_real_value(Value);
-		} else {
-			return ml_error("TypeError", "invalid value for assignment");
-		}
-		Field->Values[Ref->Node - Ref->Node->Viewer->Nodes] = Value2;
-		if (Value2 < Field->Range.Min) Field->Range.Min = Value2;
-		if (Value2 > Field->Range.Max) Field->Range.Max = Value2;
-	}
-	return Value;
-}
-
-static ml_type_t NodeRefT[1] = {{
-	MLTypeT,
-	MLAnyT, "node-ref",
-	ml_default_hash,
-	ml_default_call,
-	(void *)node_ref_deref,
-	(void *)node_ref_assign,
-	ml_default_iterate,
-	ml_default_current,
-	ml_default_next,
-	ml_default_key
-}};
-
-static ml_value_t *node_field_fn(void *Data, int Count, ml_value_t **Args) {
-	node_t *Node = (node_t *)Args[0];
-	const char *Name = ml_string_value(Args[1]);
-	viewer_t *Viewer = Node->Viewer;
-	field_t *Field = stringmap_search(Viewer->FieldsByName, Name);
-	if (!Field) return ml_error("FieldError", "no such field %s", Name);
-	node_ref_t *Ref = new(node_ref_t);
-	Ref->Type = NodeRefT;
-	Ref->Node = Node;
-	Ref->Field = Field;
-	return (ml_value_t *)Ref;
-}
-
-static ml_value_t *node_image_fn(void *Data, int Count, ml_value_t **Args) {
-	node_t *Node = (node_t *)Args[0];
-	return ml_string(Node->FileName, -1);
-}
-
-typedef struct nodes_iter_t {
-	const ml_type_t *Type;
-	node_t *Nodes;
-	int NumNodes;
-} nodes_iter_t;
-
-static ml_value_t *nodes_iter_current(ml_value_t *Ref) {
-	nodes_iter_t *Iter = (nodes_iter_t *)Ref;
-	return (ml_value_t *)Iter->Nodes;
-}
-
-static ml_value_t *nodes_iter_next(ml_value_t *Ref) {
-	nodes_iter_t *Iter = (nodes_iter_t *)Ref;
-	if (Iter->NumNodes) {
-		--Iter->NumNodes;
-		++Iter->Nodes;
-		return Ref;
-	} else {
-		return MLNil;
-	}
-}
-
-static ml_type_t NodesIterT[1] = {{
-	MLTypeT,
-	MLAnyT, "nodes-iter",
-	ml_default_hash,
-	ml_default_call,
-	ml_default_deref,
-	ml_default_assign,
-	ml_default_iterate,
-	nodes_iter_current,
-	nodes_iter_next,
-	ml_default_key
-}};
-
-static ml_value_t *nodes_iterate(ml_value_t *Value) {
-	nodes_iter_t *Nodes = (nodes_iter_t *)Value;
-	if (Nodes->NumNodes) {
-		nodes_iter_t *Iter = new(nodes_iter_t);
-		Iter->Type = NodesIterT;
-		Iter->Nodes = Nodes->Nodes;
-		Iter->NumNodes = Nodes->NumNodes - 1;
-		return (ml_value_t *)Iter;
-	} else {
-		return MLNil;
-	}
-}
-
-static ml_type_t NodesT[1] = {{
-	MLTypeT,
-	MLAnyT, "nodes",
-	ml_default_hash,
-	ml_default_call,
-	ml_default_deref,
-	ml_default_assign,
-	nodes_iterate,
-	ml_default_current,
-	ml_default_next,
-	ml_default_key
-}};
-
-typedef struct fields_t {
-	const ml_type_t *Type;
-	viewer_t *Viewer;
-} fields_t;
-
-static ml_value_t *fields_get_by_name(void *Data, int Count, ml_value_t **Args) {
-	viewer_t *Viewer = ((fields_t *)Args[0])->Viewer;
-	const char *Name = ml_string_value(Args[1]);
-	return (ml_value_t *)stringmap_search(Viewer->FieldsByName, Name) ?: MLNil;
-}
-
-static ml_type_t FieldsT[1] = {{
-	MLTypeT,
-	MLAnyT, "fields",
-	ml_default_hash,
-	ml_default_call,
-	ml_default_deref,
-	ml_default_assign,
-	ml_default_iterate,
-	ml_default_current,
-	ml_default_next,
-	ml_default_key
-}};
-
-static ml_value_t *field_name_fn(void *Data, int Count, ml_value_t **Args) {
-	field_t *Field = (field_t *)Args[0];
-	return ml_string(Field->Name, -1);
-}
-
-static ml_value_t *field_enum_value_fn(void *Data, int Count, ml_value_t **Args) {
-	field_t *Field = (field_t *)Args[0];
-	if (!Field->EnumMap) return ml_error("TypeError", "field is not an enum");
-	const char *Name = ml_string_value(Args[1]);
-	double *Ref = stringmap_search(Field->EnumMap, Name);
-	if (Ref) {
-		return ml_real(*Ref);
-	} else {
-		return ml_error("RangeError", "enum name not found");
-	}
-}
-
-static ml_value_t *field_enum_name_fn(void *Data, int Count, ml_value_t **Args) {
-	field_t *Field = (field_t *)Args[0];
-	if (!Field->EnumMap) return ml_error("TypeError", "field is not an enumeration");
-	int Value = ml_integer_value(Args[1]);
-	if (Value < 0 || Value >= Field->EnumSize) return ml_error("RangeError", "enum value out of range");
-	return ml_string(Field->EnumNames[Value], -1);
-}
-
-static ml_value_t *field_enum_size_fn(void *Data, int Count, ml_value_t **Args) {
-	field_t *Field = (field_t *)Args[0];
-	if (!Field->EnumMap) return ml_error("TypeError", "field is not an enumeration");
-	return ml_integer(Field->EnumSize);
-}
-
-static ml_value_t *field_range_min_fn(void *Data, int Count, ml_value_t **Args) {
-	field_t *Field = (field_t *)Args[0];
-	return ml_real(Field->Range.Min);
-}
-
-static ml_value_t *field_range_max_fn(void *Data, int Count, ml_value_t **Args) {
-	field_t *Field = (field_t *)Args[0];
-	return ml_real(Field->Range.Max);
-}
-
-static ml_value_t *clipboard_fn(viewer_t *Viewer, int Count, ml_value_t **Args) {
-	ml_value_t *AppendMethod = ml_method("append");
-	ML_CHECK_ARG_COUNT(1);
-	ml_stringbuffer_t Buffer[1] = {ML_STRINGBUFFER_INIT};
-	for (int I = 0; I < Count; ++I) {
-		ml_value_t *Result = ml_inline(AppendMethod, 2, Buffer, Args[I]);
-		if (Result->Type == MLErrorT) return Result;
-		if (Result != MLNil) ml_stringbuffer_add(Buffer, " ", 1);
-	}
-	int Length = Buffer->Length;
-	const char *Text = ml_stringbuffer_get(Buffer);
-	gtk_clipboard_set_text(Viewer->Clipboard, Text, Length);
-	return MLNil;
-}
-
 #ifdef __MINGW32__
 #define WIFEXITED(Status) (((Status) & 0x7f) == 0)
 #define WEXITSTATUS(Status) (((Status) & 0xff00) >> 8)
@@ -2480,8 +2571,6 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 #else
 	Viewer->CachedBackground = 0;
 #endif
-	Viewer->CacheHead = Viewer->CacheTail = 0;
-	Viewer->NumCached = 0;
 	Viewer->EditField = 0;
 	Viewer->Filters = 0;
 	Viewer->FilterGeneration = 1;
@@ -2526,6 +2615,10 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 
 	GtkWidget *ActionBar = create_viewer_action_bar(Viewer);
 	gtk_box_pack_start(GTK_BOX(MainVBox), ActionBar, FALSE, FALSE, 0);
+
+	Viewer->InfoBar = gtk_info_bar_new();
+	gtk_widget_set_no_show_all(Viewer->InfoBar, TRUE);
+	gtk_box_pack_start(GTK_BOX(MainVBox), Viewer->InfoBar, FALSE, FALSE, 0);
 
 	Viewer->MainVPaned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
 	gtk_box_pack_start(GTK_BOX(MainVBox), Viewer->MainVPaned, TRUE, TRUE, 0);
@@ -2582,30 +2675,15 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 		}
 	}
 
-	if (!CsvFileName) {
-		puts("Missing CSV file name");
-		exit(1);
-	}
-	viewer_open_file(Viewer, CsvFileName, ImagePrefix);
-
-	nodes_iter_t *NodesIter = new(nodes_iter_t);
-	NodesIter->Type = NodesT;
-	NodesIter->Nodes = Viewer->Nodes;
-	NodesIter->NumNodes = Viewer->NumNodes;
-	stringmap_insert(Viewer->Globals, "Nodes", (ml_value_t *)NodesIter);
-
-	fields_t *Fields = new(fields_t);
-	Fields->Type = FieldsT;
-	Fields->Viewer = Viewer;
-	stringmap_insert(Viewer->Globals, "Fields", (ml_value_t *)Fields);
-
 	gtk_window_resize(GTK_WINDOW(Viewer->MainWindow), 640, 480);
 	gtk_paned_set_position(GTK_PANED(Viewer->MainVPaned), 320);
 	gtk_widget_show_all(Viewer->MainWindow);
 
-	gtk_combo_box_set_active(GTK_COMBO_BOX(Viewer->XComboBox), 0);
-	gtk_combo_box_set_active(GTK_COMBO_BOX(Viewer->YComboBox), 1);
-	gtk_combo_box_set_active(GTK_COMBO_BOX(Viewer->CComboBox), Viewer->NumFields - 1);
+	if (CsvFileName) {
+		while (gtk_events_pending()) gtk_main_iteration();
+		viewer_load_file(Viewer, CsvFileName, ImagePrefix);
+	}
+
 	return Viewer;
 }
 
