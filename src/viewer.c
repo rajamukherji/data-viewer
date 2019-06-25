@@ -2257,6 +2257,10 @@ static void count_nodes_row_callback(int Char, csv_node_loader_t *Loader) {
 }
 
 static void viewer_load_file(viewer_t *Viewer, const char *CsvFileName, const char *ImagePrefix) {
+	char *Path = g_path_get_dirname(CsvFileName);
+	chdir(Path);
+	g_free(Path);
+
 	int ImagePrefixLength = ImagePrefix ? strlen(ImagePrefix) : 0;
 	csv_node_loader_t Loader[1] = {{Viewer, 0, 0, 0, ImagePrefix, 0, 0, 0, ImagePrefixLength}};
 	char Buffer[4096];
