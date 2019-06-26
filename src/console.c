@@ -203,6 +203,16 @@ ml_value_t *console_print(console_t *Console, int Count, ml_value_t **Args) {
 	return MLNil;
 }
 
+void console_printf(console_t *Console, const char *Format, ...) {
+	char *Buffer;
+	va_list Args;
+	va_start(Args, Format);
+	int Length = vasprintf(&Buffer, Format, Args);
+	va_end(Args);
+	console_append(Console, Buffer, Length);
+	free(Buffer);
+}
+
 extern GResource *resources_get_resource(void);
 
 static char *get_resources_path() {

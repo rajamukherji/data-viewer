@@ -191,9 +191,9 @@ static void foreach_node_tree_x(node_foreach_t *Foreach, node_t *Node) {
 
 static inline void foreach_node(viewer_t *Viewer, double X1, double Y1, double X2, double Y2, void *Data, node_callback_t *Callback) {
 	node_foreach_t Foreach = {Data, Callback, X1, Y1, X2, Y2};
-	clock_t Start = clock();
+	//clock_t Start = clock();
 	if (Viewer->Root) foreach_node_tree_x(&Foreach, Viewer->Root);
-	printf("foreach_node:%d @ %lu\n", __LINE__, clock() - Start);
+	//printf("foreach_node:%d @ %lu\n", __LINE__, clock() - Start);
 }
 
 static void merge_sort_x(node_t **Start, node_t **End, node_t **Buffer) {
@@ -396,7 +396,7 @@ static void split_node_list_y(node_t *Root, node_t *HeadX, node_t *HeadY1, int C
 }
 
 static void update_node_tree(viewer_t *Viewer) {
-	clock_t Start = clock();
+	//clock_t Start = clock();
 	if (Viewer->NumFiltered == 0) {
 		Viewer->Root = 0;
 	} else if (Viewer->NumFiltered == 1) {
@@ -432,7 +432,7 @@ static void update_node_tree(viewer_t *Viewer) {
 		split_node_list_x(Root, HeadX, HeadY, Count1, Viewer->NumFiltered - Count1 - 1);
 		Viewer->Root = Root;
 	}
-	printf("update_node_tree took %lu\n", clock() - Start);
+	//printf("update_node_tree took %lu\n", clock() - Start);
 }
 
 static node_t *merge_sort_list_x(node_t *Start, node_t *End) {
@@ -551,7 +551,7 @@ static ml_value_t *node_ref_assign(node_ref_t *Ref, ml_value_t *Value) {
 			if (Ref2) {
 				Index = *(double *)Ref2;
 			} else {
-				return ml_error("RangeError", "enum name not found");
+				return ml_error("ValueError", "enum name not found");
 			}
 		} else {
 			return ml_error("TypeError", "invalid value for assignment");
@@ -736,7 +736,7 @@ static ml_value_t *field_enum_value_fn(void *Data, int Count, ml_value_t **Args)
 	if (Ref) {
 		return ml_real(*Ref);
 	} else {
-		return ml_error("RangeError", "enum name not found");
+		return ml_error("ValueError", "enum name not found");
 	}
 }
 
@@ -1100,11 +1100,11 @@ static void update_preview(viewer_t *Viewer) {
 	if (Viewer->ImagesStore) {
 		++Viewer->LoadGeneration;
 		gtk_list_store_clear(Viewer->ImagesStore);
-		printf("\n\n%s:%d\n", __FUNCTION__, __LINE__);
+		//printf("\n\n%s:%d\n", __FUNCTION__, __LINE__);
 		foreach_node(Viewer, X1, Y1, X2, Y2, Viewer, (node_callback_t *)draw_node_image);
 	} else if (Viewer->ValuesStore) {
 		gtk_list_store_clear(Viewer->ValuesStore);
-		printf("\n\n%s:%d\n", __FUNCTION__, __LINE__);
+		//printf("\n\n%s:%d\n", __FUNCTION__, __LINE__);
 		foreach_node(Viewer, X1, Y1, X2, Y2, Viewer, (node_callback_t *)draw_node_value);
 	}
 	char NumVisibleText[64];
@@ -1199,11 +1199,11 @@ static inline int redraw_point(viewer_t *Viewer, node_t *Node) {
 static void redraw_viewer_background(viewer_t *Viewer) {
 #ifdef USE_GL
 	Viewer->GLCount = 0;
-	clock_t Start = clock();
+	//clock_t Start = clock();
 	printf("\n\n%s:%d\n", __FUNCTION__, __LINE__);
 	foreach_node(Viewer, Viewer->Min.X, Viewer->Min.Y, Viewer->Max.X, Viewer->Max.Y, Viewer, (node_callback_t *)redraw_point);
-	printf("foreach_node took %d\n", clock() - Start);
-	printf("rendered %d points\n", Viewer->GLCount);
+	//printf("foreach_node took %d\n", clock() - Start);
+	//printf("rendered %d points\n", Viewer->GLCount);
 	if (Viewer->GLReady) {
 		gtk_gl_area_make_current(GTK_GL_AREA(Viewer->DrawingArea));
 		glBindBuffer(GL_ARRAY_BUFFER, Viewer->GLBuffers[0]);
@@ -1427,10 +1427,10 @@ static void redraw_viewer(GtkWidget *Widget, cairo_t *Cairo, viewer_t *Viewer) {
 		cairo_rectangle(Cairo, 0.0, 0.0, Width, Height);
 		cairo_fill(Cairo);
 		Viewer->Cairo = Cairo;
-		clock_t Start = clock();
-		printf("\n\n%s:%d\n", __FUNCTION__, __LINE__);
+		//clock_t Start = clock();
+		//printf("\n\n%s:%d\n", __FUNCTION__, __LINE__);
 		foreach_node(Viewer, Viewer->Min.X, Viewer->Min.Y, Viewer->Max.X, Viewer->Max.Y, Viewer, (node_callback_t *)redraw_point);
-		printf("foreach_node took %lu\n", clock() - Start);
+		//printf("foreach_node took %lu\n", clock() - Start);
 		Viewer->Cairo = 0;
 		cairo_destroy(Cairo);
 	}
@@ -1883,12 +1883,12 @@ static void viewer_filter_nodes(viewer_t *Viewer) {
 	gtk_widget_queue_draw(Viewer->DrawingArea);
 }
 
-static void filter_enum_value_changed(GtkComboBox *Widget, filter_t *Filter) {
+static void filter_enum_value_changed_ui(GtkComboBox *Widget, filter_t *Filter) {
 	Filter->Value = gtk_combo_box_get_active(Widget);
 	viewer_filter_nodes(Filter->Viewer);
 }
 
-static void filter_enum_entry_changed(GtkEntry *Widget, filter_t *Filter) {
+static void filter_enum_entry_changed_ui(GtkEntry *Widget, filter_t *Filter) {
 	double *Ref = stringmap_search(Filter->Field->EnumMap, gtk_entry_get_text(GTK_ENTRY(Widget)));
 	if (Ref) {
 		Filter->Value = *(double *)Ref;
@@ -1896,14 +1896,12 @@ static void filter_enum_entry_changed(GtkEntry *Widget, filter_t *Filter) {
 	}
 }
 
-static void filter_real_value_changed(GtkSpinButton *Widget, filter_t *Filter) {
+static void filter_real_value_changed_ui(GtkSpinButton *Widget, filter_t *Filter) {
 	Filter->Value = gtk_spin_button_get_value(Widget);
 	viewer_filter_nodes(Filter->Viewer);
 }
 
-static void filter_field_changed(GtkComboBox *Widget, filter_t *Filter) {
-	viewer_t *Viewer = Filter->Viewer;
-	field_t *Field = Filter->Field = Viewer->Fields[gtk_combo_box_get_active(GTK_COMBO_BOX(Widget))];
+static void filter_field_change(filter_t *Filter, field_t *Field) {
 	if (Filter->ValueWidget) gtk_widget_destroy(Filter->ValueWidget);
 	if (Field->EnumStore) {
 		if (Field->EnumSize < 100) {
@@ -1911,24 +1909,30 @@ static void filter_field_changed(GtkComboBox *Widget, filter_t *Filter) {
 			GtkCellRenderer *FieldRenderer = gtk_cell_renderer_text_new();
 			gtk_cell_layout_pack_end(GTK_CELL_LAYOUT(ValueComboBox), FieldRenderer, TRUE);
 			gtk_cell_layout_add_attribute(GTK_CELL_LAYOUT(ValueComboBox), FieldRenderer, "text", 0);
-			g_signal_connect(G_OBJECT(ValueComboBox), "changed", G_CALLBACK(filter_enum_value_changed), Filter);
+			g_signal_connect(G_OBJECT(ValueComboBox), "changed", G_CALLBACK(filter_enum_value_changed_ui), Filter);
 		} else {
 			GtkWidget *ValueEntry = Filter->ValueWidget = gtk_entry_new();
 			GtkEntryCompletion *EntryCompletion = gtk_entry_completion_new();
 			gtk_entry_completion_set_model(EntryCompletion, GTK_TREE_MODEL(Field->EnumStore));
 			gtk_entry_completion_set_text_column(EntryCompletion, 0);
 			gtk_entry_set_completion(GTK_ENTRY(ValueEntry), EntryCompletion);
-			g_signal_connect(G_OBJECT(ValueEntry), "changed", G_CALLBACK(filter_enum_entry_changed), Filter);
+			g_signal_connect(G_OBJECT(ValueEntry), "changed", G_CALLBACK(filter_enum_entry_changed_ui), Filter);
 		}
 	} else {
 		GtkWidget *ValueSpinButton = Filter->ValueWidget = gtk_spin_button_new_with_range(Field->Range.Min, Field->Range.Max, (Field->Range.Max - Field->Range.Min) / 20.0);
-		g_signal_connect(G_OBJECT(ValueSpinButton), "value-changed", G_CALLBACK(filter_real_value_changed), Filter);
+		g_signal_connect(G_OBJECT(ValueSpinButton), "value-changed", G_CALLBACK(filter_real_value_changed_ui), Filter);
 	}
 	gtk_box_pack_start(GTK_BOX(Filter->Widget), Filter->ValueWidget, FALSE, FALSE, 4);
 	gtk_widget_show_all(Filter->Widget);
 }
 
-static void filter_operator_changed(GtkComboBox *Widget, filter_t *Filter) {
+static void filter_field_changed_ui(GtkComboBox *Widget, filter_t *Filter) {
+	viewer_t *Viewer = Filter->Viewer;
+	field_t *Field = Filter->Field = Viewer->Fields[gtk_combo_box_get_active(GTK_COMBO_BOX(Widget))];
+	filter_field_change(Filter, Field);
+}
+
+static void filter_operator_changed_ui(GtkComboBox *Widget, filter_t *Filter) {
 	switch (gtk_combo_box_get_active(Widget)) {
 	case 0: Filter->Operator = filter_operator_equal; break;
 	case 1: Filter->Operator = filter_operator_not_equal; break;
@@ -1941,7 +1945,7 @@ static void filter_operator_changed(GtkComboBox *Widget, filter_t *Filter) {
 	viewer_filter_nodes(Filter->Viewer);
 }
 
-static void filter_remove(GtkWidget *Button, filter_t *Filter) {
+static void filter_remove_ui(GtkWidget *Button, filter_t *Filter) {
 	viewer_t *Viewer = Filter->Viewer;
 	filter_t **Slot = &Viewer->Filters;
 	while (Slot[0] != Filter) Slot = &Slot[0]->Next;
@@ -1950,7 +1954,7 @@ static void filter_remove(GtkWidget *Button, filter_t *Filter) {
 	viewer_filter_nodes(Viewer);
 }
 
-static void filter_create(GtkButton *Widget, viewer_t *Viewer) {
+static filter_t *filter_create(viewer_t *Viewer, field_t *Field, int Operator) {
 	filter_t *Filter = new(filter_t);
 	Filter->Viewer = Viewer;
 	GtkWidget *FilterBox = Filter->Widget = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
@@ -1975,15 +1979,100 @@ static void filter_create(GtkButton *Widget, viewer_t *Viewer) {
 	gtk_cell_layout_add_attribute(GTK_CELL_LAYOUT(OperatorComboBox), FieldRenderer, "text", 0);
 	gtk_box_pack_start(GTK_BOX(FilterBox), OperatorComboBox, FALSE, FALSE, 4);
 
-	g_signal_connect(G_OBJECT(RemoveButton), "clicked", G_CALLBACK(filter_remove), Filter);
-	g_signal_connect(G_OBJECT(FieldComboBox), "changed", G_CALLBACK(filter_field_changed), Filter);
-	g_signal_connect(G_OBJECT(OperatorComboBox), "changed", G_CALLBACK(filter_operator_changed), Filter);
+	g_signal_connect(G_OBJECT(RemoveButton), "clicked", G_CALLBACK(filter_remove_ui), Filter);
+	g_signal_connect(G_OBJECT(FieldComboBox), "changed", G_CALLBACK(filter_field_changed_ui), Filter);
+	g_signal_connect(G_OBJECT(OperatorComboBox), "changed", G_CALLBACK(filter_operator_changed_ui), Filter);
 
 	gtk_box_pack_start(GTK_BOX(Viewer->FiltersBox), FilterBox, FALSE, FALSE, 6);
 	gtk_widget_show_all(FilterBox);
 
 	Filter->Next = Viewer->Filters;
 	Viewer->Filters = Filter;
+
+	if (Field) for (int Index = 0; Index < Viewer->NumFields; ++Index) {
+		if (Viewer->Fields[Index] == Field) {
+			gtk_combo_box_set_active(GTK_COMBO_BOX(FieldComboBox), Index);
+			break;
+		}
+	}
+
+	if (Operator >= 0) gtk_combo_box_set_active(GTK_COMBO_BOX(OperatorComboBox), Operator);
+	return Filter;
+}
+
+static void filter_create_ui(GtkButton *Widget, viewer_t *Viewer) {
+	filter_create(Viewer, 0, -1);
+}
+
+static ml_value_t *EqualMethod = 0;
+static ml_value_t *NotEqualMethod = 0;
+static ml_value_t *LessMethod = 0;
+static ml_value_t *GreaterMethod = 0;
+static ml_value_t *LessOrEqualMethod = 0;
+static ml_value_t *GreaterOrEqualMethod = 0;
+
+static ml_value_t *filter_fn(viewer_t *Viewer, int Count, ml_value_t **Args) {
+	ML_CHECK_ARG_COUNT(3);
+	ML_CHECK_ARG_TYPE(0, FieldT);
+	ML_CHECK_ARG_TYPE(1, MLMethodT);
+	field_t *Field = (field_t *)Args[0];
+	int Operator = -1;
+	if (Args[1] == EqualMethod) {
+		Operator = 0;
+	} else if (Args[1] == NotEqualMethod) {
+		Operator = 1;
+	} else if (Args[1] == LessMethod) {
+		Operator = 2;
+	} else if (Args[1] == GreaterMethod) {
+		Operator = 3;
+	} else if (Args[1] == LessOrEqualMethod) {
+		Operator = 4;
+	} else if (Args[1] == GreaterOrEqualMethod) {
+		Operator = 5;
+	} else {
+		return ml_error("ValueError", "Unknown operator %s", ml_method_name(Args[1]));
+	}
+	filter_t *Filter = filter_create(Viewer, Field, Operator);
+	ml_value_t *Value = Args[2];
+	if (Field->EnumMap) {
+		int Index;
+		if (Value->Type == MLIntegerT) {
+			Index = ml_integer_value(Value);
+			if (Index < 0 || Index >= Field->EnumSize) return ml_error("RangeError", "enum index out of range");
+		} else if (Value->Type == MLRealT) {
+			Index = ml_real_value(Value);
+			if (Index < 0 || Index >= Field->EnumSize) return ml_error("RangeError", "enum index out of range");
+		} else if (Value->Type == MLStringT) {
+			double *Ref2 = stringmap_search(Field->EnumMap, ml_string_value(Value));
+			if (Ref2) {
+				Index = *(double *)Ref2;
+			} else {
+				return ml_error("ValueError", "enum name not found");
+			}
+		} else {
+			return ml_error("TypeError", "invalid value for filter");
+		}
+		//Filter->Value = Index;
+		if (GTK_IS_ENTRY(Filter->ValueWidget)) {
+			gtk_entry_set_text(GTK_ENTRY(Filter->ValueWidget), Field->EnumNames[Index]);
+		} else if (GTK_IS_COMBO_BOX(Filter->ValueWidget)) {
+			gtk_combo_box_set_active(GTK_COMBO_BOX(Filter->ValueWidget), Index);
+		}
+	} else {
+		double Value2;
+		if (Value->Type == MLIntegerT) {
+			Value2 = ml_integer_value(Value);
+		} else if (Value->Type == MLRealT) {
+			Value2 = ml_real_value(Value);
+		} else {
+			return ml_error("TypeError", "invalid value for filter");
+		}
+		//Filter->Value = Value2;
+		if (GTK_IS_SPIN_BUTTON(Filter->ValueWidget)) {
+			gtk_spin_button_set_value(GTK_SPIN_BUTTON(Filter->ValueWidget), Value2);
+		}
+	}
+	return MLNil;
 }
 
 static gboolean hide_filter_window(GtkWidget *Widget, GdkEvent *Event, viewer_t *Viewer) {
@@ -2010,7 +2099,7 @@ static void create_filter_window(viewer_t *Viewer) {
 	gtk_button_set_image(GTK_BUTTON(CreateButton), gtk_image_new_from_icon_name("list-add-symbolic", GTK_ICON_SIZE_BUTTON));
 	gtk_box_pack_start(GTK_BOX(FiltersBox), CreateButton, FALSE, FALSE, 6);
 
-	g_signal_connect(G_OBJECT(CreateButton), "clicked", G_CALLBACK(filter_create), Viewer);
+	g_signal_connect(G_OBJECT(CreateButton), "clicked", G_CALLBACK(filter_create_ui), Viewer);
 
 	g_signal_connect(G_OBJECT(Window), "delete-event", G_CALLBACK(hide_filter_window), Viewer);
 }
@@ -2300,7 +2389,7 @@ static void viewer_load_file(viewer_t *Viewer, const char *CsvFileName, const ch
 	char Buffer[4096];
 	struct csv_parser Parser[1];
 
-	printf("Counting rows...\n");
+	console_printf(Viewer->Console, "Counting rows...\n");
 	FILE *File = fopen(CsvFileName, "r");
 	if (!File) {
 		fprintf(stderr, "Error reading from %s\n", CsvFileName);
@@ -2349,7 +2438,7 @@ static void viewer_load_file(viewer_t *Viewer, const char *CsvFileName, const ch
 	Viewer->GLVertices = (float *)GC_malloc_atomic(NumNodes * 3 * 3 * sizeof(float));
 	Viewer->GLColours = (float *)GC_malloc_atomic(NumNodes * 3 * 4 * sizeof(float));
 #endif
-	printf("Loading rows...\n");
+	console_printf(Viewer->Console, "Loading rows...\n");
 	fopen(CsvFileName, "r");
 	Loader->Nodes = Nodes;
 	Loader->Fields = Fields;
@@ -2607,7 +2696,7 @@ static ml_value_t *execute_fn(void *Data, int Count, ml_value_t **Args) {
 		if (Result != MLNil) ml_stringbuffer_add(Buffer, " ", 1);
 	}
 	const char *Command = ml_stringbuffer_get(Buffer);
-	clock_t Start = clock();
+	//clock_t Start = clock();
 	FILE *File = popen(Command, "r");
 	char Chars[ML_STRINGBUFFER_NODE_SIZE];
 	while (!feof(File)) {
@@ -2616,7 +2705,7 @@ static ml_value_t *execute_fn(void *Data, int Count, ml_value_t **Args) {
 		if (Size > 0) ml_stringbuffer_add(Buffer, Chars, Size);
 	}
 	int Result = pclose(File);
-	clock_t End = clock();
+	//clock_t End = clock();
 	if (WIFEXITED(Result)) {
 		if (WEXITSTATUS(Result) != 0) {
 			return ml_error("ExecuteError", "process returned non-zero exit code");
@@ -2669,6 +2758,7 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 	stringmap_insert(Viewer->Globals, "clipboard", ml_function(Viewer, (void *)clipboard_fn));
 	stringmap_insert(Viewer->Globals, "execute", ml_function(Viewer, (void *)execute_fn));
 	stringmap_insert(Viewer->Globals, "open", ml_function(Viewer, ml_file_open));
+	stringmap_insert(Viewer->Globals, "filter", ml_function(Viewer, (void *)filter_fn));
 
 	GtkWidget *MainWindow = Viewer->MainWindow = gtk_window_new(GTK_WINDOW_TOPLEVEL);
 	gtk_window_set_title(GTK_WINDOW(Viewer->MainWindow), "DataViewer");
@@ -2761,6 +2851,12 @@ int main(int Argc, char *Argv[]) {
 	gtk_init(&Argc, &Argv);
 	ml_init();
 	ml_file_init();
+	EqualMethod = ml_method("=");
+	NotEqualMethod = ml_method("!=");
+	LessMethod = ml_method("<");
+	GreaterMethod = ml_method(">");
+	LessOrEqualMethod = ml_method("<=");
+	GreaterOrEqualMethod = ml_method(">=");
 	NodeT = ml_type(MLAnyT, "node");
 	ml_method_by_name("[]", 0, node_field_fn, NodeT, MLStringT, NULL);
 	ml_method_by_name("image", 0, node_image_fn, NodeT, NULL);
