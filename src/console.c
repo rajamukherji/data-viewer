@@ -192,6 +192,7 @@ void console_append(console_t *Console, const char *Buffer, int Length) {
 	GtkTextBuffer *LogBuffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(Console->LogView));
 	gtk_text_buffer_get_end_iter(LogBuffer, End);
 	gtk_text_buffer_insert(LogBuffer, End, Buffer, Length);
+	while (gtk_events_pending()) gtk_main_iteration();
 }
 
 ml_value_t *console_print(console_t *Console, int Count, ml_value_t **Args) {
@@ -208,6 +209,7 @@ ml_value_t *console_print(console_t *Console, int Count, ml_value_t **Args) {
 		}
 		gtk_text_buffer_insert_with_tags(LogBuffer, End, ml_string_value(Result), ml_string_length(Result), Console->OutputTag, NULL);
 	}
+	while (gtk_events_pending()) gtk_main_iteration();
 	return MLNil;
 }
 
