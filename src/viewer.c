@@ -2686,7 +2686,7 @@ static GtkWidget *create_viewer_action_bar(viewer_t *Viewer) {
 #define WEXITSTATUS(Status) (((Status) & 0xff00) >> 8)
 #endif
 
-static ml_value_t *execute_fn(void *Data, int Count, ml_value_t **Args) {
+static ml_value_t *shell_fn(void *Data, int Count, ml_value_t **Args) {
 	ml_value_t *AppendMethod = ml_method("append");
 	ML_CHECK_ARG_COUNT(1);
 	ml_stringbuffer_t Buffer[1] = {ML_STRINGBUFFER_INIT};
@@ -2710,9 +2710,38 @@ static ml_value_t *execute_fn(void *Data, int Count, ml_value_t **Args) {
 		if (WEXITSTATUS(Result) != 0) {
 			return ml_error("ExecuteError", "process returned non-zero exit code");
 		} else {
-			size_t Length = Buffer->Length;
-			ml_value_t *Result = ml_string(ml_stringbuffer_get(Buffer), Length);
-			return Result;
+			return ml_stringbuffer_get_string(Buffer);
+		}
+	} else {
+		return ml_error("ExecuteError", "process exited abnormally");
+	}
+}
+
+static ml_value_t *execute_fn(viewer_t *Viewer, int Count, ml_value_t **Args) {
+	ml_value_t *AppendMethod = ml_method("append");
+	ML_CHECK_ARG_COUNT(1);
+	ml_stringbuffer_t Buffer[1] = {ML_STRINGBUFFER_INIT};
+	for (int I = 0; I < Count; ++I) {
+		ml_value_t *Result = ml_inline(AppendMethod, 2, Buffer, Args[I]);
+		if (Result->Type == MLErrorT) return Result;
+		if (Result != MLNil) ml_stringbuffer_add(Buffer, " ", 1);
+	}
+	const char *Command = ml_stringbuffer_get(Buffer);
+	//clock_t Start = clock();
+	FILE *File = popen(Command, "r");
+	char Chars[ML_STRINGBUFFER_NODE_SIZE];
+	while (!feof(File)) {
+		ssize_t Size = fread(Chars, 1, ML_STRINGBUFFER_NODE_SIZE, File);
+		if (Size == -1) break;
+		console_append(Viewer->Console, Chars, Size);
+	}
+	int Result = pclose(File);
+	//clock_t End = clock();
+	if (WIFEXITED(Result)) {
+		if (WEXITSTATUS(Result) != 0) {
+			return ml_error("ExecuteError", "process returned non-zero exit code");
+		} else {
+			return MLNil;
 		}
 	} else {
 		return ml_error("ExecuteError", "process exited abnormally");
@@ -2757,6 +2786,7 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 	stringmap_insert(Viewer->Globals, "print", ml_function(Viewer->Console, (void *)console_print));
 	stringmap_insert(Viewer->Globals, "clipboard", ml_function(Viewer, (void *)clipboard_fn));
 	stringmap_insert(Viewer->Globals, "execute", ml_function(Viewer, (void *)execute_fn));
+	stringmap_insert(Viewer->Globals, "shell", ml_function(Viewer, (void *)shell_fn));
 	stringmap_insert(Viewer->Globals, "open", ml_function(Viewer, ml_file_open));
 	stringmap_insert(Viewer->Globals, "filter", ml_function(Viewer, (void *)filter_fn));
 
