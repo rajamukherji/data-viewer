@@ -132,6 +132,14 @@ static void console_submit(GtkWidget *Button, console_t *Console) {
 	gtk_widget_grab_focus(Console->InputView);
 }
 
+static void console_clear(GtkWidget *Button, console_t *Console) {
+	GtkTextBuffer *LogBuffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(Console->LogView));
+	GtkTextIter Start[1], End[1];
+	gtk_text_buffer_get_start_iter(LogBuffer, Start);
+	gtk_text_buffer_get_end_iter(LogBuffer, End);
+	gtk_text_buffer_delete(LogBuffer, Start, End);
+}
+
 static gboolean console_keypress(GtkWidget *Widget, GdkEventKey *Event, console_t *Console) {
 	switch (Event->keyval) {
 	case GDK_KEY_Return: {
@@ -381,16 +389,21 @@ console_t *console_new(ml_getter_t GlobalGet, void *Globals) {
 	GtkWidget *InputPanel = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
 	GtkWidget *SubmitButton = gtk_button_new();
 	gtk_button_set_image(GTK_BUTTON(SubmitButton), gtk_image_new_from_icon_name("go-jump-symbolic", GTK_ICON_SIZE_BUTTON));
+	GtkWidget *ClearButton = gtk_button_new();
+	gtk_button_set_image(GTK_BUTTON(ClearButton), gtk_image_new_from_icon_name("edit-delete-symbolic", GTK_ICON_SIZE_BUTTON));
 	Console->LogScrolled = gtk_scrolled_window_new(NULL, NULL);
 	gtk_container_add(GTK_CONTAINER(Console->LogScrolled), Console->LogView);
 	gtk_box_pack_start(GTK_BOX(InputPanel), Console->InputView, TRUE, TRUE, 2);
 	gtk_box_pack_start(GTK_BOX(InputPanel), SubmitButton, FALSE, FALSE, 2);
+	gtk_box_pack_start(GTK_BOX(InputPanel), ClearButton, FALSE, FALSE, 2);
+
 	gtk_box_pack_start(GTK_BOX(Container), Console->LogScrolled, TRUE, TRUE, 2);
 	GtkWidget *InputFrame = gtk_frame_new(NULL);
 	gtk_container_add(GTK_CONTAINER(InputFrame), InputPanel);
 	gtk_box_pack_start(GTK_BOX(Container), InputFrame, FALSE, TRUE, 2);
 	g_signal_connect(G_OBJECT(Console->InputView), "key-press-event", G_CALLBACK(console_keypress), Console);
 	g_signal_connect(G_OBJECT(SubmitButton), "clicked", G_CALLBACK(console_submit), Console);
+	g_signal_connect(G_OBJECT(ClearButton), "clicked", G_CALLBACK(console_clear), Console);
 	Console->Window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
 	gtk_container_add(GTK_CONTAINER(Console->Window), Container);
 	gtk_window_set_default_size(GTK_WINDOW(Console->Window), 640, 480);

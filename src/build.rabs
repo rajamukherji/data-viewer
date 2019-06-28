@@ -49,6 +49,7 @@ var Objects := [
 	file("viewer.o"),
 	file("console.o"),
 	file("resources.o"),
+	file("ml_csv.o"),
 	file("libcsv.o"),
 	file("minilang/minilang.o"),
 	file("minilang/ml_compiler.o"),

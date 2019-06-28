@@ -12,6 +12,7 @@
 #include <ml_file.h>
 #include <ml_object.h>
 #include "console.h"
+#include "ml_csv.h"
 #include <stringmap.h>
 
 #ifdef USE_GL
@@ -2772,6 +2773,7 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 	Viewer->PreviewWidget = 0;
 
 	ml_object_init(Viewer->Globals, (ml_setter_t)stringmap_insert);
+	ml_csv_init(Viewer->Globals);
 	stringmap_insert(Viewer->Globals, "activate", ml_reference(&Viewer->ActivationFn));
 	stringmap_insert(Viewer->Globals, "hotkey0", ml_reference(&Viewer->HotkeyFns[0]));
 	stringmap_insert(Viewer->Globals, "hotkey1", ml_reference(&Viewer->HotkeyFns[1]));
