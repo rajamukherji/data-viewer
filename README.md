@@ -4,6 +4,7 @@
 
 * *gtk+-3.0*
 * *gdk-pixbuf-2.0*
+* *gtksourceview-4*
 
 ## Building
 
@@ -18,7 +19,7 @@ $ ./rabs/rabs -c -s -p4
 ## Usage
 
 ```
-./bin/data-viewer <csv_file>
+./bin/data-viewer <csv_file> [ -p <image_prefix> ]
 ```
 
 The first row of *csv_file* must contain a header (i.e. field / column names). 
