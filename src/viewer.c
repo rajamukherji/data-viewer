@@ -110,6 +110,7 @@ struct viewer_t {
 	GtkListStore *FieldsStore;
 	GtkListStore *OperatorsStore;
 	GtkClipboard *Clipboard;
+	GtkMenu *NodeMenu;
 	node_t *Nodes, *Root, *Selected;
 	node_t **Sorted, **SortBuffer;
 	node_t **SortedX, **SortedY;
@@ -2118,6 +2119,44 @@ static void image_node_activated(GtkIconView *View, GtkTreePath *Path, viewer_t 
 	console_log(Viewer->Console, Result);
 }
 
+static gboolean image_node_button_press(GtkIconView *Widget, GdkEventButton *Event, viewer_t *Viewer) {
+	if (Event->button != 3) return FALSE;
+	GtkTreePath *Path;
+	if (gtk_icon_view_get_item_at_pos(Widget, Event->x, Event->y, &Path, NULL)) {
+		gtk_icon_view_select_path(Widget, Path);
+		GtkTreeIter Iter[1];
+		gtk_tree_model_get_iter(GTK_TREE_MODEL(Viewer->ImagesStore), Iter, Path);
+		gtk_tree_model_get(GTK_TREE_MODEL(Viewer->ImagesStore), Iter, 2, &Viewer->ActiveNode, -1);
+		gtk_menu_popup_at_pointer(Viewer->NodeMenu, (GdkEvent *)Event);
+	}
+	return TRUE;
+}
+
+typedef struct node_menu_item_t {
+	viewer_t *Viewer;
+	ml_value_t *Callback;
+} node_menu_item_t;
+
+static void node_menu_activate(GtkMenuItem *MenuItem, node_menu_item_t *NodeMenuItem) {
+	viewer_t *Viewer = NodeMenuItem->Viewer;
+	ml_value_t *Result = ml_inline(NodeMenuItem->Callback, 1, Viewer->ActiveNode);
+	console_log(Viewer->Console, Result);
+}
+
+static ml_value_t *node_menu_fn(viewer_t *Viewer, int Count, ml_value_t **Args) {
+	ML_CHECK_ARG_COUNT(2);
+	ML_CHECK_ARG_TYPE(0, MLStringT);
+	ML_CHECK_ARG_TYPE(1, MLFunctionT);
+	GtkWidget *MenuItem = gtk_menu_item_new_with_label(ml_string_value(Args[0]));
+	node_menu_item_t *NodeMenuItem = new(node_menu_item_t);
+	NodeMenuItem->Viewer = Viewer;
+	NodeMenuItem->Callback = Args[1];
+	g_signal_connect(G_OBJECT(MenuItem), "activate", G_CALLBACK(node_menu_activate), NodeMenuItem);
+	gtk_container_add(GTK_CONTAINER(Viewer->NodeMenu), MenuItem);
+	gtk_widget_show_all(MenuItem);
+	return MLNil;
+}
+
 static void view_images_clicked(GtkWidget *Button, viewer_t *Viewer) {
 	if (Viewer->ValuesStore) {
 		g_object_unref(G_OBJECT(Viewer->ValuesStore));
@@ -2139,6 +2178,7 @@ static void view_images_clicked(GtkWidget *Button, viewer_t *Viewer) {
 	gtk_paned_pack2(GTK_PANED(Viewer->MainVPaned), ImagesScrolledArea, TRUE, TRUE);
 	gtk_widget_show_all(ImagesScrolledArea);
 	g_signal_connect(G_OBJECT(ImagesView), "item-activated", G_CALLBACK(image_node_activated), Viewer);
+	g_signal_connect(G_OBJECT(ImagesView), "button-press-event", G_CALLBACK(image_node_button_press), Viewer);
 	update_preview(Viewer);
 }
 
@@ -2785,6 +2825,7 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 	stringmap_insert(Viewer->Globals, "hotkey7", ml_reference(&Viewer->HotkeyFns[7]));
 	stringmap_insert(Viewer->Globals, "hotkey8", ml_reference(&Viewer->HotkeyFns[8]));
 	stringmap_insert(Viewer->Globals, "hotkey9", ml_reference(&Viewer->HotkeyFns[9]));
+	stringmap_insert(Viewer->Globals, "menu", ml_function(Viewer, (void *)node_menu_fn));
 	stringmap_insert(Viewer->Globals, "print", ml_function(Viewer->Console, (void *)console_print));
 	stringmap_insert(Viewer->Globals, "clipboard", ml_function(Viewer, (void *)clipboard_fn));
 	stringmap_insert(Viewer->Globals, "execute", ml_function(Viewer, (void *)execute_fn));
@@ -2849,6 +2890,8 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 	g_signal_connect(G_OBJECT(Viewer->DrawingArea), "motion-notify-event", G_CALLBACK(motion_notify_viewer), Viewer);
 	g_signal_connect(G_OBJECT(Viewer->MainWindow), "key-press-event", G_CALLBACK(key_press_viewer), Viewer);
 	g_signal_connect(G_OBJECT(Viewer->MainWindow), "destroy", G_CALLBACK(gtk_main_quit), 0);
+
+	Viewer->NodeMenu = GTK_MENU(gtk_menu_new());
 
 	const char *CsvFileName = 0;
 	const char *ImagePrefix = 0;
