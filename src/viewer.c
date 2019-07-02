@@ -14,6 +14,7 @@
 #include "console.h"
 #include "ml_csv.h"
 #include <stringmap.h>
+#include <gdl/gdl.h>
 
 #ifdef USE_GL
 #include <epoxy/gl.h>
@@ -98,11 +99,11 @@ struct filter_t {
 };
 
 struct viewer_t {
-	GtkWidget *MainWindow, *MainVPaned;
+	GtkWidget *MainWindow, *MainDock;
 	GtkLabel *NumVisibleLabel;
     GtkWidget *FilterWindow, *FiltersBox;
-	GtkWidget *DrawingArea, *ImagesView;
-	GtkWidget *PreviewWidget;
+	GtkWidget *DrawingArea, *ImagesView, *ValuesView;
+	GtkWidget *ImagesWidget, *DataWidget;
 	GtkWidget *XComboBox, *YComboBox, *CComboBox, *EditFieldComboBox, *EditValueComboBox;
 	GtkWidget *InfoBar;
 	GdkCursor *Cursor;
@@ -1104,7 +1105,8 @@ static void update_preview(viewer_t *Viewer) {
 		gtk_list_store_clear(Viewer->ImagesStore);
 		//printf("\n\n%s:%d\n", __FUNCTION__, __LINE__);
 		foreach_node(Viewer, X1, Y1, X2, Y2, Viewer, (node_callback_t *)draw_node_image);
-	} else if (Viewer->ValuesStore) {
+	}
+	if (Viewer->ValuesStore) {
 		gtk_list_store_clear(Viewer->ValuesStore);
 		//printf("\n\n%s:%d\n", __FUNCTION__, __LINE__);
 		foreach_node(Viewer, X1, Y1, X2, Y2, Viewer, (node_callback_t *)draw_node_value);
@@ -1777,6 +1779,40 @@ static void add_field_callback(const char *Name, viewer_t *Viewer, void *Data) {
 	Viewer->Fields = Fields;
 	Viewer->NumFields = NumFields;
 	gtk_combo_box_set_active(GTK_COMBO_BOX(Viewer->EditFieldComboBox), NumFields - 1);
+
+	GType Types[NumFields * 2];
+	for (int I = 0; I < NumFields; ++I) {
+		field_t *Field = Viewer->Fields[I];
+		Types[2 * I] = Field->EnumStore ? G_TYPE_STRING : G_TYPE_DOUBLE;
+		Types[2 * I + 1] = GDK_TYPE_RGBA;
+	}
+
+	GtkListStore *ValuesStore = gtk_list_store_newv(2 * NumFields, Types);
+	GtkWidget *ValuesView = gtk_tree_view_new_with_model(GTK_TREE_MODEL(ValuesStore));
+
+	for (int I = 0; I < NumFields; ++I) {
+		field_t *Field = Viewer->Fields[I];
+		GtkTreeViewColumn *Column = gtk_tree_view_column_new();
+		gtk_tree_view_column_set_title(Column, Field->Name);
+		gtk_tree_view_column_set_reorderable(Column, TRUE);
+		GtkCellRenderer *Renderer = gtk_cell_renderer_text_new();
+		gtk_tree_view_column_pack_start(Column, Renderer, TRUE);
+		gtk_tree_view_column_add_attribute(Column, Renderer, "text", 2 * I);
+		gtk_tree_view_column_add_attribute(Column, Renderer, "background-rgba", 2 * I + 1);
+		gtk_tree_view_append_column(GTK_TREE_VIEW(ValuesView), Column);
+		gtk_tree_view_column_set_visible(Column, Field->PreviewVisible);
+		Field->PreviewColumn = Column;
+	}
+
+	GtkContainer *Container = GTK_CONTAINER(gtk_widget_get_parent(Viewer->ValuesView));
+	gtk_container_remove(Container, Viewer->ValuesView);
+	gtk_container_add(Container, ValuesView);
+
+	gtk_widget_destroy(Viewer->ValuesView);
+	Viewer->ValuesStore = ValuesStore;
+	Viewer->ValuesView = ValuesView;
+	gtk_widget_show_all(ValuesView);
+	update_preview(Viewer);
 }
 
 static void add_field_clicked(GtkWidget *Button, viewer_t *Viewer) {
@@ -2078,11 +2114,10 @@ static ml_value_t *filter_fn(viewer_t *Viewer, int Count, ml_value_t **Args) {
 }
 
 static void create_filter_window(viewer_t *Viewer) {
-	GtkWidget *Window = Viewer->FilterWindow = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-	gtk_window_set_transient_for(GTK_WINDOW(Window), GTK_WINDOW(Viewer->MainWindow));
-	gtk_container_set_border_width(GTK_CONTAINER(Window), 6);
+	GtkWidget *DockItem = gdl_dock_item_new("filters", "Filters", GDL_DOCK_ITEM_BEH_NORMAL);
+
 	GtkWidget *FiltersBox = Viewer->FiltersBox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
-	gtk_container_add(GTK_CONTAINER(Window), FiltersBox);
+	gtk_container_add(GTK_CONTAINER(DockItem), FiltersBox);
 
 	GtkListStore *OperatorsStore = Viewer->OperatorsStore = gtk_list_store_new(2, G_TYPE_STRING, G_TYPE_POINTER);
 	gtk_list_store_insert_with_values(OperatorsStore, 0, -1, 0, "=", 1, filter_operator_equal, -1);
@@ -2098,7 +2133,8 @@ static void create_filter_window(viewer_t *Viewer) {
 
 	g_signal_connect(G_OBJECT(CreateButton), "clicked", G_CALLBACK(filter_create_ui), Viewer);
 
-	g_signal_connect(G_OBJECT(Window), "delete-event", G_CALLBACK(gtk_widget_hide_on_delete), Viewer);
+	gdl_dock_add_item(GDL_DOCK(Viewer->MainDock), GDL_DOCK_ITEM(DockItem), GDL_DOCK_RIGHT);
+	gdl_dock_item_iconify_item(GDL_DOCK_ITEM(DockItem));
 }
 
 static void show_filter_window(GtkButton *Widget, viewer_t *Viewer) {
@@ -2152,41 +2188,25 @@ static ml_value_t *node_menu_fn(viewer_t *Viewer, int Count, ml_value_t **Args) 
 	return MLNil;
 }
 
-static void view_images_clicked(GtkWidget *Button, viewer_t *Viewer) {
-	if (Viewer->ValuesStore) {
-		g_object_unref(G_OBJECT(Viewer->ValuesStore));
-		Viewer->ValuesStore = 0;
-	}
-	if (Viewer->ImagesStore) {
-		g_object_unref(G_OBJECT(Viewer->ImagesStore));
-		Viewer->ImagesStore = 0;
-	}
-	if (Viewer->PreviewWidget) gtk_container_remove(GTK_CONTAINER(Viewer->MainVPaned), Viewer->PreviewWidget);
+static void create_images_widget(viewer_t *Viewer) {
 	Viewer->ImagesStore = gtk_list_store_new(3, G_TYPE_STRING, GDK_TYPE_PIXBUF, G_TYPE_POINTER);
-	GtkWidget *ImagesScrolledArea = Viewer->PreviewWidget = gtk_scrolled_window_new(0, 0);
+	GtkWidget *ImagesScrolledArea = Viewer->ImagesWidget = gtk_scrolled_window_new(0, 0);
 	GtkWidget *ImagesView = gtk_icon_view_new_with_model(GTK_TREE_MODEL(Viewer->ImagesStore));
 	gtk_icon_view_set_selection_mode(GTK_ICON_VIEW(ImagesView), GTK_SELECTION_BROWSE);
 	gtk_icon_view_set_text_column(GTK_ICON_VIEW(ImagesView), 0);
 	gtk_icon_view_set_pixbuf_column(GTK_ICON_VIEW(ImagesView), 1);
 	gtk_icon_view_set_item_width(GTK_ICON_VIEW(ImagesView), 72);
 	gtk_container_add(GTK_CONTAINER(ImagesScrolledArea), ImagesView);
-	gtk_paned_pack2(GTK_PANED(Viewer->MainVPaned), ImagesScrolledArea, TRUE, TRUE);
-	gtk_widget_show_all(ImagesScrolledArea);
 	g_signal_connect(G_OBJECT(ImagesView), "item-activated", G_CALLBACK(image_node_activated), Viewer);
 	g_signal_connect(G_OBJECT(ImagesView), "button-press-event", G_CALLBACK(image_node_button_press), Viewer);
-	update_preview(Viewer);
+
+	GtkWidget *DockItem = gdl_dock_item_new("images", "Images", GDL_DOCK_ITEM_BEH_NORMAL);
+	gtk_container_add(GTK_CONTAINER(DockItem), ImagesScrolledArea);
+	gdl_dock_add_item(GDL_DOCK(Viewer->MainDock), GDL_DOCK_ITEM(DockItem), GDL_DOCK_RIGHT);
+	gtk_widget_show_all(DockItem);
 }
 
-static void view_data_clicked(GtkWidget *Button, viewer_t *Viewer) {
-	if (Viewer->ValuesStore) {
-		g_object_unref(G_OBJECT(Viewer->ValuesStore));
-		Viewer->ValuesStore = 0;
-	}
-	if (Viewer->ImagesStore) {
-		g_object_unref(G_OBJECT(Viewer->ImagesStore));
-		Viewer->ImagesStore = 0;
-	}
-	if (Viewer->PreviewWidget) gtk_container_remove(GTK_CONTAINER(Viewer->MainVPaned), Viewer->PreviewWidget);
+static void create_data_widget(viewer_t *Viewer) {
 	int NumFields = Viewer->NumFields;
 	GType Types[NumFields * 2];
 	for (int I = 0; I < NumFields; ++I) {
@@ -2196,8 +2216,8 @@ static void view_data_clicked(GtkWidget *Button, viewer_t *Viewer) {
 	}
 
 	Viewer->ValuesStore = gtk_list_store_newv(2 * NumFields, Types);
-	GtkWidget *ValuesScrolledArea = Viewer->PreviewWidget = gtk_scrolled_window_new(0, 0);
-	GtkWidget *ValuesView = gtk_tree_view_new_with_model(GTK_TREE_MODEL(Viewer->ValuesStore));
+	GtkWidget *ValuesScrolledArea = Viewer->DataWidget = gtk_scrolled_window_new(0, 0);
+	Viewer->ValuesView = gtk_tree_view_new_with_model(GTK_TREE_MODEL(Viewer->ValuesStore));
 
 	for (int I = 0; I < NumFields; ++I) {
 		field_t *Field = Viewer->Fields[I];
@@ -2208,16 +2228,17 @@ static void view_data_clicked(GtkWidget *Button, viewer_t *Viewer) {
 		gtk_tree_view_column_pack_start(Column, Renderer, TRUE);
 		gtk_tree_view_column_add_attribute(Column, Renderer, "text", 2 * I);
 		gtk_tree_view_column_add_attribute(Column, Renderer, "background-rgba", 2 * I + 1);
-		gtk_tree_view_append_column(GTK_TREE_VIEW(ValuesView), Column);
+		gtk_tree_view_append_column(GTK_TREE_VIEW(Viewer->ValuesView), Column);
 		gtk_tree_view_column_set_visible(Column, Field->PreviewVisible);
 		Field->PreviewColumn = Column;
 	}
 
-	gtk_container_add(GTK_CONTAINER(ValuesScrolledArea), ValuesView);
-	gtk_paned_pack2(GTK_PANED(Viewer->MainVPaned), ValuesScrolledArea, TRUE, TRUE);
-	gtk_widget_show_all(ValuesScrolledArea);
+	gtk_container_add(GTK_CONTAINER(ValuesScrolledArea), Viewer->ValuesView);
 
-	update_preview(Viewer);
+	GtkWidget *DockItem = gdl_dock_item_new("data", "Data", GDL_DOCK_ITEM_BEH_NORMAL);
+	gtk_container_add(GTK_CONTAINER(DockItem), ValuesScrolledArea);
+	gdl_dock_add_item(GDL_DOCK(Viewer->MainDock), GDL_DOCK_ITEM(DockItem), GDL_DOCK_RIGHT);
+	gtk_widget_show_all(DockItem);
 }
 
 static void view_console_clicked(GtkWidget *Button, viewer_t *Viewer) {
@@ -2546,6 +2567,9 @@ static void viewer_load_file(viewer_t *Viewer, const char *CsvFileName, const ch
 	char Title[strlen(Basename) + strlen(" - DataViewer") + 1];
 	sprintf(Title, "%s - DataViewer", Basename);
 	gtk_window_set_title(GTK_WINDOW(Viewer->MainWindow), Title);
+
+	create_images_widget(Viewer);
+	create_data_widget(Viewer);
 }
 
 static void prefix_directory_set(GtkFileChooser *Widget, GtkEntry *Entry) {
@@ -2674,40 +2698,11 @@ static GtkWidget *create_viewer_action_bar(viewer_t *Viewer) {
 	g_signal_connect(G_OBJECT(AddFieldButton), "clicked", G_CALLBACK(add_field_clicked), Viewer);
 	g_signal_connect(G_OBJECT(AddValueButton), "clicked", G_CALLBACK(add_value_clicked), Viewer);
 
-	create_filter_window(Viewer);
-
-	GtkWidget *FilterButton = gtk_button_new_with_label("Filter");
-	gtk_button_set_image(GTK_BUTTON(FilterButton), gtk_image_new_from_icon_name("edit-find-replace-symbolic", GTK_ICON_SIZE_BUTTON));
-	g_object_set(FilterButton, "always-show-image", TRUE, NULL);
-	gtk_action_bar_pack_start(ActionBar, FilterButton);
-
-	g_signal_connect(G_OBJECT(FilterButton), "clicked", G_CALLBACK(show_filter_window), Viewer);
-
-	GtkWidget *ViewImagesButton = gtk_button_new_with_label("Images");
-	gtk_button_set_image(GTK_BUTTON(ViewImagesButton), gtk_image_new_from_icon_name("view-grid-symbolic", GTK_ICON_SIZE_BUTTON));
-	g_object_set(ViewImagesButton, "always-show-image", TRUE, NULL);
-
-	GtkWidget *ViewDataButton = gtk_button_new_with_label("Data");
-	gtk_button_set_image(GTK_BUTTON(ViewDataButton), gtk_image_new_from_icon_name("view-list-symbolic", GTK_ICON_SIZE_BUTTON));
-	g_object_set(ViewDataButton, "always-show-image", TRUE, NULL);
-
-	GtkWidget *ViewConsoleButton = gtk_button_new_with_label("Console");
-	gtk_button_set_image(GTK_BUTTON(ViewConsoleButton), gtk_image_new_from_icon_name("utilities-terminal-symbolic", GTK_ICON_SIZE_BUTTON));
-	g_object_set(ViewConsoleButton, "always-show-image", TRUE, NULL);
-
 	GtkWidget *ShowColumnsButton = gtk_button_new_with_label("Columns");
 	gtk_button_set_image(GTK_BUTTON(ShowColumnsButton), gtk_image_new_from_icon_name("object-select-symbolic", GTK_ICON_SIZE_BUTTON));
 	g_object_set(ShowColumnsButton, "always-show-image", TRUE, NULL);
 
-	gtk_action_bar_pack_start(ActionBar, ViewImagesButton);
-	gtk_action_bar_pack_start(ActionBar, ViewDataButton);
-	gtk_action_bar_pack_start(ActionBar, ShowColumnsButton);
-	gtk_action_bar_pack_start(ActionBar, ViewConsoleButton);
-
-	g_signal_connect(G_OBJECT(ViewImagesButton), "clicked", G_CALLBACK(view_images_clicked), Viewer);
-	g_signal_connect(G_OBJECT(ViewDataButton), "clicked", G_CALLBACK(view_data_clicked), Viewer);
 	g_signal_connect(G_OBJECT(ShowColumnsButton), "clicked", G_CALLBACK(show_columns_clicked), Viewer);
-	g_signal_connect(G_OBJECT(ViewConsoleButton), "clicked", G_CALLBACK(view_console_clicked), Viewer);
 
 	GtkWidget *NumVisibleLabel = gtk_label_new(0);
 	gtk_action_bar_pack_end(ActionBar, NumVisibleLabel);
@@ -2804,7 +2799,6 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 	Viewer->Console = console_new((ml_getter_t)viewer_global_get, Viewer);
 	Viewer->ActivationFn = ml_function(Viewer->Console, (void *)console_print);
 	for (int I = 0; I < 10; ++I) Viewer->HotkeyFns[I] = Viewer->ActivationFn;
-	Viewer->PreviewWidget = 0;
 
 	ml_object_init(Viewer->Globals, (ml_setter_t)stringmap_insert);
 	ml_csv_init(Viewer->Globals);
@@ -2846,10 +2840,20 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 	gtk_widget_set_no_show_all(Viewer->InfoBar, TRUE);
 	gtk_box_pack_start(GTK_BOX(MainVBox), Viewer->InfoBar, FALSE, FALSE, 0);
 
-	Viewer->MainVPaned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
-	gtk_box_pack_start(GTK_BOX(MainVBox), Viewer->MainVPaned, TRUE, TRUE, 0);
+	Viewer->MainDock = gdl_dock_new();
+	GObject *DockMaster = gdl_dock_object_get_master(GDL_DOCK_OBJECT(Viewer->MainDock));
+	GtkWidget *DockBar = gdl_dock_bar_new(DockMaster);
+	gtk_orientable_set_orientation(GTK_ORIENTABLE(DockBar), GTK_ORIENTATION_HORIZONTAL);
 
-	gtk_paned_pack1(GTK_PANED(Viewer->MainVPaned), Viewer->DrawingArea, TRUE, TRUE);
+	gtk_action_bar_pack_start(GTK_ACTION_BAR(ActionBar), DockBar);
+	gtk_box_pack_start(GTK_BOX(MainVBox), Viewer->MainDock, TRUE, TRUE, 0);
+
+	//gtk_paned_pack1(GTK_PANED(Viewer->MainVPaned), Viewer->DrawingArea, TRUE, TRUE);
+	GtkWidget *DrawingAreaDock = gdl_dock_item_new("plot", "Plot", GDL_DOCK_ITEM_BEH_LOCKED);
+	gtk_container_add(GTK_CONTAINER(DrawingAreaDock), Viewer->DrawingArea);
+	gdl_dock_add_item(GDL_DOCK(Viewer->MainDock), GDL_DOCK_ITEM(DrawingAreaDock), GDL_DOCK_LEFT);
+
+	create_filter_window(Viewer);
 
 	cairo_surface_t *CursorSurface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, BOX_SIZE, BOX_SIZE);
 	cairo_t *CursorCairo = cairo_create(CursorSurface);
@@ -2863,7 +2867,6 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 
 	Viewer->ImagesStore = 0;
 	Viewer->ValuesStore = 0;
-	view_images_clicked(NULL, Viewer);
 
 	gtk_widget_add_events(Viewer->DrawingArea, GDK_SCROLL_MASK);
 	gtk_widget_add_events(Viewer->DrawingArea, GDK_POINTER_MOTION_MASK);
@@ -2904,7 +2907,6 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 	}
 
 	gtk_window_resize(GTK_WINDOW(Viewer->MainWindow), 640, 480);
-	gtk_paned_set_position(GTK_PANED(Viewer->MainVPaned), 320);
 	gtk_widget_show_all(Viewer->MainWindow);
 
 	if (CsvFileName) {
