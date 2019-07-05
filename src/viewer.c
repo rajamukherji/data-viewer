@@ -11,6 +11,7 @@
 #include <ml_macros.h>
 #include <ml_file.h>
 #include <ml_object.h>
+#include <ml_iterfns.h>
 #include "console.h"
 #include "ml_csv.h"
 #include <stringmap.h>
@@ -2812,8 +2813,11 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 	for (int I = 0; I < 10; ++I) Viewer->HotkeyFns[I] = Viewer->ActivationFn;
 	Viewer->PreviewWidget = 0;
 
-	ml_object_init(Viewer->Globals, (ml_setter_t)stringmap_insert);
+	ml_object_init(Viewer->Globals);
+	ml_iterfns_init(Viewer->Globals);
+	ml_file_init(Viewer->Globals);
 	ml_csv_init(Viewer->Globals);
+
 	stringmap_insert(Viewer->Globals, "activate", ml_reference(&Viewer->ActivationFn));
 	stringmap_insert(Viewer->Globals, "hotkey0", ml_reference(&Viewer->HotkeyFns[0]));
 	stringmap_insert(Viewer->Globals, "hotkey1", ml_reference(&Viewer->HotkeyFns[1]));
@@ -2925,7 +2929,6 @@ int main(int Argc, char *Argv[]) {
 	GC_INIT();
 	gtk_init(&Argc, &Argv);
 	ml_init();
-	ml_file_init();
 	EqualMethod = ml_method("=");
 	NotEqualMethod = ml_method("!=");
 	LessMethod = ml_method("<");

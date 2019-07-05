@@ -44,7 +44,7 @@ static char *stpcpy(char *Dest, const char *Source) {
 #endif
 
 static ml_value_t *console_global_get(console_t *Console, const char *Name) {
-return stringmap_search(Console->Globals, Name) ?: (Console->ParentGetter)(Console->ParentGlobals, Name);
+	return stringmap_search(Console->Globals, Name) ?: (Console->ParentGetter)(Console->ParentGlobals, Name);
 }
 
 static char *console_read(console_t *Console) {
@@ -113,6 +113,7 @@ static void console_submit(GtkWidget *Button, console_t *Console) {
 	if (setjmp(Console->Error->Handler)) {
 		char *Buffer;
 		int Length = asprintf(&Buffer, "Error: %s\n", ml_error_message(Console->Error->Message));
+		gtk_text_buffer_get_end_iter(LogBuffer, End);
 		gtk_text_buffer_insert(LogBuffer, End, Buffer, Length);
 		const char *Source;
 		int Line;
