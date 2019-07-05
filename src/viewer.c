@@ -2078,11 +2078,6 @@ static ml_value_t *filter_fn(viewer_t *Viewer, int Count, ml_value_t **Args) {
 	return MLNil;
 }
 
-static gboolean hide_filter_window(GtkWidget *Widget, GdkEvent *Event, viewer_t *Viewer) {
-	gtk_widget_hide(Widget);
-	return TRUE;
-}
-
 static void create_filter_window(viewer_t *Viewer) {
 	GtkWidget *Window = Viewer->FilterWindow = gtk_window_new(GTK_WINDOW_TOPLEVEL);
 	gtk_window_set_transient_for(GTK_WINDOW(Window), GTK_WINDOW(Viewer->MainWindow));
@@ -2104,7 +2099,7 @@ static void create_filter_window(viewer_t *Viewer) {
 
 	g_signal_connect(G_OBJECT(CreateButton), "clicked", G_CALLBACK(filter_create_ui), Viewer);
 
-	g_signal_connect(G_OBJECT(Window), "delete-event", G_CALLBACK(hide_filter_window), Viewer);
+	g_signal_connect(G_OBJECT(Window), "delete-event", G_CALLBACK(gtk_widget_hide_on_delete), Viewer);
 }
 
 static void show_filter_window(GtkButton *Widget, viewer_t *Viewer) {
@@ -2252,7 +2247,6 @@ static void show_columns_clicked(GtkWidget *Button, viewer_t *Viewer) {
 	gtk_container_add(GTK_CONTAINER(Window), FieldsView);
 	g_signal_connect(G_OBJECT(VisibleRenderer), "toggled", G_CALLBACK(preview_column_visible_toggled), Viewer);
 	gtk_widget_show_all(Window);
-	g_signal_connect(G_OBJECT(Window), "delete-event", G_CALLBACK(gtk_widget_destroy), Viewer);
 }
 
 static void viewer_save_file(GtkWidget *Button, viewer_t *Viewer) {

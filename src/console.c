@@ -183,11 +183,6 @@ void console_show(console_t *Console, GtkWindow *Parent) {
 	gtk_widget_grab_focus(Console->InputView);
 }
 
-static gboolean console_hide(GtkWidget *Widget, GdkEvent *Event, console_t *Console) {
-	gtk_widget_hide(Widget);
-	return TRUE;
-}
-
 void console_append(console_t *Console, const char *Buffer, int Length) {
 	GtkTextIter End[1];
 	GtkTextBuffer *LogBuffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(Console->LogView));
@@ -410,6 +405,6 @@ console_t *console_new(ml_getter_t GlobalGet, void *Globals) {
 	Console->Window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
 	gtk_container_add(GTK_CONTAINER(Console->Window), Container);
 	gtk_window_set_default_size(GTK_WINDOW(Console->Window), 640, 480);
-	g_signal_connect(G_OBJECT(Console->Window), "delete-event", G_CALLBACK(console_hide), Console);
+	g_signal_connect(G_OBJECT(Console->Window), "delete-event", G_CALLBACK(gtk_widget_hide_on_delete), Console);
 	return Console;
 }
