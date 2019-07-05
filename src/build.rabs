@@ -57,6 +57,7 @@ var Objects := [
 	file("minilang/ml_types.o"),
 	file("minilang/ml_object.o"),
 	file("minilang/ml_file.o"),
+	file("minilang/ml_iterfns.o"),
 	file("minilang/sha256.o"),
 	file("minilang/stringmap.o"),
 	file("whereami/src/whereami.o")
