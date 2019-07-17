@@ -2784,6 +2784,28 @@ static ml_value_t *execute_fn(viewer_t *Viewer, int Count, ml_value_t **Args) {
 	}
 }
 
+static ml_value_t *getenv_fn(void *Data, int Count, ml_value_t **Args) {
+	ML_CHECK_ARG_COUNT(1);
+	ML_CHECK_ARG_TYPE(0, MLStringT);
+	const char *Key = ml_string_value(Args[0]);
+	const char *Value = getenv(Key);
+	if (Value) {
+		return ml_string(Value, -1);
+	} else {
+		return MLNil;
+	}
+}
+
+static ml_value_t *setenv_fn(viewer_t *Viewer, int Count, ml_value_t **Args) {
+	ML_CHECK_ARG_COUNT(2);
+	ML_CHECK_ARG_TYPE(0, MLStringT);
+	ML_CHECK_ARG_TYPE(1, MLStringT);
+	const char *Key = ml_string_value(Args[0]);
+	const char *Value = ml_string_value(Args[1]);
+	setenv(Key, Value, 1);
+	return MLNil;
+}
+
 static viewer_t *create_viewer(int Argc, char *Argv[]) {
 	viewer_t *Viewer = new(viewer_t);
 #ifdef USE_GL
@@ -2828,6 +2850,8 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 	stringmap_insert(Viewer->Globals, "clipboard", ml_function(Viewer, (void *)clipboard_fn));
 	stringmap_insert(Viewer->Globals, "execute", ml_function(Viewer, (void *)execute_fn));
 	stringmap_insert(Viewer->Globals, "shell", ml_function(Viewer, (void *)shell_fn));
+	stringmap_insert(Viewer->Globals, "getenv", ml_function(Viewer, (void *)getenv_fn));
+	stringmap_insert(Viewer->Globals, "setenv", ml_function(Viewer, (void *)setenv_fn));
 	stringmap_insert(Viewer->Globals, "open", ml_function(Viewer, ml_file_open));
 	stringmap_insert(Viewer->Globals, "filter", ml_function(Viewer, (void *)filter_fn));
 
