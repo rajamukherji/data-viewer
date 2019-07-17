@@ -15,6 +15,8 @@
 #include "console.h"
 #include "ml_csv.h"
 #include <stringmap.h>
+#include <jansson.h>
+#include <czmq.h>
 
 #ifdef USE_GL
 #include <epoxy/gl.h>
@@ -79,6 +81,7 @@ struct field_t {
 	const char **EnumNames;
 	int *EnumValues;
 	GtkTreeViewColumn *PreviewColumn;
+	const char *RemoteId;
 	range_t Range;
 	int EnumSize;
 	int PreviewVisible;
@@ -124,6 +127,7 @@ struct viewer_t {
 	console_t *Console;
 	stringmap_t Globals[1];
 	stringmap_t FieldsByName[1];
+	zsock_t *Socket;
 #ifdef USE_GL
 	float *GLVertices, *GLColours;
 #else
@@ -1567,6 +1571,12 @@ static gboolean key_press_viewer(GtkWidget *Widget, GdkEventKey *Event, viewer_t
 	return FALSE;
 }
 
+static void load_column_clicked(GtkWidget *Button, viewer_t *Viewer) {
+}
+
+static void connect_clicked(GtkWidget *Button, viewer_t *Viewer) {
+}
+
 static void x_field_changed(GtkComboBox *Widget, viewer_t *Viewer) {
 	int XIndex = gtk_combo_box_get_active(Widget);
 	if (XIndex >= 0) {
@@ -2541,6 +2551,12 @@ static GtkWidget *create_viewer_action_bar(viewer_t *Viewer) {
 	gtk_action_bar_pack_start(ActionBar, SaveCsvButton);
 	g_signal_connect(G_OBJECT(SaveCsvButton), "clicked", G_CALLBACK(viewer_save_file), Viewer);
 
+	GtkWidget *LoadColumnButton = gtk_button_new_with_label("Load Column");
+	gtk_button_set_image(GTK_BUTTON(LoadColumnButton), gtk_image_new_from_icon_name("insert-text-symbolic", GTK_ICON_SIZE_BUTTON));
+	g_object_set(LoadColumnButton, "always-show-image", TRUE, NULL);
+	gtk_action_bar_pack_start(ActionBar, LoadColumnButton);
+	g_signal_connect(G_OBJECT(LoadColumnButton), "clicked", G_CALLBACK(load_column_clicked), Viewer);
+
 	GtkCellRenderer *FieldRenderer;
 	GtkWidget *XComboBox = Viewer->XComboBox = gtk_combo_box_new_with_model(GTK_TREE_MODEL(Viewer->FieldsStore));
 	FieldRenderer = gtk_cell_renderer_text_new();
@@ -2597,6 +2613,12 @@ static GtkWidget *create_viewer_action_bar(viewer_t *Viewer) {
 
 	g_signal_connect(G_OBJECT(AddFieldButton), "clicked", G_CALLBACK(add_field_clicked), Viewer);
 	g_signal_connect(G_OBJECT(AddValueButton), "clicked", G_CALLBACK(add_value_clicked), Viewer);
+
+	GtkWidget *ConnectButton = gtk_button_new_with_label("Connect");
+	gtk_button_set_image(GTK_BUTTON(ConnectButton), gtk_image_new_from_icon_name("network-server-symbolic", GTK_ICON_SIZE_BUTTON));
+	g_object_set(ConnectButton, "always-show-image", TRUE, NULL);
+	gtk_action_bar_pack_start(ActionBar, ConnectButton);
+	g_signal_connect(G_OBJECT(ConnectButton), "clicked", G_CALLBACK(connect_clicked), Viewer);
 
 	create_filter_window(Viewer);
 

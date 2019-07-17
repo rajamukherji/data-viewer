@@ -39,7 +39,7 @@ end
 file("minilang"):mkdir
 file("whereami/src"):mkdir
 CFLAGS := old + ['-D_GNU_SOURCE', "-Iinclude", '-I{file("minilang/minilang.h"):dirname}', '-I{file("whereami/src/whereami.h"):dirname}']
-LDFLAGS := old + ["-lgc", "-ldl"]
+LDFLAGS := old + ["-lgc", "-lczmq", "-ljansson", "-ldl"]
 
 file("resources.c")[file("resources.xml")] => fun(Target) do
 	execute("glib-compile-resources", '--sourcedir={file("build.rabs"):dir(:true)}', file("resources.xml"), "--generate-source", '--target={Target}')
