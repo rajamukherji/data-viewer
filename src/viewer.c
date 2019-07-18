@@ -2398,7 +2398,7 @@ static void viewer_load_file(viewer_t *Viewer, const char *CsvFileName, const ch
 	Viewer->GLColours = (float *)GC_malloc_atomic(NumNodes * 3 * 4 * sizeof(float));
 #endif
 	console_printf(Viewer->Console, "Loading rows...\n");
-	fopen(CsvFileName, "r");
+	File = fopen(CsvFileName, "r");
 	Loader->Nodes = Nodes;
 	Loader->Fields = Fields;
 	Loader->Row = Loader->Index = 0;
