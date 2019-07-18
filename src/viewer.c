@@ -1683,7 +1683,7 @@ static gboolean remote_msg_fn(viewer_t *Viewer) {
 		return TRUE;
 	}
 	if (Index == 0) {
-		// TODO: Handle alerts
+		console_printf(Viewer->Console, "Alert!\n");
 		return TRUE;
 	}
 	if (json_is_object(Result)) {
