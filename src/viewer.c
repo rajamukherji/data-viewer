@@ -1585,10 +1585,18 @@ typedef struct connect_info_t {
 	viewer_t *Viewer;
 	const char *Server;
 	GtkListStore *DatasetsStore;
+	const char *DatasetId;
 } connect_info_t;
 
 static void connect_server_changed(GtkComboBoxText *ComboBox, connect_info_t *Info) {
 	Info->Server = gtk_combo_box_text_get_active_text(ComboBox);
+}
+
+static void connect_dataset_changed(GtkComboBox *ComboBox, connect_info_t *Info) {
+	GtkTreeIter Iter[1];
+	if (gtk_combo_box_get_active_iter(ComboBox, Iter)) {
+		gtk_tree_model_get(GTK_TREE_MODEL(Info->DatasetsStore), Iter, 0, &Info->DatasetId, -1);
+	}
 }
 
 struct queued_callback_t {
@@ -1610,14 +1618,16 @@ static void remote_request(viewer_t *Viewer, const char *Method, json_t *Request
 	zmsg_send(&Msg, Viewer->RemoteSocket);
 }
 
-static gboolean remote_msg_fn(GIOChannel *Source, GIOCondition Condition, viewer_t *Viewer) {
+/*static gboolean remote_msg_fn(GIOChannel *Source, GIOCondition Condition, viewer_t *Viewer) {
 	for (;;) {
 		printf("remote_msg_fn(%x)\n", Source);
 		int Status = zsock_events(Viewer->RemoteSocket);
 		printf("Status = %d\n", Status);
 		if (Status & ZMQ_POLLIN == 0) break;
 		printf("Reading message\n");
-		zmsg_t *Msg = zmsg_recv(Viewer->RemoteSocket);
+		zmsg_t *Msg = zmsg_recv_nowait(Viewer->RemoteSocket);
+		if (!Msg) break;
+		zmsg_print(Msg);
 		zframe_t *Frame = zmsg_pop(Msg);
 		json_error_t Error;
 		json_t *Response = json_loadb(zframe_data(Frame), zframe_size(Frame), 0, &Error);
@@ -1653,15 +1663,56 @@ static gboolean remote_msg_fn(GIOChannel *Source, GIOCondition Condition, viewer
 		}
 	}
 	return TRUE;
+}*/
+
+static gboolean remote_msg_fn(viewer_t *Viewer) {
+	zmsg_t *Msg = zmsg_recv_nowait(Viewer->RemoteSocket);
+	if (!Msg) return TRUE;
+	zmsg_print(Msg);
+	zframe_t *Frame = zmsg_pop(Msg);
+	json_error_t Error;
+	json_t *Response = json_loadb(zframe_data(Frame), zframe_size(Frame), 0, &Error);
+	if (!Response) {
+		fprintf(stderr, "Error parsing json\n");
+		return TRUE;
+	}
+	int Index;
+	json_t *Result;
+	if (json_unpack(Response, "[io]", &Index, &Result)) {
+		fprintf(stderr, "Error invalid json\n");
+		return TRUE;
+	}
+	if (Index == 0) {
+		// TODO: Handle alerts
+		return TRUE;
+	}
+	if (json_is_object(Result)) {
+		json_t *Error = json_object_get(Result, "error");
+		if (Error) {
+			fprintf(stderr, "Error: %s", json_string_value(Error));
+			return TRUE;
+		}
+	}
+	queued_callback_t **Slot = &Viewer->QueuedCallbacks;
+	while (Slot[0]) {
+		queued_callback_t *Queued = Slot[0];
+		if (Queued->Index == Index) {
+			Slot[0] = Queued->Next;
+			Queued->Callback(Viewer, Result, Queued->Data);
+			break;
+		}
+	}
+	return TRUE;
 }
 
 static void connect_dataset_list(viewer_t *Viewer, json_t *Result, connect_info_t *Info) {
 	printf("connect_dataset_list(%s)\n", json_dumps(Result, 0));
+	gtk_list_store_clear(Info->DatasetsStore);
 	for (int I = 0; I < json_array_size(Result); ++I) {
-		const char *Name;
+		const char *Id, *Name;
 		int Length;
-		if (!json_unpack(json_array_get(Result, I), "{sssi}", "name", &Name, "length", &Length)) {
-			gtk_list_store_insert_with_values(Info->DatasetsStore, 0, -1, 0, Name, 1, Length, -1);
+		if (!json_unpack(json_array_get(Result, I), "{sss{sssi}}", "id", &Id, "info", "name", &Name, "length", &Length)) {
+			gtk_list_store_insert_with_values(Info->DatasetsStore, 0, -1, 0, Id, 1, Name, 2, Length, -1);
 		}
 	}
 }
@@ -1671,14 +1722,40 @@ static void connect_connect_clicked(GtkWidget *Button, connect_info_t *Info) {
 	if (Info->Server) {
 		if (Viewer->RemoteSocket) zsock_destroy(&Viewer->RemoteSocket);
 		zsock_t *Socket = Viewer->RemoteSocket = zsock_new_dealer(Info->Server);
-		if (!zsock_use_fd(Socket)) {
+		/*if (!zsock_use_fd(Socket)) {
 			Viewer->RemoteSocket = NULL;
 			fprintf(stderr, "Error retrieving ZeroMQ file descriptor\n");
 			return;
+		}*/
+		zmsg_t *Msg = zmsg_new();
+		json_t *Request = json_pack("[isn]", ++Viewer->LastCallbackIndex, "dataset/list");
+		zmsg_addstr(Msg, json_dumps(Request, JSON_COMPACT));
+		zmsg_send(&Msg, Socket);
+		Msg = zmsg_recv(Socket);
+		zframe_t *Frame = zmsg_pop(Msg);
+		json_error_t Error;
+		json_t *Response = json_loadb(zframe_data(Frame), zframe_size(Frame), 0, &Error);
+		if (!Response) {
+			fprintf(stderr, "Error parsing json\n");
+			return;
 		}
-		remote_request(Viewer, "dataset/list", json_null(), (void *)connect_dataset_list, Info);
-		GIOChannel *Channel = g_io_channel_unix_new(zsock_fd(Socket));
-		g_io_add_watch(Channel, G_IO_IN | G_IO_ERR | G_IO_HUP, (void *)remote_msg_fn, Viewer);
+		int Index;
+		json_t *Result;
+		if (json_unpack(Response, "[io]", &Index, &Result)) {
+			fprintf(stderr, "Error invalid json\n");
+			return;
+		}
+		connect_dataset_list(Viewer, Result, Info);
+		//GIOChannel *Channel = g_io_channel_unix_new(zsock_fd(Socket));
+		//g_io_add_watch(Channel, G_IO_IN | G_IO_OUT | G_IO_ERR | G_IO_HUP, (void *)remote_msg_fn, Viewer);
+		g_timeout_add(100, G_SOURCE_FUNC(remote_msg_fn), Viewer);
+	}
+}
+
+static void connect_create_clicked(GtkWidget *Button, connect_info_t *Info) {
+	viewer_t *Viewer = Info->Viewer;
+	if (Viewer->RemoteSocket) {
+
 	}
 }
 
@@ -1692,10 +1769,10 @@ static void connect_clicked(GtkWidget *Button, viewer_t *Viewer) {
 		"Open", GTK_RESPONSE_ACCEPT,
 		NULL
 	);
-	GtkListStore *DatasetsStore = gtk_list_store_new(2, G_TYPE_STRING, G_TYPE_INT);
-	connect_info_t Info[1] = {{
-		Viewer, NULL, DatasetsStore
-	}};
+	GtkListStore *DatasetsStore = gtk_list_store_new(3, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_INT);
+	connect_info_t *Info = new(connect_info_t);
+	Info->Viewer = Viewer;
+	Info->DatasetsStore = DatasetsStore;
 	GtkBox *ContentArea = GTK_BOX(gtk_dialog_get_content_area(GTK_DIALOG(Dialog)));
 	GtkWidget *ServerCombo = gtk_combo_box_text_new_with_entry();
 	g_signal_connect(G_OBJECT(ServerCombo), "changed", G_CALLBACK(connect_server_changed), Info);
@@ -1706,16 +1783,27 @@ static void connect_clicked(GtkWidget *Button, viewer_t *Viewer) {
 	gtk_box_pack_start(GTK_BOX(ServerBox), ServerCombo, TRUE, TRUE, 2);
 	gtk_box_pack_start(GTK_BOX(ServerBox), ConnectButton, FALSE, FALSE, 2);
 	gtk_box_pack_start(ContentArea, ServerBox, FALSE, FALSE, 2);
+
 	GtkWidget *DatasetCombo = gtk_combo_box_new_with_model(GTK_TREE_MODEL(DatasetsStore));
+	g_signal_connect(G_OBJECT(DatasetCombo), "changed", G_CALLBACK(connect_dataset_changed), Info);
 	GtkCellRenderer *NameRenderer = gtk_cell_renderer_text_new();
 	GtkCellRenderer *LengthRenderer = gtk_cell_renderer_text_new();
 	gtk_cell_layout_pack_start(GTK_CELL_LAYOUT(DatasetCombo), NameRenderer, TRUE);
 	gtk_cell_layout_pack_start(GTK_CELL_LAYOUT(DatasetCombo), LengthRenderer, FALSE);
-	gtk_cell_layout_set_attributes(GTK_CELL_LAYOUT(DatasetCombo), NameRenderer, "text", 0, NULL);
-	gtk_cell_layout_set_attributes(GTK_CELL_LAYOUT(DatasetCombo), LengthRenderer, "text", 1, NULL);
-	gtk_box_pack_start(ContentArea, DatasetCombo, FALSE, FALSE, 2);
+	gtk_cell_layout_set_attributes(GTK_CELL_LAYOUT(DatasetCombo), NameRenderer, "text", 1, NULL);
+	gtk_cell_layout_set_attributes(GTK_CELL_LAYOUT(DatasetCombo), LengthRenderer, "text", 2, NULL);
+	GtkWidget *CreateButton = gtk_button_new_with_label("Create");
+	gtk_button_set_image(GTK_BUTTON(CreateButton), gtk_image_new_from_icon_name("document-new-symbolic", GTK_ICON_SIZE_BUTTON));
+	g_signal_connect(G_OBJECT(CreateButton), "clicked", G_CALLBACK(connect_create_clicked), Info);
+	GtkWidget *DatasetBox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+	gtk_box_pack_start(GTK_BOX(DatasetBox), DatasetCombo, TRUE, TRUE, 2);
+	gtk_box_pack_start(GTK_BOX(DatasetBox), CreateButton, FALSE, FALSE, 2);
+	gtk_box_pack_start(ContentArea, DatasetBox, FALSE, FALSE, 2);
 	gtk_widget_show_all(Dialog);
 	if (gtk_dialog_run(GTK_DIALOG(Dialog)) == GTK_RESPONSE_ACCEPT) {
+		if (Info->DatasetId) {
+			printf("Connecting to dataset %s\n", Info->DatasetId);
+		}
 	}
 	gtk_widget_destroy(Dialog);
 }
@@ -2902,6 +2990,79 @@ static ml_value_t *setenv_fn(viewer_t *Viewer, int Count, ml_value_t **Args) {
 	return MLNil;
 }
 
+static json_t *ml_to_json(ml_value_t *Value);
+
+static int ml_map_to_json(ml_value_t *Key, ml_value_t *Value, json_t *Object) {
+	if (Key->Type == MLStringT) {
+		json_object_set(Object, ml_string_value(Key), ml_to_json(Value));
+	}
+	return 0;
+}
+
+static json_t *ml_to_json(ml_value_t *Value) {
+	if (Value == MLNil) return json_null();
+	if (Value->Type == MLMethodT) {
+		if (!strcmp(ml_method_name(Value), "true")) return json_true();
+		if (!strcmp(ml_method_name(Value), "false")) return json_false();
+		return json_null();
+	}
+	if (Value->Type == MLIntegerT) return json_integer(ml_integer_value(Value));
+	if (Value->Type == MLRealT) return json_integer(ml_real_value(Value));
+	if (Value->Type == MLStringT) return json_string(ml_string_value(Value));
+	if (Value->Type == MLListT) {
+		json_t *Array = json_array();
+		for (ml_list_node_t *Node = ml_list_head(Value); Node; Node = Node->Next) {
+			json_array_append(Array, ml_to_json(Node->Value));
+		}
+		return Array;
+	}
+	if (Value->Type == MLMapT) {
+		json_t *Object = json_object();
+		ml_map_foreach(Value, Object, (void *)ml_map_to_json);
+		return Object;
+	}
+	return json_null();
+}
+
+static ml_value_t *json_to_ml(json_t *Json) {
+	switch (json_typeof(Json)) {
+	case JSON_NULL: return MLNil;
+	case JSON_TRUE: return ml_method("true");
+	case JSON_FALSE: return ml_method("false");
+	case JSON_INTEGER: return ml_integer(json_integer_value(Json));
+	case JSON_REAL: return ml_real(json_real_value(Json));
+	case JSON_STRING: return ml_string(json_string_value(Json), json_string_length(Json));
+	case JSON_ARRAY: {
+		ml_value_t *List = ml_list();
+		json_t *Value;
+		int I;
+		json_array_foreach(Json, I, Value) ml_list_append(List, json_to_ml(Value));
+		return List;
+	}
+	case JSON_OBJECT: {
+		ml_value_t *Map = ml_map();
+		const char *Key;
+		json_t *Value;
+		json_object_foreach(Json, Key, Value) ml_map_insert(Map, ml_string(Key, -1), json_to_ml(Value));
+		return Map;
+	}
+	default: return MLNil;
+	}
+}
+
+static void remote_ml_callback(viewer_t *Viewer, json_t *Result, ml_value_t *Callback) {
+	ml_inline(Callback, 1, json_to_ml(Result));
+}
+
+static ml_value_t *remote_fn(viewer_t *Viewer, int Count, ml_value_t **Args) {
+	ML_CHECK_ARG_COUNT(3);
+	ML_CHECK_ARG_TYPE(0, MLStringT);
+	if (!Viewer->RemoteSocket) return ml_error("RemoteError", "no remote connection");
+	json_t *Request = ml_to_json(Args[1]);
+	remote_request(Viewer, ml_string_value(Args[0]), Request, (void *)remote_ml_callback, Args[2]);
+	return MLNil;
+}
+
 static viewer_t *create_viewer(int Argc, char *Argv[]) {
 	viewer_t *Viewer = new(viewer_t);
 #ifdef USE_GL
@@ -2950,6 +3111,7 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 	stringmap_insert(Viewer->Globals, "setenv", ml_function(Viewer, (void *)setenv_fn));
 	stringmap_insert(Viewer->Globals, "open", ml_function(Viewer, ml_file_open));
 	stringmap_insert(Viewer->Globals, "filter", ml_function(Viewer, (void *)filter_fn));
+	stringmap_insert(Viewer->Globals, "remote", ml_function(Viewer, (void *)remote_fn));
 
 	GtkWidget *MainWindow = Viewer->MainWindow = gtk_window_new(GTK_WINDOW_TOPLEVEL);
 	gtk_window_set_title(GTK_WINDOW(Viewer->MainWindow), "DataViewer");
