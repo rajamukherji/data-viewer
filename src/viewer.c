@@ -124,7 +124,7 @@ struct viewer_t {
 	GtkClipboard *Clipboard;
 	GtkMenu *NodeMenu;
 	node_t *Nodes, *Root, *Selected;
-	node_t **Sorted, **SortBuffer;
+	node_t **SortBuffer;
 	node_t **SortedX, **SortedY;
 	cairo_t *Cairo;
 	node_t **LoadCache;
@@ -1581,24 +1581,6 @@ static gboolean key_press_viewer(GtkWidget *Widget, GdkEventKey *Event, viewer_t
 	return FALSE;
 }
 
-typedef struct connect_info_t {
-	viewer_t *Viewer;
-	const char *Server;
-	GtkListStore *DatasetsStore;
-	const char *DatasetId;
-} connect_info_t;
-
-static void connect_server_changed(GtkComboBoxText *ComboBox, connect_info_t *Info) {
-	Info->Server = gtk_combo_box_text_get_active_text(ComboBox);
-}
-
-static void connect_dataset_changed(GtkComboBox *ComboBox, connect_info_t *Info) {
-	GtkTreeIter Iter[1];
-	if (gtk_combo_box_get_active_iter(ComboBox, Iter)) {
-		gtk_tree_model_get(GTK_TREE_MODEL(Info->DatasetsStore), Iter, 0, &Info->DatasetId, -1);
-	}
-}
-
 struct queued_callback_t {
 	queued_callback_t *Next;
 	void (*Callback)(viewer_t *Viewer, json_t *Result, void *Data);
@@ -1616,6 +1598,26 @@ static void remote_request(viewer_t *Viewer, const char *Method, json_t *Request
 	zmsg_t *Msg = zmsg_new();
 	zmsg_addstr(Msg, json_dumps(json_pack("[iso]", Queued->Index, Method, Request), JSON_COMPACT));
 	zmsg_send(&Msg, Viewer->RemoteSocket);
+}
+
+typedef struct connect_info_t {
+	viewer_t *Viewer;
+	const char *Server;
+	GtkListStore *DatasetsStore;
+	GtkComboBox *DatasetCombo;
+	const char *DatasetId;
+	const char *ImagePrefix;
+} connect_info_t;
+
+static void connect_server_changed(GtkComboBoxText *ComboBox, connect_info_t *Info) {
+	Info->Server = gtk_combo_box_text_get_active_text(ComboBox);
+}
+
+static void connect_dataset_changed(GtkComboBox *ComboBox, connect_info_t *Info) {
+	GtkTreeIter Iter[1];
+	if (gtk_combo_box_get_active_iter(ComboBox, Iter)) {
+		gtk_tree_model_get(GTK_TREE_MODEL(Info->DatasetsStore), Iter, 0, &Info->DatasetId, -1);
+	}
 }
 
 /*static gboolean remote_msg_fn(GIOChannel *Source, GIOCondition Condition, viewer_t *Viewer) {
@@ -1746,6 +1748,7 @@ static void connect_connect_clicked(GtkWidget *Button, connect_info_t *Info) {
 			return;
 		}
 		connect_dataset_list(Viewer, Result, Info);
+		gtk_combo_box_set_active(Info->DatasetCombo, 0);
 		//GIOChannel *Channel = g_io_channel_unix_new(zsock_fd(Socket));
 		//g_io_add_watch(Channel, G_IO_IN | G_IO_OUT | G_IO_ERR | G_IO_HUP, (void *)remote_msg_fn, Viewer);
 		g_timeout_add(100, G_SOURCE_FUNC(remote_msg_fn), Viewer);
@@ -1757,6 +1760,86 @@ static void connect_create_clicked(GtkWidget *Button, connect_info_t *Info) {
 	if (Viewer->RemoteSocket) {
 
 	}
+}
+
+static void connect_images_get(viewer_t *Viewer, json_t *Result, connect_info_t *Info) {
+	printf("connect_images_get(%s)\n", json_dumps(Result, 0));
+	if (!json_is_array(Result)) return;
+	if (json_array_size(Result) != Viewer->NumNodes) return;
+	node_t *Nodes = Viewer->Nodes;
+	int ImagePrefixLength = strlen(Info->ImagePrefix);
+	for (int I = 0; I < Viewer->NumNodes; ++I) {
+		json_t *Json = json_array_get(Result, I);
+		int Size = json_string_length(Json);
+		const char *Text = json_string_value(Json);
+		char *FileName, *FilePath;
+		FileName = GC_malloc(Size + 1);
+		memcpy(FileName, Text, Size);
+		FileName[Size] = 0;
+		if (ImagePrefixLength) {
+			int Length = ImagePrefixLength + Size;
+			FilePath = GC_malloc(Length + 1);
+			memcpy(stpcpy(FilePath, Info->ImagePrefix), Text, Size);
+			FilePath[Length] = 0;
+		} else {
+			FilePath = FileName;
+		}
+		Nodes[I].FileName = FileName;
+		Nodes[I].File = g_file_new_for_path(FilePath);
+		if (FilePath != FileName) GC_free(FilePath);
+	}
+}
+
+static void connect_dataset_open(viewer_t *Viewer, json_t *Result, connect_info_t *Info) {
+	printf("connect_dataset_open(%s)\n", json_dumps(Result, 0));
+	const char *Name, *ImageId;
+	int NumNodes;
+	json_unpack(Result, "{sssiss}", "name", &Name, "length", &NumNodes, "image", &ImageId);
+	int NumFields = Viewer->NumFields = 0;
+	node_t *Nodes = Viewer->Nodes = (node_t *)GC_malloc(NumNodes * sizeof(node_t));
+	Viewer->SortedX = (node_t **)GC_malloc(NumNodes * sizeof(node_t *));
+	Viewer->SortedY = (node_t **)GC_malloc(NumNodes * sizeof(node_t *));
+	Viewer->SortBuffer = (node_t **)GC_malloc(NumNodes * sizeof(node_t *));
+	Viewer->NumFiltered = NumNodes;
+	memset(Nodes, 0, NumNodes * sizeof(node_t));
+	for (int I = 0; I < NumNodes; ++I) {
+		Nodes[I].Type = NodeT;
+		Nodes[I].Viewer = Viewer;
+		Nodes[I].Filtered = 1;
+		Viewer->SortedX[I] = &Nodes[I];
+		Viewer->SortedY[I] = &Nodes[I];
+	}
+	field_t **Fields = Viewer->Fields = (field_t **)GC_malloc(NumFields * sizeof(field_t *));
+#ifdef USE_GL
+	Viewer->GLVertices = (float *)GC_malloc_atomic(NumNodes * 3 * 3 * sizeof(float));
+	Viewer->GLColours = (float *)GC_malloc_atomic(NumNodes * 3 * 4 * sizeof(float));
+#endif
+	console_printf(Viewer->Console, "Loading rows...\n");
+
+	json_t *Indices = json_array();
+	for (int I = 0; I < NumNodes; ++I) json_array_append(Indices, json_integer(I));
+	remote_request(Viewer, "column/values/get", json_pack("{ssso}", "column", ImageId, "indices", Indices), (void *)connect_images_get, Info);
+
+	gtk_list_store_clear(Viewer->FieldsStore);
+
+	gtk_combo_box_set_active(GTK_COMBO_BOX(Viewer->XComboBox), -1);
+	gtk_combo_box_set_active(GTK_COMBO_BOX(Viewer->YComboBox), -1);
+	gtk_combo_box_set_active(GTK_COMBO_BOX(Viewer->CComboBox), -1);
+
+	nodes_iter_t *NodesIter = new(nodes_iter_t);
+	NodesIter->Type = NodesT;
+	NodesIter->Nodes = Viewer->Nodes;
+	NodesIter->NumNodes = Viewer->NumNodes;
+	stringmap_insert(Viewer->Globals, "Nodes", (ml_value_t *)NodesIter);
+
+	fields_t *FieldsValue = new(fields_t);
+	FieldsValue->Type = FieldsT;
+	FieldsValue->Viewer = Viewer;
+	stringmap_insert(Viewer->Globals, "Fields", (ml_value_t *)FieldsValue);
+
+	char Title[strlen(Name) + strlen(" - DataViewer") + 1];
+	sprintf(Title, "%s - DataViewer", Name);
+	gtk_window_set_title(GTK_WINDOW(Viewer->MainWindow), Title);
 }
 
 static void connect_clicked(GtkWidget *Button, viewer_t *Viewer) {
@@ -1774,6 +1857,8 @@ static void connect_clicked(GtkWidget *Button, viewer_t *Viewer) {
 	Info->Viewer = Viewer;
 	Info->DatasetsStore = DatasetsStore;
 	GtkBox *ContentArea = GTK_BOX(gtk_dialog_get_content_area(GTK_DIALOG(Dialog)));
+	gtk_container_set_border_width(GTK_CONTAINER(ContentArea), 6);
+
 	GtkWidget *ServerCombo = gtk_combo_box_text_new_with_entry();
 	g_signal_connect(G_OBJECT(ServerCombo), "changed", G_CALLBACK(connect_server_changed), Info);
 	GtkWidget *ConnectButton = gtk_button_new_with_label("Connect");
@@ -1785,6 +1870,7 @@ static void connect_clicked(GtkWidget *Button, viewer_t *Viewer) {
 	gtk_box_pack_start(ContentArea, ServerBox, FALSE, FALSE, 2);
 
 	GtkWidget *DatasetCombo = gtk_combo_box_new_with_model(GTK_TREE_MODEL(DatasetsStore));
+	Info->DatasetCombo = GTK_COMBO_BOX(DatasetCombo);
 	g_signal_connect(G_OBJECT(DatasetCombo), "changed", G_CALLBACK(connect_dataset_changed), Info);
 	GtkCellRenderer *NameRenderer = gtk_cell_renderer_text_new();
 	GtkCellRenderer *LengthRenderer = gtk_cell_renderer_text_new();
@@ -1799,10 +1885,19 @@ static void connect_clicked(GtkWidget *Button, viewer_t *Viewer) {
 	gtk_box_pack_start(GTK_BOX(DatasetBox), DatasetCombo, TRUE, TRUE, 2);
 	gtk_box_pack_start(GTK_BOX(DatasetBox), CreateButton, FALSE, FALSE, 2);
 	gtk_box_pack_start(ContentArea, DatasetBox, FALSE, FALSE, 2);
+
+	GtkWidget *PrefixBox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+	GtkWidget *PrefixEntry = gtk_entry_new();
+	gtk_box_pack_start(GTK_BOX(PrefixBox), gtk_label_new("Image Prefix"), FALSE, FALSE, 2);
+	gtk_box_pack_start(GTK_BOX(PrefixBox), PrefixEntry, TRUE, TRUE, 2);
+	gtk_box_pack_start(ContentArea, PrefixBox, FALSE, FALSE, 2);
+
 	gtk_widget_show_all(Dialog);
 	if (gtk_dialog_run(GTK_DIALOG(Dialog)) == GTK_RESPONSE_ACCEPT) {
+		Info->ImagePrefix = GC_strdup(gtk_entry_get_text(GTK_ENTRY(PrefixEntry)));
 		if (Info->DatasetId) {
 			printf("Connecting to dataset %s\n", Info->DatasetId);
+			remote_request(Viewer, "dataset/open", json_pack("{ss}", "id", Info->DatasetId), (void *)connect_dataset_open, Info);
 		}
 	}
 	gtk_widget_destroy(Dialog);
@@ -2622,7 +2717,6 @@ static void viewer_load_file(viewer_t *Viewer, const char *CsvFileName, const ch
 	int NumNodes = Viewer->NumNodes = Loader->Row - 1;
 	int NumFields = Viewer->NumFields;
 	node_t *Nodes = Viewer->Nodes = (node_t *)GC_malloc(NumNodes * sizeof(node_t));
-	Viewer->Sorted = (node_t **)GC_malloc(NumNodes * sizeof(node_t *));
 	Viewer->SortedX = (node_t **)GC_malloc(NumNodes * sizeof(node_t *));
 	Viewer->SortedY = (node_t **)GC_malloc(NumNodes * sizeof(node_t *));
 	Viewer->SortBuffer = (node_t **)GC_malloc(NumNodes * sizeof(node_t *));
@@ -2653,7 +2747,7 @@ static void viewer_load_file(viewer_t *Viewer, const char *CsvFileName, const ch
 	Viewer->GLColours = (float *)GC_malloc_atomic(NumNodes * 3 * 4 * sizeof(float));
 #endif
 	console_printf(Viewer->Console, "Loading rows...\n");
-	fopen(CsvFileName, "r");
+	File = fopen(CsvFileName, "r");
 	Loader->Nodes = Nodes;
 	Loader->Fields = Fields;
 	Loader->Row = Loader->Index = 0;
