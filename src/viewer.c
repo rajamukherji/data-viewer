@@ -35,6 +35,12 @@
 #define BOX_SIZE 40.0
 #endif
 
+#define FIELD_COLUMN_NAME 0
+#define FIELD_COLUMN_INDEX 1
+#define FIELD_COLUMN_VISIBLE 2
+#define FIELD_COLUMN_CONNECTED 3
+#define FIELD_COLUMN_REMOTE 4
+
 typedef struct node_t node_t;
 typedef int node_callback_t(void *Data, node_t *Node);
 typedef struct field_t field_t;
@@ -101,6 +107,8 @@ struct filter_t {
 	double Value;
 };
 
+typedef struct queued_callback_t queued_callback_t;
+
 struct viewer_t {
 	GtkWidget *MainWindow, *MainVPaned;
 	GtkLabel *NumVisibleLabel;
@@ -127,7 +135,8 @@ struct viewer_t {
 	console_t *Console;
 	stringmap_t Globals[1];
 	stringmap_t FieldsByName[1];
-	zsock_t *Socket;
+	zsock_t *RemoteSocket;
+	queued_callback_t *QueuedCallbacks;
 #ifdef USE_GL
 	float *GLVertices, *GLColours;
 #else
@@ -144,6 +153,7 @@ struct viewer_t {
 	int FilterGeneration, LoadGeneration;
 	int LoadCacheIndex;
 	int ShowBox, RedrawBackground;
+	int LastCallbackIndex;
 #ifdef USE_GL
 	int GLCount, GLReady;
 	GLuint GLArrays[2], GLBuffers[4];
@@ -1571,10 +1581,155 @@ static gboolean key_press_viewer(GtkWidget *Widget, GdkEventKey *Event, viewer_t
 	return FALSE;
 }
 
-static void load_column_clicked(GtkWidget *Button, viewer_t *Viewer) {
+typedef struct connect_info_t {
+	viewer_t *Viewer;
+	const char *Server;
+	GtkListStore *DatasetsStore;
+} connect_info_t;
+
+static void connect_server_changed(GtkComboBoxText *ComboBox, connect_info_t *Info) {
+	Info->Server = gtk_combo_box_text_get_active_text(ComboBox);
+}
+
+struct queued_callback_t {
+	queued_callback_t *Next;
+	void (*Callback)(viewer_t *Viewer, json_t *Result, void *Data);
+	void *Data;
+	int Index;
+};
+
+static void remote_request(viewer_t *Viewer, const char *Method, json_t *Request, void (*Callback)(viewer_t *, json_t *, void *), void *Data) {
+	queued_callback_t *Queued = new(queued_callback_t);
+	Queued->Next = Viewer->QueuedCallbacks;
+	Queued->Callback = Callback;
+	Queued->Data = Data;
+	Queued->Index = ++Viewer->LastCallbackIndex;
+	Viewer->QueuedCallbacks = Queued;
+	zmsg_t *Msg = zmsg_new();
+	zmsg_addstr(Msg, json_dumps(json_pack("[iso]", Queued->Index, Method, Request), JSON_COMPACT));
+	zmsg_send(&Msg, Viewer->RemoteSocket);
+}
+
+static gboolean remote_msg_fn(GIOChannel *Source, GIOCondition Condition, viewer_t *Viewer) {
+	for (;;) {
+		printf("remote_msg_fn(%x)\n", Source);
+		int Status = zsock_events(Viewer->RemoteSocket);
+		printf("Status = %d\n", Status);
+		if (Status & ZMQ_POLLIN == 0) break;
+		printf("Reading message\n");
+		zmsg_t *Msg = zmsg_recv(Viewer->RemoteSocket);
+		zframe_t *Frame = zmsg_pop(Msg);
+		json_error_t Error;
+		json_t *Response = json_loadb(zframe_data(Frame), zframe_size(Frame), 0, &Error);
+		if (!Response) {
+			fprintf(stderr, "Error parsing json\n");
+			continue;
+		}
+		int Index;
+		json_t *Result;
+		if (json_unpack(Response, "[io]", &Index, &Result)) {
+			fprintf(stderr, "Error invalid json\n");
+			continue;
+		}
+		if (Index == 0) {
+			// TODO: Handle alerts
+			continue;
+		}
+		if (json_is_object(Result)) {
+			json_t *Error = json_object_get(Result, "error");
+			if (Error) {
+				fprintf(stderr, "Error: %s", json_string_value(Error));
+				continue;
+			}
+		}
+		queued_callback_t **Slot = &Viewer->QueuedCallbacks;
+		while (Slot[0]) {
+			queued_callback_t *Queued = Slot[0];
+			if (Queued->Index == Index) {
+				Slot[0] = Queued->Next;
+				Queued->Callback(Viewer, Result, Queued->Data);
+				break;
+			}
+		}
+	}
+	return TRUE;
+}
+
+static void connect_dataset_list(viewer_t *Viewer, json_t *Result, connect_info_t *Info) {
+	printf("connect_dataset_list(%s)\n", json_dumps(Result, 0));
+	for (int I = 0; I < json_array_size(Result); ++I) {
+		const char *Name;
+		int Length;
+		if (!json_unpack(json_array_get(Result, I), "{sssi}", "name", &Name, "length", &Length)) {
+			gtk_list_store_insert_with_values(Info->DatasetsStore, 0, -1, 0, Name, 1, Length, -1);
+		}
+	}
+}
+
+static void connect_connect_clicked(GtkWidget *Button, connect_info_t *Info) {
+	viewer_t *Viewer = Info->Viewer;
+	if (Info->Server) {
+		if (Viewer->RemoteSocket) zsock_destroy(&Viewer->RemoteSocket);
+		zsock_t *Socket = Viewer->RemoteSocket = zsock_new_dealer(Info->Server);
+		if (!zsock_use_fd(Socket)) {
+			Viewer->RemoteSocket = NULL;
+			fprintf(stderr, "Error retrieving ZeroMQ file descriptor\n");
+			return;
+		}
+		remote_request(Viewer, "dataset/list", json_null(), (void *)connect_dataset_list, Info);
+		GIOChannel *Channel = g_io_channel_unix_new(zsock_fd(Socket));
+		g_io_add_watch(Channel, G_IO_IN | G_IO_ERR | G_IO_HUP, (void *)remote_msg_fn, Viewer);
+	}
 }
 
 static void connect_clicked(GtkWidget *Button, viewer_t *Viewer) {
+	// Connects to a data server and connects a data set or creates one
+	GtkWidget *Dialog = gtk_dialog_new_with_buttons(
+		"Connect to Data Server",
+		GTK_WINDOW(Viewer->MainWindow),
+		GTK_DIALOG_MODAL,
+		"Cancel", GTK_RESPONSE_CANCEL,
+		"Open", GTK_RESPONSE_ACCEPT,
+		NULL
+	);
+	GtkListStore *DatasetsStore = gtk_list_store_new(2, G_TYPE_STRING, G_TYPE_INT);
+	connect_info_t Info[1] = {{
+		Viewer, NULL, DatasetsStore
+	}};
+	GtkBox *ContentArea = GTK_BOX(gtk_dialog_get_content_area(GTK_DIALOG(Dialog)));
+	GtkWidget *ServerCombo = gtk_combo_box_text_new_with_entry();
+	g_signal_connect(G_OBJECT(ServerCombo), "changed", G_CALLBACK(connect_server_changed), Info);
+	GtkWidget *ConnectButton = gtk_button_new_with_label("Connect");
+	gtk_button_set_image(GTK_BUTTON(ConnectButton), gtk_image_new_from_icon_name("network-server-symbolic", GTK_ICON_SIZE_BUTTON));
+	g_signal_connect(G_OBJECT(ConnectButton), "clicked", G_CALLBACK(connect_connect_clicked), Info);
+	GtkWidget *ServerBox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+	gtk_box_pack_start(GTK_BOX(ServerBox), ServerCombo, TRUE, TRUE, 2);
+	gtk_box_pack_start(GTK_BOX(ServerBox), ConnectButton, FALSE, FALSE, 2);
+	gtk_box_pack_start(ContentArea, ServerBox, FALSE, FALSE, 2);
+	GtkWidget *DatasetCombo = gtk_combo_box_new_with_model(GTK_TREE_MODEL(DatasetsStore));
+	GtkCellRenderer *NameRenderer = gtk_cell_renderer_text_new();
+	GtkCellRenderer *LengthRenderer = gtk_cell_renderer_text_new();
+	gtk_cell_layout_pack_start(GTK_CELL_LAYOUT(DatasetCombo), NameRenderer, TRUE);
+	gtk_cell_layout_pack_start(GTK_CELL_LAYOUT(DatasetCombo), LengthRenderer, FALSE);
+	gtk_cell_layout_set_attributes(GTK_CELL_LAYOUT(DatasetCombo), NameRenderer, "text", 0, NULL);
+	gtk_cell_layout_set_attributes(GTK_CELL_LAYOUT(DatasetCombo), LengthRenderer, "text", 1, NULL);
+	gtk_box_pack_start(ContentArea, DatasetCombo, FALSE, FALSE, 2);
+	gtk_widget_show_all(Dialog);
+	if (gtk_dialog_run(GTK_DIALOG(Dialog)) == GTK_RESPONSE_ACCEPT) {
+	}
+	gtk_widget_destroy(Dialog);
+}
+
+static void field_save_remote() {
+	// Saves a local field to a data server and connects it
+}
+
+static void field_open_remote() {
+	// Loads a remote field to the local data and connects it
+}
+
+static void field_load_data() {
+	// Loads data from a CSV file into a field (which may be connected)
 }
 
 static void x_field_changed(GtkComboBox *Widget, viewer_t *Viewer) {
@@ -1685,7 +1840,7 @@ static void edit_value_changed(GtkComboBox *Widget, viewer_t *Viewer) {
 
 static void add_field_callback(const char *Name, viewer_t *Viewer, void *Data) {
 	Name = GC_strdup(Name);
-	gtk_list_store_insert_with_values(Viewer->FieldsStore, 0, -1, 0, Name, 1, Viewer->NumFields, 2, TRUE, -1);
+	gtk_list_store_insert_with_values(Viewer->FieldsStore, 0, -1, FIELD_COLUMN_NAME, Name, FIELD_COLUMN_INDEX, Viewer->NumFields, FIELD_COLUMN_VISIBLE, TRUE, -1);
 	int NumFields = Viewer->NumFields + 1;
 	field_t **Fields = (field_t **)GC_malloc(NumFields * sizeof(field_t *));
 	field_t *Field = (field_t *)GC_malloc(sizeof(field_t) + Viewer->NumNodes * sizeof(double));
@@ -2162,22 +2317,24 @@ static void preview_column_visible_toggled(GtkCellRendererToggle *Renderer, char
 	GtkTreeIter Iter[1];
 	gtk_tree_model_get_iter_from_string(GTK_TREE_MODEL(Viewer->FieldsStore), Iter, Path);
 	int Index;
-	gtk_tree_model_get(GTK_TREE_MODEL(Viewer->FieldsStore), Iter, 1, &Index, -1);
+	gtk_tree_model_get(GTK_TREE_MODEL(Viewer->FieldsStore), Iter, FIELD_COLUMN_INDEX, &Index, -1);
 	field_t *Field = Viewer->Fields[Index];
 	Field->PreviewVisible = !Field->PreviewVisible;
 	if (Viewer->ValuesStore) gtk_tree_view_column_set_visible(Field->PreviewColumn, Field->PreviewVisible);
-	gtk_list_store_set(Viewer->FieldsStore, Iter, 2, Field->PreviewVisible, -1);
+	gtk_list_store_set(Viewer->FieldsStore, Iter, FIELD_COLUMN_VISIBLE, Field->PreviewVisible, -1);
 }
 
 static void show_columns_clicked(GtkWidget *Button, viewer_t *Viewer) {
 	GtkWidget *Window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
 	gtk_window_set_transient_for(GTK_WINDOW(Window), GTK_WINDOW(Viewer->MainWindow));
 	gtk_container_set_border_width(GTK_CONTAINER(Window), 6);
+	GtkWidget *FieldsScrolled = gtk_scrolled_window_new(0, 0);
 	GtkWidget *FieldsView = gtk_tree_view_new_with_model(GTK_TREE_MODEL(Viewer->FieldsStore));
 	GtkCellRenderer *VisibleRenderer = gtk_cell_renderer_toggle_new();
 	gtk_tree_view_append_column(GTK_TREE_VIEW(FieldsView), gtk_tree_view_column_new_with_attributes("Name", gtk_cell_renderer_text_new(), "text", 0, NULL));
 	gtk_tree_view_append_column(GTK_TREE_VIEW(FieldsView), gtk_tree_view_column_new_with_attributes("Visible", VisibleRenderer, "active", 2, NULL));
-	gtk_container_add(GTK_CONTAINER(Window), FieldsView);
+	gtk_container_add(GTK_CONTAINER(FieldsScrolled), FieldsView);
+	gtk_container_add(GTK_CONTAINER(Window), FieldsScrolled);
 	g_signal_connect(G_OBJECT(VisibleRenderer), "toggled", G_CALLBACK(preview_column_visible_toggled), Viewer);
 	gtk_widget_show_all(Window);
 }
@@ -2438,7 +2595,7 @@ static void viewer_load_file(viewer_t *Viewer, const char *CsvFileName, const ch
 	gtk_list_store_clear(Viewer->FieldsStore);
 	for (int I = 0; I < NumFields; ++I) {
 		field_t *Field = Fields[I];
-		gtk_list_store_insert_with_values(Viewer->FieldsStore, 0, -1, 0, Field->Name, 1, I, 2, TRUE, -1);
+		gtk_list_store_insert_with_values(Viewer->FieldsStore, 0, -1, FIELD_COLUMN_NAME, Field->Name, FIELD_COLUMN_INDEX, I, FIELD_COLUMN_VISIBLE, TRUE, -1);
 		stringmap_insert(Viewer->FieldsByName, Field->Name, Field);
 		if (Field->EnumMap) {
 			int EnumSize = Field->EnumSize = Field->EnumMap->Size + 1;
@@ -2539,6 +2696,12 @@ static void viewer_open_file(GtkWidget *Button, viewer_t *Viewer) {
 static GtkWidget *create_viewer_action_bar(viewer_t *Viewer) {
 	GtkActionBar *ActionBar = GTK_ACTION_BAR(gtk_action_bar_new());
 
+	GtkWidget *ConnectButton = gtk_button_new_with_label("Connect");
+	gtk_button_set_image(GTK_BUTTON(ConnectButton), gtk_image_new_from_icon_name("network-server-symbolic", GTK_ICON_SIZE_BUTTON));
+	g_object_set(ConnectButton, "always-show-image", TRUE, NULL);
+	gtk_action_bar_pack_start(ActionBar, ConnectButton);
+	g_signal_connect(G_OBJECT(ConnectButton), "clicked", G_CALLBACK(connect_clicked), Viewer);
+
 	GtkWidget *OpenCsvButton = gtk_button_new_with_label("Open");
 	gtk_button_set_image(GTK_BUTTON(OpenCsvButton), gtk_image_new_from_icon_name("document-open-symbolic", GTK_ICON_SIZE_BUTTON));
 	g_object_set(OpenCsvButton, "always-show-image", TRUE, NULL);
@@ -2550,12 +2713,6 @@ static GtkWidget *create_viewer_action_bar(viewer_t *Viewer) {
 	g_object_set(SaveCsvButton, "always-show-image", TRUE, NULL);
 	gtk_action_bar_pack_start(ActionBar, SaveCsvButton);
 	g_signal_connect(G_OBJECT(SaveCsvButton), "clicked", G_CALLBACK(viewer_save_file), Viewer);
-
-	GtkWidget *LoadColumnButton = gtk_button_new_with_label("Load Column");
-	gtk_button_set_image(GTK_BUTTON(LoadColumnButton), gtk_image_new_from_icon_name("insert-text-symbolic", GTK_ICON_SIZE_BUTTON));
-	g_object_set(LoadColumnButton, "always-show-image", TRUE, NULL);
-	gtk_action_bar_pack_start(ActionBar, LoadColumnButton);
-	g_signal_connect(G_OBJECT(LoadColumnButton), "clicked", G_CALLBACK(load_column_clicked), Viewer);
 
 	GtkCellRenderer *FieldRenderer;
 	GtkWidget *XComboBox = Viewer->XComboBox = gtk_combo_box_new_with_model(GTK_TREE_MODEL(Viewer->FieldsStore));
@@ -2613,12 +2770,6 @@ static GtkWidget *create_viewer_action_bar(viewer_t *Viewer) {
 
 	g_signal_connect(G_OBJECT(AddFieldButton), "clicked", G_CALLBACK(add_field_clicked), Viewer);
 	g_signal_connect(G_OBJECT(AddValueButton), "clicked", G_CALLBACK(add_value_clicked), Viewer);
-
-	GtkWidget *ConnectButton = gtk_button_new_with_label("Connect");
-	gtk_button_set_image(GTK_BUTTON(ConnectButton), gtk_image_new_from_icon_name("network-server-symbolic", GTK_ICON_SIZE_BUTTON));
-	g_object_set(ConnectButton, "always-show-image", TRUE, NULL);
-	gtk_action_bar_pack_start(ActionBar, ConnectButton);
-	g_signal_connect(G_OBJECT(ConnectButton), "clicked", G_CALLBACK(connect_clicked), Viewer);
 
 	create_filter_window(Viewer);
 
@@ -2746,7 +2897,7 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 	Viewer->LoadCacheIndex = 0;
 	Viewer->ShowBox = 0;
 	Viewer->RedrawBackground = 0;
-	Viewer->FieldsStore = gtk_list_store_new(3, G_TYPE_STRING, G_TYPE_INT, G_TYPE_BOOLEAN);
+	Viewer->FieldsStore = gtk_list_store_new(5, G_TYPE_STRING, G_TYPE_INT, G_TYPE_BOOLEAN, G_TYPE_BOOLEAN, G_TYPE_STRING);
 	Viewer->Console = console_new((ml_getter_t)viewer_global_get, Viewer);
 	Viewer->ActivationFn = ml_function(Viewer->Console, (void *)console_print);
 	for (int I = 0; I < 10; ++I) Viewer->HotkeyFns[I] = Viewer->ActivationFn;
