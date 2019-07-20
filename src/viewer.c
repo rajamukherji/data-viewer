@@ -3,8 +3,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <gtk/gtk.h>
-#include <gdk-pixbuf/gdk-pixbuf.h>
 #include "libcsv/csv.h"
 #include <gc/gc.h>
 #include <minilang.h>
@@ -14,9 +12,8 @@
 #include <ml_iterfns.h>
 #include "console.h"
 #include "ml_csv.h"
-#include <stringmap.h>
-#include <jansson.h>
 #include <czmq.h>
+#include "viewer.h"
 
 #ifdef USE_GL
 #include <epoxy/gl.h>
@@ -41,61 +38,6 @@
 #define FIELD_COLUMN_CONNECTED 3
 #define FIELD_COLUMN_REMOTE 4
 
-typedef struct node_t node_t;
-typedef int node_callback_t(void *Data, node_t *Node);
-typedef struct field_t field_t;
-typedef struct filter_t filter_t;
-typedef struct viewer_t viewer_t;
-
-typedef struct {
-	double X, Y;
-} point_t;
-
-typedef struct {
-	double Min, Max;
-} range_t;
-
-static ml_type_t *NodeT;
-static ml_type_t *FieldT;
-
-struct node_t {
-	const ml_type_t *Type;
-	node_t *Children[2];
-	node_t *Next;
-	viewer_t *Viewer;
-	const char *FileName;
-	GdkPixbuf *Pixbuf;
-	GCancellable *LoadCancel;
-	GInputStream *LoadStream;
-	GFile *File;
-	double X, Y;
-	int XIndex, YIndex;
-#ifdef USE_GL
-	double R, G, B;
-#else
-	unsigned int Colour;
-#endif
-	int Filtered;
-	int LoadGeneration;
-};
-
-struct field_t {
-	const ml_type_t *Type;
-	const char *Name;
-	stringmap_t *EnumMap;
-	GtkListStore *EnumStore;
-	const char **EnumNames;
-	int *EnumValues;
-	GtkTreeViewColumn *PreviewColumn;
-	const char *RemoteId;
-	range_t Range;
-	int EnumSize;
-	int PreviewVisible;
-	int FilterGeneration;
-	double Sum, Sum2, SD;
-	double Values[];
-};
-
 typedef void filter_fn_t(int Count, node_t *Nodes, double *Input, double Value);
 
 struct filter_t {
@@ -107,60 +49,6 @@ struct filter_t {
 	double Value;
 };
 
-typedef struct queued_callback_t queued_callback_t;
-
-struct viewer_t {
-	GtkWidget *MainWindow, *MainVPaned;
-	GtkLabel *NumVisibleLabel;
-    GtkWidget *FilterWindow, *FiltersBox;
-	GtkWidget *DrawingArea, *ImagesView;
-	GtkWidget *PreviewWidget;
-	GtkWidget *XComboBox, *YComboBox, *CComboBox, *EditFieldComboBox, *EditValueComboBox;
-	GtkWidget *InfoBar;
-	GdkCursor *Cursor;
-	GtkListStore *ImagesStore, *ValuesStore;
-	GtkListStore *FieldsStore;
-	GtkListStore *OperatorsStore;
-	GtkClipboard *Clipboard;
-	GtkMenu *NodeMenu;
-	node_t *Nodes, *Root, *Selected;
-	node_t **SortBuffer;
-	node_t **SortedX, **SortedY;
-	cairo_t *Cairo;
-	node_t **LoadCache;
-	node_t *ActiveNode;
-	ml_value_t *ActivationFn;
-	ml_value_t *HotkeyFns[10];
-	const char *ActivationCode;
-	console_t *Console;
-	stringmap_t Globals[1];
-	stringmap_t FieldsByName[1];
-	zsock_t *RemoteSocket;
-	queued_callback_t *QueuedCallbacks;
-#ifdef USE_GL
-	float *GLVertices, *GLColours;
-#else
-	cairo_surface_t *CachedBackground;
-	unsigned int *CachedPixels;
-	int CachedStride;
-#endif
-	field_t **Fields, *EditField;
-	filter_t *Filters;
-	point_t Min, Max, Scale, DataMin, DataMax, Pointer;
-	double EditValue;
-	int NumNodes, NumFields, NumFiltered, NumVisible, NumUpdated;
-	int XIndex, YIndex, CIndex;
-	int FilterGeneration, LoadGeneration;
-	int LoadCacheIndex;
-	int ShowBox, RedrawBackground;
-	int LastCallbackIndex;
-#ifdef USE_GL
-	int GLCount, GLReady;
-	GLuint GLArrays[2], GLBuffers[4];
-	GLuint GLProgram, GLTransformLocation;
-#endif
-};
-
 #ifdef MINGW
 static char *stpcpy(char *Dest, const char *Source) {
 	while (*Source) *Dest++ = *Source++;
@@ -169,6 +57,25 @@ static char *stpcpy(char *Dest, const char *Source) {
 
 #define lstat stat
 #endif
+
+struct queued_callback_t {
+	queued_callback_t *Next;
+	void (*Callback)(viewer_t *Viewer, json_t *Result, void *Data);
+	void *Data;
+	int Index;
+};
+
+static void remote_request(viewer_t *Viewer, const char *Method, json_t *Request, void (*Callback)(viewer_t *, json_t *, void *), void *Data) {
+	queued_callback_t *Queued = new(queued_callback_t);
+	Queued->Next = Viewer->QueuedCallbacks;
+	Queued->Callback = Callback;
+	Queued->Data = Data;
+	Queued->Index = ++Viewer->LastCallbackIndex;
+	Viewer->QueuedCallbacks = Queued;
+	zmsg_t *Msg = zmsg_new();
+	zmsg_addstr(Msg, json_dumps(json_pack("[iso]", Queued->Index, Method, Request), JSON_COMPACT));
+	zmsg_send(&Msg, Viewer->RemoteSocket);
+}
 
 typedef struct node_foreach_t {
 	void *Data;
@@ -722,6 +629,7 @@ static ml_value_t *clipboard_fn(viewer_t *Viewer, int Count, ml_value_t **Args) 
 static void set_viewer_indices(viewer_t *Viewer, int XIndex, int YIndex) {
 	Viewer->XIndex = XIndex;
 	Viewer->YIndex = YIndex;
+	if (XIndex == -1 || YIndex == -1) return;
 	int NumNodes = Viewer->NumNodes;
 	field_t *XField = Viewer->Fields[XIndex];
 	field_t *YField = Viewer->Fields[YIndex];
@@ -745,10 +653,45 @@ static void set_viewer_indices(viewer_t *Viewer, int XIndex, int YIndex) {
 	update_node_tree(Viewer);
 	double RangeX = XField->Range.Max - XField->Range.Min;
 	double RangeY = YField->Range.Max - YField->Range.Min;
+	if (RangeX < 1e-9) RangeX = 1e-9;
+	if (RangeY < 1e-9) RangeY = 1e-9;
 	Viewer->DataMin.X = XField->Range.Min - RangeX * 0.01;
 	Viewer->DataMin.Y = YField->Range.Min - RangeY * 0.01;
 	Viewer->DataMax.X = XField->Range.Max + RangeX * 0.01;
 	Viewer->DataMax.Y = YField->Range.Max + RangeY * 0.01;
+	Viewer->Min = Viewer->DataMin;
+	Viewer->Max = Viewer->DataMax;
+	int Width = gtk_widget_get_allocated_width(Viewer->DrawingArea);
+	int Height = gtk_widget_get_allocated_height(Viewer->DrawingArea);
+	Viewer->Scale.X = Width / (Viewer->Max.X - Viewer->Min.X);
+	Viewer->Scale.Y = Height / (Viewer->Max.Y - Viewer->Min.Y);
+}
+
+static void clear_viewer_indices(viewer_t *Viewer) {
+	Viewer->XIndex = -1;
+	Viewer->YIndex = -1;
+	int NumNodes = Viewer->NumNodes;
+
+	node_t *Node = Viewer->Nodes;
+	for (int I = NumNodes; --I >= 0;) {
+		Node->X = (double)rand() / RAND_MAX;
+		Node->Y = (double)rand() / RAND_MAX;
+		Node->Colour = 0xFF000000;
+		++Node;
+	}
+	merge_sort_x(Viewer->SortedX, Viewer->SortedX + NumNodes, Viewer->SortBuffer);
+	merge_sort_y(Viewer->SortedY, Viewer->SortedY + NumNodes, Viewer->SortBuffer);
+	for (int I = 0; I < NumNodes; ++I) {
+		Viewer->SortedX[I]->XIndex = I;
+		Viewer->SortedY[I]->YIndex = I;
+	}
+	update_node_tree(Viewer);
+	double RangeX = 1.0;
+	double RangeY = 1.0;
+	Viewer->DataMin.X = 0.0 - RangeX * 0.01;
+	Viewer->DataMin.Y = 0.0 - RangeY * 0.01;
+	Viewer->DataMax.X = 1.0 + RangeX * 0.01;
+	Viewer->DataMax.Y = 1.0 + RangeY * 0.01;
 	Viewer->Min = Viewer->DataMin;
 	Viewer->Max = Viewer->DataMax;
 	int Width = gtk_widget_get_allocated_width(Viewer->DrawingArea);
@@ -1062,7 +1005,32 @@ static int edit_node_value(viewer_t *Viewer, node_t *Node) {
 	return 0;
 }
 
+typedef struct edit_node_remote_t {
+	viewer_t *Viewer;
+	field_t *Field;
+	json_t *Indices;
+	json_t *Values;
+} edit_node_remote_t;
+
+static int edit_node_value_remote(edit_node_remote_t *Info, node_t *Node) {
+	viewer_t *Viewer = Info->Viewer;
+	field_t *Field = Info->Field;
+	++Viewer->NumUpdated;
+	size_t Index = Node - Viewer->Nodes;
+	double Value = Field->Values[Index] = Viewer->EditValue;
+	if (Field == Viewer->Fields[Viewer->CIndex]) {
+		set_node_rgb(Node, 6.0 * (Value - Field->Range.Min) / (Field->Range.Max - Field->Range.Min));
+	}
+	json_array_append(Info->Indices, json_integer(Index));
+	json_array_append(Info->Values, json_string(Field->EnumNames[(int)Value]));
+	return 0;
+}
+
 static void viewer_filter_nodes(viewer_t *Viewer);
+
+static void column_values_set(viewer_t *Viewer, json_t *Result, field_t *Field) {
+
+}
 
 static void edit_node_values(viewer_t *Viewer) {
 	if (!Viewer->EditField) return;
@@ -1072,8 +1040,20 @@ static void edit_node_values(viewer_t *Viewer) {
 	double X2 = Viewer->Min.X + (Viewer->Pointer.X + BOX_SIZE / 2) / Viewer->Scale.X;
 	double Y2 = Viewer->Min.Y + (Viewer->Pointer.Y + BOX_SIZE / 2) / Viewer->Scale.Y;
 	printf("\n\n%s:%d\n", __FUNCTION__, __LINE__);
-	foreach_node(Viewer, X1, Y1, X2, Y2, Viewer, (node_callback_t *)edit_node_value);
-	if (Viewer->EditField == Viewer->Fields[Viewer->CIndex]) {
+	field_t *Field = Viewer->EditField;
+	if (Field->RemoteId) {
+		edit_node_remote_t Info[1] = {{Viewer, Field, json_array(), json_array()}};
+		foreach_node(Viewer, X1, Y1, X2, Y2, Info, (node_callback_t *)edit_node_value_remote);
+		json_t *Request = json_pack("{sssoso}",
+			"column", Field->RemoteId,
+			"indices", Info->Indices,
+			"values", Info->Values
+		);
+		remote_request(Viewer, "column/values/set", Request, (void *)column_values_set, Field);
+	} else {
+		foreach_node(Viewer, X1, Y1, X2, Y2, Viewer, (node_callback_t *)edit_node_value);
+	}
+	if (Field == Viewer->Fields[Viewer->CIndex]) {
 		++Viewer->FilterGeneration;
 		set_viewer_colour_index(Viewer, Viewer->CIndex);
 	}
@@ -1581,25 +1561,6 @@ static gboolean key_press_viewer(GtkWidget *Widget, GdkEventKey *Event, viewer_t
 	return FALSE;
 }
 
-struct queued_callback_t {
-	queued_callback_t *Next;
-	void (*Callback)(viewer_t *Viewer, json_t *Result, void *Data);
-	void *Data;
-	int Index;
-};
-
-static void remote_request(viewer_t *Viewer, const char *Method, json_t *Request, void (*Callback)(viewer_t *, json_t *, void *), void *Data) {
-	queued_callback_t *Queued = new(queued_callback_t);
-	Queued->Next = Viewer->QueuedCallbacks;
-	Queued->Callback = Callback;
-	Queued->Data = Data;
-	Queued->Index = ++Viewer->LastCallbackIndex;
-	Viewer->QueuedCallbacks = Queued;
-	zmsg_t *Msg = zmsg_new();
-	zmsg_addstr(Msg, json_dumps(json_pack("[iso]", Queued->Index, Method, Request), JSON_COMPACT));
-	zmsg_send(&Msg, Viewer->RemoteSocket);
-}
-
 typedef struct connect_info_t {
 	viewer_t *Viewer;
 	const char *Server;
@@ -1795,6 +1756,7 @@ static void connect_dataset_open(viewer_t *Viewer, json_t *Result, connect_info_
 	const char *Name, *ImageId;
 	int NumNodes;
 	json_unpack(Result, "{sssiss}", "name", &Name, "length", &NumNodes, "image", &ImageId);
+	Viewer->NumNodes = NumNodes;
 	int NumFields = Viewer->NumFields = 0;
 	node_t *Nodes = Viewer->Nodes = (node_t *)GC_malloc(NumNodes * sizeof(node_t));
 	Viewer->SortedX = (node_t **)GC_malloc(NumNodes * sizeof(node_t *));
@@ -1810,21 +1772,18 @@ static void connect_dataset_open(viewer_t *Viewer, json_t *Result, connect_info_
 		Viewer->SortedY[I] = &Nodes[I];
 	}
 	field_t **Fields = Viewer->Fields = (field_t **)GC_malloc(NumFields * sizeof(field_t *));
+	Viewer->RemoteFields[0] = (stringmap_t)STRINGMAP_INIT;
 #ifdef USE_GL
 	Viewer->GLVertices = (float *)GC_malloc_atomic(NumNodes * 3 * 3 * sizeof(float));
 	Viewer->GLColours = (float *)GC_malloc_atomic(NumNodes * 3 * 4 * sizeof(float));
 #endif
 	console_printf(Viewer->Console, "Loading rows...\n");
 
-	json_t *Indices = json_array();
-	for (int I = 0; I < NumNodes; ++I) json_array_append(Indices, json_integer(I));
-	remote_request(Viewer, "column/values/get", json_pack("{ssso}", "column", ImageId, "indices", Indices), (void *)connect_images_get, Info);
+	remote_request(Viewer, "column/values/get", json_pack("{ss}", "column", ImageId), (void *)connect_images_get, Info);
 
 	gtk_list_store_clear(Viewer->FieldsStore);
 
-	gtk_combo_box_set_active(GTK_COMBO_BOX(Viewer->XComboBox), -1);
-	gtk_combo_box_set_active(GTK_COMBO_BOX(Viewer->YComboBox), -1);
-	gtk_combo_box_set_active(GTK_COMBO_BOX(Viewer->CComboBox), -1);
+	clear_viewer_indices(Viewer);
 
 	nodes_iter_t *NodesIter = new(nodes_iter_t);
 	NodesIter->Type = NodesT;
@@ -1873,10 +1832,10 @@ static void connect_clicked(GtkWidget *Button, viewer_t *Viewer) {
 	Info->DatasetCombo = GTK_COMBO_BOX(DatasetCombo);
 	g_signal_connect(G_OBJECT(DatasetCombo), "changed", G_CALLBACK(connect_dataset_changed), Info);
 	GtkCellRenderer *NameRenderer = gtk_cell_renderer_text_new();
-	GtkCellRenderer *LengthRenderer = gtk_cell_renderer_text_new();
 	gtk_cell_layout_pack_start(GTK_CELL_LAYOUT(DatasetCombo), NameRenderer, TRUE);
-	gtk_cell_layout_pack_start(GTK_CELL_LAYOUT(DatasetCombo), LengthRenderer, FALSE);
 	gtk_cell_layout_set_attributes(GTK_CELL_LAYOUT(DatasetCombo), NameRenderer, "text", 1, NULL);
+	GtkCellRenderer *LengthRenderer = gtk_cell_renderer_text_new();
+	gtk_cell_layout_pack_start(GTK_CELL_LAYOUT(DatasetCombo), LengthRenderer, FALSE);
 	gtk_cell_layout_set_attributes(GTK_CELL_LAYOUT(DatasetCombo), LengthRenderer, "text", 2, NULL);
 	GtkWidget *CreateButton = gtk_button_new_with_label("Create");
 	gtk_button_set_image(GTK_BUTTON(CreateButton), gtk_image_new_from_icon_name("document-new-symbolic", GTK_ICON_SIZE_BUTTON));
@@ -1901,18 +1860,6 @@ static void connect_clicked(GtkWidget *Button, viewer_t *Viewer) {
 		}
 	}
 	gtk_widget_destroy(Dialog);
-}
-
-static void field_save_remote() {
-	// Saves a local field to a data server and connects it
-}
-
-static void field_open_remote() {
-	// Loads a remote field to the local data and connects it
-}
-
-static void field_load_data() {
-	// Loads data from a CSV file into a field (which may be connected)
 }
 
 static void x_field_changed(GtkComboBox *Widget, viewer_t *Viewer) {
@@ -2507,17 +2454,218 @@ static void preview_column_visible_toggled(GtkCellRendererToggle *Renderer, char
 	gtk_list_store_set(Viewer->FieldsStore, Iter, FIELD_COLUMN_VISIBLE, Field->PreviewVisible, -1);
 }
 
+static void columns_remote_list(viewer_t *Viewer, json_t *Result, GtkListStore *FieldsModel) {
+	if (!json_is_object(Result)) return;
+	json_t *ColumnsInfo = json_object_get(Result, "columns");
+	if (!ColumnsInfo) return;
+	const char *Id;
+	json_t *Info;
+	json_object_foreach(ColumnsInfo, Id, Info) {
+		if (!stringmap_search(Viewer->RemoteFields, Id)) {
+			const char *Name, *Type;
+			json_unpack(Info, "{ssss}", "name", &Name, "type", &Type);
+			gtk_list_store_insert_with_values(FieldsModel, 0, -1, 0, Id, 1, Name, 2, Type, -1);
+		}
+	}
+}
+
+static void column_values_get(viewer_t *Viewer, json_t *Result, field_t *Field) {
+	double *Values = Field->Values;
+	if (Field->EnumMap) {
+		for (int Index = 0; Index < Viewer->NumNodes; ++Index) {
+			double Value = 0.0;
+			const char *Text = json_string_value(json_array_get(Result, Index));
+			if (Text && Text[0]) {
+				double *Ref = stringmap_search(Field->EnumMap, Text);
+				if (Ref) {
+					Value = *(double *)Ref;
+				} else {
+					Ref = new(double);
+					stringmap_insert(Field->EnumMap, GC_strdup(Text), Ref);
+					*(double *)Ref = Value = Field->EnumMap->Size;
+				}
+			}
+			Values[Index] = Value;
+		}
+		int EnumSize = Field->EnumSize = Field->EnumMap->Size + 1;
+		const char **EnumNames = (const char **)GC_malloc(EnumSize * sizeof(const char *));
+		EnumNames[0] = "";
+		stringmap_foreach(Field->EnumMap, EnumNames, (void *)set_enum_name_fn);
+		Field->EnumNames = EnumNames;
+		GtkListStore *EnumStore = Field->EnumStore = gtk_list_store_new(2, G_TYPE_STRING, G_TYPE_DOUBLE);
+		for (int J = 0; J < EnumSize; ++J) {
+			gtk_list_store_insert_with_values(Field->EnumStore, 0, -1, 0, Field->EnumNames[J], 1, (double)(J + 1), -1);
+		}
+		Field->EnumValues = (int *)GC_malloc_atomic(EnumSize * sizeof(int));
+		Field->Range.Min = 0.0;
+		Field->Range.Max = EnumSize;
+	} else {
+		double Min = INFINITY, Max = -INFINITY;
+		double Sum = 0.0, Sum2 = 0.0;
+		for (int Index = 0; Index < Viewer->NumNodes; ++Index) {
+			double Value = Values[Index] = json_number_value(json_array_get(Result, Index));
+			if (Value < Min) Min = Value;
+			if (Value > Max) Max = Value;
+			Sum += Value;
+			Sum2 += Value * Value;
+		}
+		Field->Range.Min = Min;
+		Field->Range.Max = Max;
+		Field->Sum = Sum;
+		Field->Sum = Sum2;
+		double Mean = Sum / Viewer->NumNodes;
+		Field->SD = sqrt((Sum2 / Viewer->NumNodes) - Mean * Mean);
+	}
+}
+
+typedef struct columns_list_t {
+	viewer_t *Viewer;
+	GtkComboBox *FieldsCombo;
+	GtkListStore *FieldsModel;
+} columns_list_t;
+
+static void column_open_clicked(GtkWidget *Button, columns_list_t *Info) {
+	GtkTreeIter Iter[1];
+	if (gtk_combo_box_get_active_iter(Info->FieldsCombo, Iter)) {
+		viewer_t *Viewer = Info->Viewer;
+		const char *RemoteId, *Name, *Type;
+		gtk_tree_model_get(GTK_TREE_MODEL(Info->FieldsModel), Iter, 0, &RemoteId, 1, &Name, 2, &Type, -1);
+		gtk_list_store_remove(Info->FieldsModel, Iter);
+		gtk_list_store_insert_with_values(Viewer->FieldsStore, 0, -1,
+			FIELD_COLUMN_NAME, Name,
+			FIELD_COLUMN_INDEX, Viewer->NumFields,
+			FIELD_COLUMN_VISIBLE, TRUE,
+			FIELD_COLUMN_CONNECTED, TRUE,
+			FIELD_COLUMN_REMOTE, Name,
+			-1
+		);
+		int NumFields = Viewer->NumFields + 1;
+		field_t **Fields = (field_t **)GC_malloc(NumFields * sizeof(field_t *));
+		field_t *Field = (field_t *)GC_malloc(sizeof(field_t) + Viewer->NumNodes * sizeof(double));
+		Field->Type = FieldT;
+		if (!strcmp(Type, "string")) {
+			Field->EnumStore = gtk_list_store_new(2, G_TYPE_STRING, G_TYPE_DOUBLE);
+			Field->EnumNames = (const char **)GC_malloc(sizeof(const char *));
+			Field->EnumValues = (int *)GC_malloc_atomic(sizeof(int));
+			Field->EnumNames[0] = "";
+			Field->EnumSize = 1;
+			Field->EnumMap = new(stringmap_t);
+			gtk_list_store_insert_with_values(Field->EnumStore, 0, -1, 0, "", 1, 0.0, -1);
+		}
+		Field->Name = GC_strdup(Name);
+		Field->PreviewColumn = 0;
+		Field->PreviewVisible = 1;
+		Field->FilterGeneration = 0;
+		Field->Sum = Field->Sum2 = 0.0;
+		Field->RemoteId = RemoteId;
+		Field->RemoteGenerations = (json_int_t *)GC_malloc_atomic(Viewer->NumNodes * sizeof(json_int_t));
+		memset(Field->RemoteGenerations, 0, Viewer->NumNodes * sizeof(json_int_t));
+		memset(Field->Values, 0, Viewer->NumNodes * sizeof(double));
+		for (int I = 0; I < Viewer->NumFields; ++I) Fields[I] = Viewer->Fields[I];
+		Fields[Viewer->NumFields] = Field;
+		stringmap_insert(Viewer->FieldsByName, Field->Name, Field);
+		GC_free(Viewer->Fields);
+		Viewer->Fields = Fields;
+		Viewer->NumFields = NumFields;
+		stringmap_insert(Viewer->RemoteFields, RemoteId, Field);
+		remote_request(Viewer, "column/values/get", json_pack("{ss}", "column", RemoteId), (void *)column_values_get, Field);
+	}
+}
+
+typedef struct column_create_remote_t {
+	const char *Path;
+	const char *Name;
+	field_t *Field;
+} column_create_remote_t;
+
+static void column_create(viewer_t *Viewer, json_t *Result, column_create_remote_t *Info) {
+	field_t *Field = Info->Field;
+	Field->RemoteId = json_string_value(Result);
+	json_t *Values = json_array();
+	if (Field->EnumNames) {
+		for (int I = 0; I < Viewer->NumNodes; ++I) {
+			json_array_append(Values, json_string(Field->EnumNames[(int)Field->Values[I]]));
+		}
+	} else {
+		for (int I = 0; I < Viewer->NumNodes; ++I) {
+			json_array_append(Values, json_real(Field->Values[I]));
+		}
+	}
+	json_t *Request = json_pack("{ssso}", "column", Field->RemoteId, "values", Values);
+	remote_request(Viewer, "column/values/set", Request, (void *)column_values_set, Field);
+	GtkTreeIter Iter[1];
+	gtk_tree_model_get_iter_from_string(GTK_TREE_MODEL(Viewer->FieldsStore), Iter, Info->Path);
+	gtk_list_store_set(Viewer->FieldsStore, Iter, FIELD_COLUMN_CONNECTED, TRUE, FIELD_COLUMN_REMOTE, Info->Name, -1);
+}
+
+static void column_create_remote(const char *Result, viewer_t *Viewer, column_create_remote_t *Info) {
+	json_t *Request = json_pack("{ssss}",
+		"name", Result,
+		"type", Info->Field->EnumMap ? "string" : "real"
+	);
+	Info->Name = Result;
+	remote_request(Viewer, "column/create", Request, (void *)column_create, Info);
+}
+
+static void column_connected_toggled(GtkCellRendererToggle *Renderer, char *Path, viewer_t *Viewer) {
+	GtkTreeIter Iter[1];
+	gtk_tree_model_get_iter_from_string(GTK_TREE_MODEL(Viewer->FieldsStore), Iter, Path);
+	int Index;
+	gtk_tree_model_get(GTK_TREE_MODEL(Viewer->FieldsStore), Iter, FIELD_COLUMN_INDEX, &Index, -1);
+	field_t *Field = Viewer->Fields[Index];
+	if (Field->RemoteId) {
+		Field->RemoteId = 0;
+		gtk_list_store_set(Viewer->FieldsStore, Iter, FIELD_COLUMN_CONNECTED, FALSE, FIELD_COLUMN_REMOTE, "", -1);
+	} else {
+		column_create_remote_t *Info = new(column_create_remote_t);
+		Info->Path = GC_strdup(Path);
+		Info->Field = Field;
+		text_input_dialog("Remote Column Name", Viewer, (text_dialog_callback_t *)column_create_remote, Info);
+	}
+}
+
 static void show_columns_clicked(GtkWidget *Button, viewer_t *Viewer) {
 	GtkWidget *Window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+	GtkWidget *VBox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
 	gtk_window_set_transient_for(GTK_WINDOW(Window), GTK_WINDOW(Viewer->MainWindow));
-	gtk_container_set_border_width(GTK_CONTAINER(Window), 6);
+	gtk_container_set_border_width(GTK_CONTAINER(VBox), 6);
 	GtkWidget *FieldsScrolled = gtk_scrolled_window_new(0, 0);
 	GtkWidget *FieldsView = gtk_tree_view_new_with_model(GTK_TREE_MODEL(Viewer->FieldsStore));
 	GtkCellRenderer *VisibleRenderer = gtk_cell_renderer_toggle_new();
-	gtk_tree_view_append_column(GTK_TREE_VIEW(FieldsView), gtk_tree_view_column_new_with_attributes("Name", gtk_cell_renderer_text_new(), "text", 0, NULL));
-	gtk_tree_view_append_column(GTK_TREE_VIEW(FieldsView), gtk_tree_view_column_new_with_attributes("Visible", VisibleRenderer, "active", 2, NULL));
+	gtk_tree_view_append_column(GTK_TREE_VIEW(FieldsView), gtk_tree_view_column_new_with_attributes("Name", gtk_cell_renderer_text_new(), "text", FIELD_COLUMN_NAME, NULL));
+	gtk_tree_view_append_column(GTK_TREE_VIEW(FieldsView), gtk_tree_view_column_new_with_attributes("Visible", VisibleRenderer, "active", FIELD_COLUMN_VISIBLE, NULL));
 	gtk_container_add(GTK_CONTAINER(FieldsScrolled), FieldsView);
-	gtk_container_add(GTK_CONTAINER(Window), FieldsScrolled);
+	gtk_box_pack_start(GTK_BOX(VBox), FieldsScrolled, TRUE, TRUE, 2);
+
+	if (Viewer->RemoteSocket) {
+		columns_list_t *Info = new(columns_list_t);
+		Info->Viewer = Viewer;
+		GtkWidget *RemoteBox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+		GtkListStore *FieldsModel = Info->FieldsModel = gtk_list_store_new(3, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
+		GtkWidget *FieldsCombo = gtk_combo_box_new_with_model(GTK_TREE_MODEL(FieldsModel));
+		Info->FieldsCombo = GTK_COMBO_BOX(FieldsCombo);
+		GtkCellRenderer *NameRenderer = gtk_cell_renderer_text_new();
+		gtk_cell_layout_pack_start(GTK_CELL_LAYOUT(FieldsCombo), NameRenderer, TRUE);
+		gtk_cell_layout_set_attributes(GTK_CELL_LAYOUT(FieldsCombo), NameRenderer, "text", 1, NULL);
+		GtkCellRenderer *TypeRenderer = gtk_cell_renderer_text_new();
+		gtk_cell_layout_pack_start(GTK_CELL_LAYOUT(FieldsCombo), TypeRenderer, TRUE);
+		gtk_cell_layout_set_attributes(GTK_CELL_LAYOUT(FieldsCombo), TypeRenderer, "text", 2, NULL);
+		GtkWidget *OpenButton = gtk_button_new_with_label("Open");
+		gtk_button_set_image(GTK_BUTTON(OpenButton), gtk_image_new_from_icon_name("network-server-symbolic", GTK_ICON_SIZE_BUTTON));
+		g_object_set(OpenButton, "always-show-image", TRUE, NULL);
+		g_signal_connect(G_OBJECT(OpenButton), "clicked", G_CALLBACK(column_open_clicked), Info);
+		gtk_box_pack_start(GTK_BOX(RemoteBox), FieldsCombo, TRUE, TRUE, 2);
+		gtk_box_pack_start(GTK_BOX(RemoteBox), OpenButton, FALSE, FALSE, 2);
+		gtk_box_pack_start(GTK_BOX(VBox), RemoteBox, FALSE, FALSE, 2);
+		remote_request(Viewer, "dataset/info", json_null(), (void *)columns_remote_list, FieldsModel);
+
+		GtkCellRenderer *ConnectedRenderer = gtk_cell_renderer_toggle_new();
+		gtk_tree_view_append_column(GTK_TREE_VIEW(FieldsView), gtk_tree_view_column_new_with_attributes("Connected", ConnectedRenderer, "active", FIELD_COLUMN_CONNECTED, NULL));
+		gtk_tree_view_append_column(GTK_TREE_VIEW(FieldsView), gtk_tree_view_column_new_with_attributes("Remote", gtk_cell_renderer_text_new(), "text", FIELD_COLUMN_REMOTE, NULL));
+		g_signal_connect(G_OBJECT(ConnectedRenderer), "toggled", G_CALLBACK(column_connected_toggled), Viewer);
+	}
+
+	gtk_container_add(GTK_CONTAINER(Window), VBox);
 	g_signal_connect(G_OBJECT(VisibleRenderer), "toggled", G_CALLBACK(preview_column_visible_toggled), Viewer);
 	gtk_widget_show_all(Window);
 }
@@ -2742,6 +2890,7 @@ static void viewer_load_file(viewer_t *Viewer, const char *CsvFileName, const ch
 		Field->Sum = Field->Sum2 = 0.0;
 		Fields[I] = Field;
 	}
+	Viewer->RemoteFields[0] = (stringmap_t)STRINGMAP_INIT;
 #ifdef USE_GL
 	Viewer->GLVertices = (float *)GC_malloc_atomic(NumNodes * 3 * 3 * sizeof(float));
 	Viewer->GLColours = (float *)GC_malloc_atomic(NumNodes * 3 * 4 * sizeof(float));
@@ -2790,15 +2939,21 @@ static void viewer_load_file(viewer_t *Viewer, const char *CsvFileName, const ch
 				gtk_list_store_insert_with_values(Field->EnumStore, 0, -1, 0, Field->EnumNames[J], 1, (double)(J + 1), -1);
 			}
 			Field->EnumValues = (int *)GC_malloc_atomic(EnumSize * sizeof(int));
+			Field->Range.Min = 0.0;
+			Field->Range.Max = EnumSize;
 		} else {
 			double Mean = Field->Sum / Viewer->NumNodes;
 			Field->SD = sqrt((Field->Sum2 / Viewer->NumNodes) - Mean * Mean);
 		}
 	}
 
-	gtk_combo_box_set_active(GTK_COMBO_BOX(Viewer->XComboBox), 0);
-	gtk_combo_box_set_active(GTK_COMBO_BOX(Viewer->YComboBox), 1);
-	gtk_combo_box_set_active(GTK_COMBO_BOX(Viewer->CComboBox), Viewer->NumFields - 1);
+	if (NumFields >= 2) {
+		gtk_combo_box_set_active(GTK_COMBO_BOX(Viewer->XComboBox), 0);
+		gtk_combo_box_set_active(GTK_COMBO_BOX(Viewer->YComboBox), 1);
+		gtk_combo_box_set_active(GTK_COMBO_BOX(Viewer->CComboBox), Viewer->NumFields - 1);
+	} else {
+		clear_viewer_indices(Viewer);
+	}
 
 	nodes_iter_t *NodesIter = new(nodes_iter_t);
 	NodesIter->Type = NodesT;
