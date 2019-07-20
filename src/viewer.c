@@ -1660,6 +1660,7 @@ static gboolean key_press_viewer(GtkWidget *Widget, GdkEventKey *Event, viewer_t
 typedef struct connect_info_t {
 	viewer_t *Viewer;
 	const char *Server;
+	GtkWidget *Dialog;
 	GtkListStore *DatasetsStore;
 	GtkComboBox *DatasetCombo;
 	const char *DatasetId;
@@ -1819,10 +1820,87 @@ static void connect_connect_clicked(GtkWidget *Button, connect_info_t *Info) {
 	}
 }
 
+typedef void text_dialog_callback_t(const char *Result, viewer_t *Viewer, void *Data);
+
+typedef struct {
+	GtkWidget *Dialog, *Entry;
+	text_dialog_callback_t *Callback;
+	viewer_t *Viewer;
+	void *Data;
+} text_dialog_info_t;
+
+static void text_input_dialog_destroy(GtkWidget *Dialog, text_dialog_info_t *Info) {
+	GC_free(Info);
+}
+
+static void text_input_dialog_cancel(GtkWidget *Button, text_dialog_info_t *Info) {
+	gtk_widget_destroy(Info->Dialog);
+}
+
+static void text_input_dialog_accept(GtkWidget *Button, text_dialog_info_t *Info) {
+	const char *Result = gtk_entry_get_text(GTK_ENTRY(Info->Entry));
+	if (!strlen(Result)) return;
+	Info->Callback(Result, Info->Viewer, Info->Data);
+	gtk_widget_destroy(Info->Dialog);
+}
+
+static void text_input_dialog(const char *Title, const char *Initial, viewer_t *Viewer, text_dialog_callback_t *Callback, void *Data) {
+	GtkWindow *Dialog = GTK_WINDOW(gtk_window_new(GTK_WINDOW_TOPLEVEL));
+	gtk_window_set_title(Dialog, Title);
+	gtk_window_set_transient_for(Dialog, GTK_WINDOW(Viewer->MainWindow));
+	gtk_window_set_modal(Dialog, TRUE);
+	gtk_container_set_border_width(GTK_CONTAINER(Dialog), 6);
+	GtkWidget *VBox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+	gtk_container_add(GTK_CONTAINER(Dialog), VBox);
+
+	GtkWidget *Entry = gtk_entry_new();
+	if (Initial) gtk_entry_set_text(GTK_ENTRY(Entry), Initial);
+	gtk_box_pack_start(GTK_BOX(VBox), Entry, TRUE, FALSE, 6);
+
+	GtkWidget *ButtonBox = gtk_button_box_new(GTK_ORIENTATION_HORIZONTAL);
+	gtk_box_pack_start(GTK_BOX(VBox), ButtonBox, FALSE, FALSE, 4);
+
+	GtkWidget *CancelButton = gtk_button_new_with_label("Cancel");
+	gtk_button_set_image(GTK_BUTTON(CancelButton), gtk_image_new_from_icon_name("window-close-symbolic", GTK_ICON_SIZE_BUTTON));
+	gtk_box_pack_start(GTK_BOX(ButtonBox), CancelButton, FALSE, FALSE, 4);
+
+	GtkWidget *AcceptButton = gtk_button_new_with_label("Accept");
+	gtk_button_set_image(GTK_BUTTON(AcceptButton), gtk_image_new_from_icon_name("emblem-ok-symbolic", GTK_ICON_SIZE_BUTTON));
+	gtk_box_pack_start(GTK_BOX(ButtonBox), AcceptButton, FALSE, FALSE, 4);
+
+	text_dialog_info_t *Info = (text_dialog_info_t *)GC_malloc(sizeof(text_dialog_info_t));
+	Info->Dialog = GTK_WIDGET(Dialog);
+	Info->Entry = Entry;
+	Info->Callback = Callback;
+	Info->Viewer = Viewer;
+	Info->Data = Data;
+
+	g_signal_connect(G_OBJECT(CancelButton), "clicked", G_CALLBACK(text_input_dialog_cancel), Info);
+	g_signal_connect(G_OBJECT(AcceptButton), "clicked", G_CALLBACK(text_input_dialog_accept), Info);
+	g_signal_connect(G_OBJECT(Dialog), "destroy", G_CALLBACK(text_input_dialog_destroy), Info);
+
+	gtk_widget_show_all(GTK_WIDGET(Dialog));
+}
+
+static void dataset_create(viewer_t *Viewer, json_t *Result, connect_info_t *Info) {
+	const char *ImagesId = json_string_value(json_object_get(Result, "image"));
+	json_t *Values = json_array();
+	node_t *Node = Viewer->Nodes;
+	for (int I = 0; I < Viewer->NumNodes; ++I) {
+		json_array_append(Values, json_string(Node[I].FileName));
+	}
+	remote_request(Viewer, "column/values/set", json_pack("{ssso}", "column", ImagesId, "values", Values), (void *)column_values_set, NULL);
+	gtk_dialog_response(GTK_DIALOG(Info->Dialog), GTK_RESPONSE_CANCEL);
+}
+
+static void connect_create_dataset(const char *Result, viewer_t *Viewer, connect_info_t *Info) {
+	remote_request(Viewer, "dataset/create", json_pack("{sssi}", "name", Result, "length", Viewer->NumNodes), (void *)dataset_create, Info);
+}
+
 static void connect_create_clicked(GtkWidget *Button, connect_info_t *Info) {
 	viewer_t *Viewer = Info->Viewer;
-	if (Viewer->RemoteSocket) {
-
+	if (Viewer->RemoteSocket && Viewer->NumNodes) {
+		text_input_dialog("Remote Dataset Name", NULL, Viewer, (void *)connect_create_dataset, Info);
 	}
 }
 
@@ -1906,7 +1984,8 @@ static void connect_dataset_open(viewer_t *Viewer, json_t *Result, connect_info_
 
 static void connect_clicked(GtkWidget *Button, viewer_t *Viewer) {
 	// Connects to a data server and connects a data set or creates one
-	GtkWidget *Dialog = gtk_dialog_new_with_buttons(
+	connect_info_t *Info = new(connect_info_t);
+	GtkWidget *Dialog = Info->Dialog = gtk_dialog_new_with_buttons(
 		"Connect to Data Server",
 		GTK_WINDOW(Viewer->MainWindow),
 		GTK_DIALOG_MODAL,
@@ -1915,7 +1994,6 @@ static void connect_clicked(GtkWidget *Button, viewer_t *Viewer) {
 		NULL
 	);
 	GtkListStore *DatasetsStore = gtk_list_store_new(3, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_INT);
-	connect_info_t *Info = new(connect_info_t);
 	Info->Viewer = Viewer;
 	Info->DatasetsStore = DatasetsStore;
 	GtkBox *ContentArea = GTK_BOX(gtk_dialog_get_content_area(GTK_DIALOG(Dialog)));
@@ -2006,67 +2084,6 @@ static void edit_field_changed(GtkComboBox *Widget, viewer_t *Viewer) {
 	}
 }
 
-typedef void text_dialog_callback_t(const char *Result, viewer_t *Viewer, void *Data);
-
-typedef struct {
-	GtkWidget *Dialog, *Entry;
-	text_dialog_callback_t *Callback;
-	viewer_t *Viewer;
-	void *Data;
-} text_dialog_info_t;
-
-static void text_input_dialog_destroy(GtkWidget *Dialog, text_dialog_info_t *Info) {
-	GC_free(Info);
-}
-
-static void text_input_dialog_cancel(GtkWidget *Button, text_dialog_info_t *Info) {
-	gtk_widget_destroy(Info->Dialog);
-}
-
-static void text_input_dialog_accept(GtkWidget *Button, text_dialog_info_t *Info) {
-	const char *Result = gtk_entry_get_text(GTK_ENTRY(Info->Entry));
-	if (!strlen(Result)) return;
-	Info->Callback(Result, Info->Viewer, Info->Data);
-	gtk_widget_destroy(Info->Dialog);
-}
-
-static void text_input_dialog(const char *Title, viewer_t *Viewer, text_dialog_callback_t *Callback, void *Data) {
-	GtkWindow *Dialog = GTK_WINDOW(gtk_window_new(GTK_WINDOW_TOPLEVEL));
-	gtk_window_set_title(Dialog, Title);
-	gtk_window_set_transient_for(Dialog, GTK_WINDOW(Viewer->MainWindow));
-	gtk_window_set_modal(Dialog, TRUE);
-	gtk_container_set_border_width(GTK_CONTAINER(Dialog), 6);
-	GtkWidget *VBox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
-	gtk_container_add(GTK_CONTAINER(Dialog), VBox);
-
-	GtkWidget *Entry = gtk_entry_new();
-	gtk_box_pack_start(GTK_BOX(VBox), Entry, TRUE, FALSE, 6);
-
-	GtkWidget *ButtonBox = gtk_button_box_new(GTK_ORIENTATION_HORIZONTAL);
-	gtk_box_pack_start(GTK_BOX(VBox), ButtonBox, FALSE, FALSE, 4);
-
-	GtkWidget *CancelButton = gtk_button_new_with_label("Cancel");
-	gtk_button_set_image(GTK_BUTTON(CancelButton), gtk_image_new_from_icon_name("window-close-symbolic", GTK_ICON_SIZE_BUTTON));
-	gtk_box_pack_start(GTK_BOX(ButtonBox), CancelButton, FALSE, FALSE, 4);
-
-	GtkWidget *AcceptButton = gtk_button_new_with_label("Accept");
-	gtk_button_set_image(GTK_BUTTON(AcceptButton), gtk_image_new_from_icon_name("emblem-ok-symbolic", GTK_ICON_SIZE_BUTTON));
-	gtk_box_pack_start(GTK_BOX(ButtonBox), AcceptButton, FALSE, FALSE, 4);
-
-	text_dialog_info_t *Info = (text_dialog_info_t *)GC_malloc(sizeof(text_dialog_info_t));
-	Info->Dialog = GTK_WIDGET(Dialog);
-	Info->Entry = Entry;
-	Info->Callback = Callback;
-	Info->Viewer = Viewer;
-	Info->Data = Data;
-
-	g_signal_connect(G_OBJECT(CancelButton), "clicked", G_CALLBACK(text_input_dialog_cancel), Info);
-	g_signal_connect(G_OBJECT(AcceptButton), "clicked", G_CALLBACK(text_input_dialog_accept), Info);
-	g_signal_connect(G_OBJECT(Dialog), "destroy", G_CALLBACK(text_input_dialog_destroy), Info);
-
-	gtk_widget_show_all(GTK_WIDGET(Dialog));
-}
-
 static void edit_value_changed(GtkComboBox *Widget, viewer_t *Viewer) {
 	Viewer->EditValue = gtk_combo_box_get_active(Widget);
 }
@@ -2102,7 +2119,7 @@ static void add_field_callback(const char *Name, viewer_t *Viewer, void *Data) {
 }
 
 static void add_field_clicked(GtkWidget *Button, viewer_t *Viewer) {
-	text_input_dialog("Add Field", Viewer, (text_dialog_callback_t *)add_field_callback, 0);
+	text_input_dialog("Add Field", NULL, Viewer, (text_dialog_callback_t *)add_field_callback, 0);
 }
 
 static void add_value_callback(const char *Name, viewer_t *Viewer, void *Data) {
@@ -2132,7 +2149,7 @@ static void add_value_callback(const char *Name, viewer_t *Viewer, void *Data) {
 }
 
 static void add_value_clicked(GtkWidget *Button, viewer_t *Viewer) {
-	text_input_dialog("Add Value", Viewer, (text_dialog_callback_t *)add_value_callback, 0);
+	text_input_dialog("Add Value", NULL, Viewer, (text_dialog_callback_t *)add_value_callback, 0);
 }
 
 static void filter_operator_equal(int Count, node_t *Node, double *Input, double Value) {
@@ -2716,15 +2733,16 @@ static void column_create_remote(const char *Result, viewer_t *Viewer, column_cr
 		"name", Result,
 		"type", Info->Field->EnumMap ? "string" : "real"
 	);
-	Info->Name = Result;
+	Info->Name = GC_strdup(Result);
 	remote_request(Viewer, "column/create", Request, (void *)column_create, Info);
 }
 
 static void column_connected_toggled(GtkCellRendererToggle *Renderer, char *Path, viewer_t *Viewer) {
 	GtkTreeIter Iter[1];
 	gtk_tree_model_get_iter_from_string(GTK_TREE_MODEL(Viewer->FieldsStore), Iter, Path);
+	const char *Name;
 	int Index;
-	gtk_tree_model_get(GTK_TREE_MODEL(Viewer->FieldsStore), Iter, FIELD_COLUMN_INDEX, &Index, -1);
+	gtk_tree_model_get(GTK_TREE_MODEL(Viewer->FieldsStore), Iter, FIELD_COLUMN_INDEX, &Index, FIELD_COLUMN_NAME, &Name, -1);
 	field_t *Field = Viewer->Fields[Index];
 	if (Field->RemoteId) {
 		Field->RemoteId = 0;
@@ -2733,7 +2751,7 @@ static void column_connected_toggled(GtkCellRendererToggle *Renderer, char *Path
 		column_create_remote_t *Info = new(column_create_remote_t);
 		Info->Path = GC_strdup(Path);
 		Info->Field = Field;
-		text_input_dialog("Remote Column Name", Viewer, (text_dialog_callback_t *)column_create_remote, Info);
+		text_input_dialog("Remote Column Name", Name, Viewer, (text_dialog_callback_t *)column_create_remote, Info);
 	}
 }
 
