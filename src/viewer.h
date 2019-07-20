@@ -58,6 +58,7 @@ struct field_t {
 	range_t Range;
 	int EnumSize;
 	int PreviewVisible;
+	int FilterCount;
 	int FilterGeneration;
 	double Sum, Sum2, SD;
 	double Values[];

@@ -383,6 +383,10 @@ static ml_value_t *node_ref_deref(node_ref_t *Ref) {
 	}
 }
 
+static void column_values_set(viewer_t *Viewer, json_t *Result, field_t *Field) {
+
+}
+
 static ml_value_t *node_ref_assign(node_ref_t *Ref, ml_value_t *Value) {
 	field_t *Field = Ref->Field;
 	if (Field->EnumMap) {
@@ -404,6 +408,15 @@ static ml_value_t *node_ref_assign(node_ref_t *Ref, ml_value_t *Value) {
 			return ml_error("TypeError", "invalid value for assignment");
 		}
 		Field->Values[Ref->Node - Ref->Node->Viewer->Nodes] = Index;
+
+		if (Field->RemoteId) {
+			json_t *Request = json_pack("{sss[i]s[s]}",
+				"column", Field->RemoteId,
+				"indices", Ref->Node - Ref->Node->Viewer->Nodes,
+				"values", Field->EnumNames[Index]
+			);
+			remote_request(Ref->Node->Viewer, "column/values/set", Request, (void *)column_values_set, Field);
+		}
 	} else {
 		double Value2;
 		if (Value->Type == MLIntegerT) {
@@ -416,6 +429,15 @@ static ml_value_t *node_ref_assign(node_ref_t *Ref, ml_value_t *Value) {
 		Field->Values[Ref->Node - Ref->Node->Viewer->Nodes] = Value2;
 		if (Value2 < Field->Range.Min) Field->Range.Min = Value2;
 		if (Value2 > Field->Range.Max) Field->Range.Max = Value2;
+
+		if (Field->RemoteId) {
+			json_t *Request = json_pack("{sss[i]s[f]}",
+				"column", Field->RemoteId,
+				"indices", Ref->Node - Ref->Node->Viewer->Nodes,
+				"values", Value2
+			);
+			remote_request(Ref->Node->Viewer, "column/values/set", Request, (void *)column_values_set, Field);
+		}
 	}
 	return Value;
 }
@@ -1028,8 +1050,82 @@ static int edit_node_value_remote(edit_node_remote_t *Info, node_t *Node) {
 
 static void viewer_filter_nodes(viewer_t *Viewer);
 
-static void column_values_set(viewer_t *Viewer, json_t *Result, field_t *Field) {
-
+static void column_values_set_event(viewer_t *Viewer, const char *Event, json_t *Details) {
+	const char *RemoteId;
+	json_int_t Generation;
+	json_t *Indices, *Values;
+	if (json_unpack(Details, "[sioo]", &RemoteId, &Generation, &Indices, &Values)) return;
+	field_t *Field = stringmap_search(Viewer->RemoteFields, RemoteId);
+	if (!Field) return;
+	int Length = json_array_size(Indices);
+	if (Field->EnumMap) {
+		int EnumUpdated = 0;
+		for (int I = 0; I < Length; ++I) {
+			size_t Index = json_integer_value(json_array_get(Indices, I));
+			const char *Text = json_string_value(json_array_get(Values, I));
+			double Value = 0.0;
+			if (Text && Text[0]) {
+				double *Ref = stringmap_search(Field->EnumMap, Text);
+				if (Ref) {
+					Value = *(double *)Ref;
+				} else {
+					Ref = new(double);
+					stringmap_insert(Field->EnumMap, GC_strdup(Text), Ref);
+					*(double *)Ref = Value = Field->EnumMap->Size;
+					EnumUpdated = 1;
+				}
+			}
+			Field->Values[Index] = Value;
+		}
+		if (EnumUpdated) {
+			int EnumSize = Field->EnumSize = Field->EnumMap->Size + 1;
+			const char **EnumNames = (const char **)GC_malloc(EnumSize * sizeof(const char *));
+			EnumNames[0] = "";
+			stringmap_foreach(Field->EnumMap, EnumNames, (void *)set_enum_name_fn);
+			Field->EnumNames = EnumNames;
+			gtk_list_store_clear(Field->EnumStore);
+			for (int J = 0; J < EnumSize; ++J) {
+				gtk_list_store_insert_with_values(Field->EnumStore, 0, -1, 0, Field->EnumNames[J], 1, (double)(J + 1), -1);
+			}
+			Field->EnumValues = (int *)GC_malloc_atomic(EnumSize * sizeof(int));
+			Field->Range.Min = 0.0;
+			Field->Range.Max = EnumSize;
+		}
+	} else {
+		double Min = Field->Range.Min;
+		double Max = Field->Range.Max;
+		double Sum = Field->Sum;
+		double Sum2 = Field->Sum2;
+		for (int I = 0; I < Length; ++I) {
+			size_t Index = json_integer_value(json_array_get(Indices, I));
+			double Value = Field->Values[Index] = json_number_value(json_array_get(Values, I));
+			if (Value < Min) Min = Value;
+			if (Value > Max) Max = Value;
+		}
+		Field->Range.Min = Min;
+		Field->Range.Max = Max;
+	}
+	viewer_filter_nodes(Viewer);
+	int Redraw = 0;
+	for (int Index = 0; Index < Viewer->NumFields; ++Index) {
+		if (Viewer->Fields[Index] == Field) {
+			if (Index == Viewer->CIndex) {
+				Redraw = 1;
+				++Viewer->FilterGeneration;
+				set_viewer_colour_index(Viewer, Viewer->CIndex);
+			}
+			if (Index == Viewer->XIndex || Index == Viewer->YIndex) {
+				Redraw = 1;
+				set_viewer_indices(Viewer, Viewer->XIndex, Viewer->YIndex);
+			}
+			break;
+		}
+	}
+	if (Redraw) {
+		Viewer->RedrawBackground = 1;
+		update_preview(Viewer);
+		gtk_widget_queue_draw(Viewer->DrawingArea);
+	}
 }
 
 static void edit_node_values(viewer_t *Viewer) {
@@ -1628,6 +1724,9 @@ static void connect_dataset_changed(GtkComboBox *ComboBox, connect_info_t *Info)
 	return TRUE;
 }*/
 
+static stringmap_t EventHandlers[1] = {STRINGMAP_INIT};
+typedef void (*event_handler_t)(viewer_t *Viewer, const char *Event, json_t *Details);
+
 static gboolean remote_msg_fn(viewer_t *Viewer) {
 	zmsg_t *Msg = zmsg_recv_nowait(Viewer->RemoteSocket);
 	if (!Msg) return TRUE;
@@ -1647,6 +1746,10 @@ static gboolean remote_msg_fn(viewer_t *Viewer) {
 	}
 	if (Index == 0) {
 		console_printf(Viewer->Console, "Alert!\n");
+		const char *Event = json_string_value(Result);
+		json_t *Details = json_array_get(Response, 2);
+		event_handler_t EventHandler = (event_handler_t )stringmap_search(EventHandlers, Event);
+		if (EventHandler) EventHandler(Viewer, Event, Details);
 		return TRUE;
 	}
 	if (json_is_object(Result)) {
@@ -2123,6 +2226,8 @@ static void filter_real_value_changed_ui(GtkSpinButton *Widget, filter_t *Filter
 }
 
 static void filter_field_change(filter_t *Filter, field_t *Field) {
+	if (Filter->Field) --(Filter->Field->FilterCount);
+	++Field->FilterCount;
 	if (Filter->ValueWidget) gtk_widget_destroy(Filter->ValueWidget);
 	if (Field->EnumStore) {
 		if (Field->EnumSize < 100) {
@@ -2167,6 +2272,7 @@ static void filter_operator_changed_ui(GtkComboBox *Widget, filter_t *Filter) {
 }
 
 static void filter_remove_ui(GtkWidget *Button, filter_t *Filter) {
+	if (Filter->Field) --(Filter->Field->FilterCount);
 	viewer_t *Viewer = Filter->Viewer;
 	filter_t **Slot = &Viewer->Filters;
 	while (Slot[0] != Filter) Slot = &Slot[0]->Next;
@@ -2210,10 +2316,13 @@ static filter_t *filter_create(viewer_t *Viewer, field_t *Field, int Operator) {
 	Filter->Next = Viewer->Filters;
 	Viewer->Filters = Filter;
 
-	if (Field) for (int Index = 0; Index < Viewer->NumFields; ++Index) {
-		if (Viewer->Fields[Index] == Field) {
-			gtk_combo_box_set_active(GTK_COMBO_BOX(FieldComboBox), Index);
-			break;
+	if (Field) {
+		++Field->FilterCount;
+		for (int Index = 0; Index < Viewer->NumFields; ++Index) {
+			if (Viewer->Fields[Index] == Field) {
+				gtk_combo_box_set_active(GTK_COMBO_BOX(FieldComboBox), Index);
+				break;
+			}
 		}
 	}
 
@@ -2525,7 +2634,7 @@ typedef struct columns_list_t {
 } columns_list_t;
 
 static void column_open(viewer_t *Viewer, json_t *Result, field_t *Field) {
-
+	remote_request(Viewer, "column/values/get", json_pack("{ss}", "column", Field->RemoteId), (void *)column_values_get, Field);
 }
 
 static void column_open_clicked(GtkWidget *Button, columns_list_t *Info) {
@@ -2573,7 +2682,6 @@ static void column_open_clicked(GtkWidget *Button, columns_list_t *Info) {
 		Viewer->NumFields = NumFields;
 		stringmap_insert(Viewer->RemoteFields, RemoteId, Field);
 		remote_request(Viewer, "column/open", json_pack("{ss}", "column", RemoteId), (void *)column_open, Field);
-		remote_request(Viewer, "column/values/get", json_pack("{ss}", "column", RemoteId), (void *)column_values_get, Field);
 	}
 }
 
@@ -3261,7 +3369,7 @@ static json_t *ml_to_json(ml_value_t *Value) {
 		return json_null();
 	}
 	if (Value->Type == MLIntegerT) return json_integer(ml_integer_value(Value));
-	if (Value->Type == MLRealT) return json_integer(ml_real_value(Value));
+	if (Value->Type == MLRealT) return json_real(ml_real_value(Value));
 	if (Value->Type == MLStringT) return json_string(ml_string_value(Value));
 	if (Value->Type == MLListT) {
 		json_t *Array = json_array();
@@ -3308,6 +3416,33 @@ static void remote_ml_callback(viewer_t *Viewer, json_t *Result, ml_value_t *Cal
 	ml_inline(Callback, 1, json_to_ml(Result));
 }
 
+static ml_value_t *connect_fn(viewer_t *Viewer, int Count, ml_value_t **Args) {
+	ML_CHECK_ARG_COUNT(1);
+	ML_CHECK_ARG_TYPE(0, MLStringT);
+	if (Viewer->RemoteSocket) zsock_destroy(&Viewer->RemoteSocket);
+	zsock_t *Socket = Viewer->RemoteSocket = zsock_new_dealer(ml_string_value(Args[0]));
+	zmsg_t *Msg = zmsg_new();
+	json_t *Request = json_pack("[isn]", ++Viewer->LastCallbackIndex, "dataset/list");
+	zmsg_addstr(Msg, json_dumps(Request, JSON_COMPACT));
+	zmsg_send(&Msg, Socket);
+	Msg = zmsg_recv(Socket);
+	zframe_t *Frame = zmsg_pop(Msg);
+	json_error_t Error;
+	json_t *Response = json_loadb(zframe_data(Frame), zframe_size(Frame), 0, &Error);
+	if (!Response) {
+		fprintf(stderr, "Error parsing json\n");
+		return MLNil;
+	}
+	int Index;
+	json_t *Result;
+	if (json_unpack(Response, "[io]", &Index, &Result)) {
+		fprintf(stderr, "Error invalid json\n");
+		return MLNil;
+	}
+	g_timeout_add(100, G_SOURCE_FUNC(remote_msg_fn), Viewer);
+	return json_to_ml(Result);
+}
+
 static ml_value_t *remote_fn(viewer_t *Viewer, int Count, ml_value_t **Args) {
 	ML_CHECK_ARG_COUNT(3);
 	ML_CHECK_ARG_TYPE(0, MLStringT);
@@ -3315,6 +3450,10 @@ static ml_value_t *remote_fn(viewer_t *Viewer, int Count, ml_value_t **Args) {
 	json_t *Request = ml_to_json(Args[1]);
 	remote_request(Viewer, ml_string_value(Args[0]), Request, (void *)remote_ml_callback, Args[2]);
 	return MLNil;
+}
+
+static ml_value_t *random_fn(viewer_t *Viewer, int Count, ml_value_t **Args) {
+	return ml_real((double)rand() / RAND_MAX);
 }
 
 static viewer_t *create_viewer(int Argc, char *Argv[]) {
@@ -3365,7 +3504,9 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 	stringmap_insert(Viewer->Globals, "setenv", ml_function(Viewer, (void *)setenv_fn));
 	stringmap_insert(Viewer->Globals, "open", ml_function(Viewer, ml_file_open));
 	stringmap_insert(Viewer->Globals, "filter", ml_function(Viewer, (void *)filter_fn));
+	stringmap_insert(Viewer->Globals, "connect", ml_function(Viewer, (void *)connect_fn));
 	stringmap_insert(Viewer->Globals, "remote", ml_function(Viewer, (void *)remote_fn));
+	stringmap_insert(Viewer->Globals, "random", ml_function(Viewer, (void *)random_fn));
 
 	GtkWidget *MainWindow = Viewer->MainWindow = gtk_window_new(GTK_WINDOW_TOPLEVEL);
 	gtk_window_set_title(GTK_WINDOW(Viewer->MainWindow), "DataViewer");
@@ -3477,6 +3618,7 @@ int main(int Argc, char *Argv[]) {
 	ml_method_by_name("min", 0, field_range_min_fn, FieldT, NULL);
 	ml_method_by_name("max", 0, field_range_max_fn, FieldT, NULL);
 	ml_method_by_name("[]", 0, fields_get_by_name, FieldsT, MLStringT, NULL);
+	stringmap_insert(EventHandlers, "column/values/set", column_values_set_event);
 	viewer_t *Viewer = create_viewer(Argc, Argv);
 	gtk_main();
 	return 0;
