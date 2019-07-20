@@ -2524,6 +2524,10 @@ typedef struct columns_list_t {
 	GtkListStore *FieldsModel;
 } columns_list_t;
 
+static void column_open(viewer_t *Viewer, json_t *Result, field_t *Field) {
+
+}
+
 static void column_open_clicked(GtkWidget *Button, columns_list_t *Info) {
 	GtkTreeIter Iter[1];
 	if (gtk_combo_box_get_active_iter(Info->FieldsCombo, Iter)) {
@@ -2568,6 +2572,7 @@ static void column_open_clicked(GtkWidget *Button, columns_list_t *Info) {
 		Viewer->Fields = Fields;
 		Viewer->NumFields = NumFields;
 		stringmap_insert(Viewer->RemoteFields, RemoteId, Field);
+		remote_request(Viewer, "column/open", json_pack("{ss}", "column", RemoteId), (void *)column_open, Field);
 		remote_request(Viewer, "column/values/get", json_pack("{ss}", "column", RemoteId), (void *)column_values_get, Field);
 	}
 }
