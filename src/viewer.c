@@ -65,12 +65,59 @@ struct queued_callback_t {
 	int Index;
 };
 
+static stringmap_t EventHandlers[1] = {STRINGMAP_INIT};
+typedef void (*event_handler_t)(viewer_t *Viewer, const char *Event, json_t *Details);
+
+static gboolean remote_msg_fn(viewer_t *Viewer) {
+	zmsg_t *Msg = zmsg_recv_nowait(Viewer->RemoteSocket);
+	if (!Msg) return TRUE;
+	zmsg_print(Msg);
+	zframe_t *Frame = zmsg_pop(Msg);
+	json_error_t Error;
+	json_t *Response = json_loadb(zframe_data(Frame), zframe_size(Frame), 0, &Error);
+	if (!Response) {
+		fprintf(stderr, "Error parsing json\n");
+		return TRUE;
+	}
+	int Index;
+	json_t *Result;
+	if (json_unpack(Response, "[io]", &Index, &Result)) {
+		fprintf(stderr, "Error invalid json\n");
+		return TRUE;
+	}
+	if (Index == 0) {
+		console_printf(Viewer->Console, "Alert!\n");
+		const char *Event = json_string_value(Result);
+		json_t *Details = json_array_get(Response, 2);
+		event_handler_t EventHandler = (event_handler_t )stringmap_search(EventHandlers, Event);
+		if (EventHandler) EventHandler(Viewer, Event, Details);
+		return TRUE;
+	}
+	if (json_is_object(Result)) {
+		json_t *Error = json_object_get(Result, "error");
+		if (Error) {
+			fprintf(stderr, "Error: %s", json_string_value(Error));
+		}
+	}
+	queued_callback_t **Slot = &Viewer->QueuedCallbacks;
+	while (Slot[0]) {
+		queued_callback_t *Queued = Slot[0];
+		if (Queued->Index == Index) {
+			Slot[0] = Queued->Next;
+			Queued->Callback(Viewer, Result, Queued->Data);
+			break;
+		}
+		Slot = &Queued->Next;
+	}
+	return TRUE;
+}
+
 static void remote_request(viewer_t *Viewer, const char *Method, json_t *Request, void (*Callback)(viewer_t *, json_t *, void *), void *Data) {
 	queued_callback_t *Queued = new(queued_callback_t);
-	Queued->Next = Viewer->QueuedCallbacks;
 	Queued->Callback = Callback;
 	Queued->Data = Data;
 	Queued->Index = ++Viewer->LastCallbackIndex;
+	Queued->Next = Viewer->QueuedCallbacks;
 	Viewer->QueuedCallbacks = Queued;
 	zmsg_t *Msg = zmsg_new();
 	zmsg_addstr(Msg, json_dumps(json_pack("[iso]", Queued->Index, Method, Request), JSON_COMPACT));
@@ -1726,54 +1773,8 @@ static void connect_dataset_changed(GtkComboBox *ComboBox, connect_info_t *Info)
 	return TRUE;
 }*/
 
-static stringmap_t EventHandlers[1] = {STRINGMAP_INIT};
-typedef void (*event_handler_t)(viewer_t *Viewer, const char *Event, json_t *Details);
-
-static gboolean remote_msg_fn(viewer_t *Viewer) {
-	zmsg_t *Msg = zmsg_recv_nowait(Viewer->RemoteSocket);
-	if (!Msg) return TRUE;
-	zmsg_print(Msg);
-	zframe_t *Frame = zmsg_pop(Msg);
-	json_error_t Error;
-	json_t *Response = json_loadb(zframe_data(Frame), zframe_size(Frame), 0, &Error);
-	if (!Response) {
-		fprintf(stderr, "Error parsing json\n");
-		return TRUE;
-	}
-	int Index;
-	json_t *Result;
-	if (json_unpack(Response, "[io]", &Index, &Result)) {
-		fprintf(stderr, "Error invalid json\n");
-		return TRUE;
-	}
-	if (Index == 0) {
-		console_printf(Viewer->Console, "Alert!\n");
-		const char *Event = json_string_value(Result);
-		json_t *Details = json_array_get(Response, 2);
-		event_handler_t EventHandler = (event_handler_t )stringmap_search(EventHandlers, Event);
-		if (EventHandler) EventHandler(Viewer, Event, Details);
-		return TRUE;
-	}
-	if (json_is_object(Result)) {
-		json_t *Error = json_object_get(Result, "error");
-		if (Error) {
-			fprintf(stderr, "Error: %s", json_string_value(Error));
-		}
-	}
-	queued_callback_t **Slot = &Viewer->QueuedCallbacks;
-	while (Slot[0]) {
-		queued_callback_t *Queued = Slot[0];
-		if (Queued->Index == Index) {
-			Slot[0] = Queued->Next;
-			Queued->Callback(Viewer, Result, Queued->Data);
-			break;
-		}
-	}
-	return TRUE;
-}
-
 static void connect_dataset_list(viewer_t *Viewer, json_t *Result, connect_info_t *Info) {
-	printf("connect_dataset_list(%s)\n", json_dumps(Result, 0));
+	//printf("connect_dataset_list(%s)\n", json_dumps(Result, 0));
 	gtk_list_store_clear(Info->DatasetsStore);
 	for (int I = 0; I < json_array_size(Result); ++I) {
 		const char *Id, *Name;
@@ -1888,7 +1889,7 @@ static void dataset_create(viewer_t *Viewer, json_t *Result, connect_info_t *Inf
 	node_t *Node = Viewer->Nodes;
 	int ImagePrefixLength = strlen(Viewer->ImagePrefix);
 	for (int I = 0; I < Viewer->NumNodes; ++I) {
-		json_array_append(Values, json_string(Node[I].FileName + ImagePrefixLength));
+		json_array_append(Values, json_string(Node[I].FileName));
 	}
 	remote_request(Viewer, "column/values/set", json_pack("{ssso}", "column", ImagesId, "values", Values), (void *)column_values_set, NULL);
 	gtk_dialog_response(GTK_DIALOG(Info->Dialog), GTK_RESPONSE_CANCEL);
@@ -1906,10 +1907,11 @@ static void connect_create_clicked(GtkWidget *Button, connect_info_t *Info) {
 }
 
 static void connect_images_get(viewer_t *Viewer, json_t *Result, connect_info_t *Info) {
-	printf("connect_images_get(%s)\n", json_dumps(Result, 0));
+	//printf("connect_images_get(%s)\n", json_dumps(Result, 0));
 	if (!json_is_array(Result)) return;
 	if (json_array_size(Result) != Viewer->NumNodes) return;
 	Viewer->ImagePrefix = Info->ImagePrefix;
+	printf("Viewer->ImagePrefix = %s\n", Viewer->ImagePrefix);
 	node_t *Nodes = Viewer->Nodes;
 	int ImagePrefixLength = strlen(Info->ImagePrefix);
 	for (int I = 0; I < Viewer->NumNodes; ++I) {
@@ -1935,7 +1937,7 @@ static void connect_images_get(viewer_t *Viewer, json_t *Result, connect_info_t 
 }
 
 static void connect_dataset_open(viewer_t *Viewer, json_t *Result, connect_info_t *Info) {
-	printf("connect_dataset_open(%s)\n", json_dumps(Result, 0));
+	//printf("connect_dataset_open(%s)\n", json_dumps(Result, 0));
 	const char *Name, *ImageId;
 	int NumNodes;
 	json_unpack(Result, "{sssiss}", "name", &Name, "length", &NumNodes, "image", &ImageId);
@@ -2041,6 +2043,7 @@ static void connect_clicked(GtkWidget *Button, viewer_t *Viewer) {
 	gtk_widget_show_all(Dialog);
 	if (gtk_dialog_run(GTK_DIALOG(Dialog)) == GTK_RESPONSE_ACCEPT) {
 		Info->ImagePrefix = GC_strdup(gtk_entry_get_text(GTK_ENTRY(PrefixEntry)));
+		printf("ImagePrefix = %s\n", Info->ImagePrefix);
 		if (Info->DatasetId) {
 			printf("Connecting to dataset %s\n", Info->DatasetId);
 			remote_request(Viewer, "dataset/open", json_pack("{ss}", "id", Info->DatasetId), (void *)connect_dataset_open, Info);
