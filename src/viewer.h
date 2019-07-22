@@ -86,10 +86,10 @@ struct viewer_t {
 	node_t *ActiveNode;
 	ml_value_t *ActivationFn;
 	ml_value_t *HotkeyFns[10];
-	const char *ActivationCode;
 	console_t *Console;
 	zsock_t *RemoteSocket;
 	queued_callback_t *QueuedCallbacks;
+	const char *ImagePrefix;
 	stringmap_t Globals[1];
 	stringmap_t FieldsByName[1];
 	stringmap_t RemoteFields[1];
