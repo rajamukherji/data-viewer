@@ -434,6 +434,11 @@ static void column_values_set(viewer_t *Viewer, json_t *Result, field_t *Field) 
 
 }
 
+static int set_enum_name_fn(const char *Name, const double *Value, const char **Names) {
+	Names[(int)Value[0]] = Name;
+	return 0;
+}
+
 static ml_value_t *node_ref_assign(node_ref_t *Ref, ml_value_t *Value) {
 	field_t *Field = Ref->Field;
 	if (Field->EnumMap) {
@@ -445,17 +450,30 @@ static ml_value_t *node_ref_assign(node_ref_t *Ref, ml_value_t *Value) {
 			Index = ml_real_value(Value);
 			if (Index < 0 || Index >= Field->EnumSize) return ml_error("RangeError", "enum index out of range");
 		} else if (Value->Type == MLStringT) {
-			double *Ref2 = stringmap_search(Field->EnumMap, ml_string_value(Value));
-			if (Ref2) {
-				Index = *(double *)Ref2;
-			} else {
-				return ml_error("ValueError", "enum name not found");
+			const char *Text = ml_string_value(Value);
+			double *Ref2 = stringmap_search(Field->EnumMap, Text);
+			if (!Ref2) {
+				Ref2 = new(double);
+				stringmap_insert(Field->EnumMap, Text, Ref);
+				*(double *)Ref2 = Field->EnumMap->Size;
+				int EnumSize = Field->EnumSize = Field->EnumMap->Size + 1;
+				const char **EnumNames = (const char **)GC_malloc(EnumSize * sizeof(const char *));
+				EnumNames[0] = "";
+				stringmap_foreach(Field->EnumMap, EnumNames, (void *)set_enum_name_fn);
+				Field->EnumNames = EnumNames;
+				gtk_list_store_clear(Field->EnumStore);
+				for (int J = 0; J < EnumSize; ++J) {
+					gtk_list_store_insert_with_values(Field->EnumStore, 0, -1, 0, Field->EnumNames[J], 1, (double)(J + 1), -1);
+				}
+				Field->EnumValues = (int *)GC_malloc_atomic(EnumSize * sizeof(int));
+				Field->Range.Min = 0.0;
+				Field->Range.Max = EnumSize;
 			}
+			Index = *(double *)Ref2;
 		} else {
 			return ml_error("TypeError", "invalid value for assignment");
 		}
 		Field->Values[Ref->Node - Ref->Node->Viewer->Nodes] = Index;
-
 		if (Field->RemoteId) {
 			json_t *Request = json_pack("{sss[i]s[s]}",
 				"column", Field->RemoteId,
@@ -502,12 +520,22 @@ static ml_type_t NodeRefT[1] = {{
 	ml_default_key
 }};
 
-static ml_value_t *node_field_fn(void *Data, int Count, ml_value_t **Args) {
+static ml_value_t *node_field_string_fn(void *Data, int Count, ml_value_t **Args) {
 	node_t *Node = (node_t *)Args[0];
 	const char *Name = ml_string_value(Args[1]);
 	viewer_t *Viewer = Node->Viewer;
 	field_t *Field = stringmap_search(Viewer->FieldsByName, Name);
 	if (!Field) return ml_error("FieldError", "no such field %s", Name);
+	node_ref_t *Ref = new(node_ref_t);
+	Ref->Type = NodeRefT;
+	Ref->Node = Node;
+	Ref->Field = Field;
+	return (ml_value_t *)Ref;
+}
+
+static ml_value_t *node_field_field_fn(void *Data, int Count, ml_value_t **Args) {
+	node_t *Node = (node_t *)Args[0];
+	field_t *Field = (field_t *)Args[1];
 	node_ref_t *Ref = new(node_ref_t);
 	Ref->Type = NodeRefT;
 	Ref->Node = Node;
@@ -624,6 +652,55 @@ static ml_value_t *fields_get_by_name(void *Data, int Count, ml_value_t **Args) 
 	viewer_t *Viewer = ((fields_t *)Args[0])->Viewer;
 	const char *Name = ml_string_value(Args[1]);
 	return (ml_value_t *)stringmap_search(Viewer->FieldsByName, Name) ?: MLNil;
+}
+
+static ml_value_t *fields_get_by_index(void *Data, int Count, ml_value_t **Args) {
+	viewer_t *Viewer = ((fields_t *)Args[0])->Viewer;
+	int Index = ml_integer_value(Args[1]) - 1;
+	if (Index < 0 || Index >= Viewer->NumFields) return ml_error("IndexError", "Invalid field index");
+	return (ml_value_t *)Viewer->Fields[Index];
+}
+
+static ml_value_t *fields_new_field(void *Data, int Count, ml_value_t **Args) {
+	viewer_t *Viewer = ((fields_t *)Args[0])->Viewer;
+	const char *Name = ml_string_value(Args[1]);
+	const char *Type = ml_string_value(Args[2]);
+	int NumFields = Viewer->NumFields + 1;
+	field_t **Fields = (field_t **)GC_malloc(NumFields * sizeof(field_t *));
+	field_t *Field = (field_t *)GC_malloc(sizeof(field_t) + Viewer->NumNodes * sizeof(double));
+	Field->Type = FieldT;
+	if (!strcmp(Type, "string")) {
+		Field->EnumStore = gtk_list_store_new(2, G_TYPE_STRING, G_TYPE_DOUBLE);
+		Field->EnumNames = (const char **)GC_malloc(sizeof(const char *));
+		Field->EnumValues = (int *)GC_malloc_atomic(sizeof(int));
+		Field->EnumNames[0] = "";
+		Field->EnumSize = 1;
+		Field->EnumMap = new(stringmap_t);
+		gtk_list_store_insert_with_values(Field->EnumStore, 0, -1, 0, "", 1, 0.0, -1);
+	}
+	Field->Name = GC_strdup(Name);
+	Field->PreviewColumn = 0;
+	Field->PreviewVisible = 1;
+	Field->FilterGeneration = 0;
+	Field->Sum = Field->Sum2 = 0.0;
+	Field->RemoteGenerations = (json_int_t *)GC_malloc_atomic(Viewer->NumNodes * sizeof(json_int_t));
+	memset(Field->RemoteGenerations, 0, Viewer->NumNodes * sizeof(json_int_t));
+	memset(Field->Values, 0, Viewer->NumNodes * sizeof(double));
+	for (int I = 0; I < Viewer->NumFields; ++I) Fields[I] = Viewer->Fields[I];
+	Fields[Viewer->NumFields] = Field;
+	stringmap_insert(Viewer->FieldsByName, Field->Name, Field);
+	GC_free(Viewer->Fields);
+	Viewer->Fields = Fields;
+	Viewer->NumFields = NumFields;
+	gtk_list_store_insert_with_values(Viewer->FieldsStore, 0, -1,
+		FIELD_COLUMN_NAME, Name,
+		FIELD_COLUMN_FIELD, Field,
+		FIELD_COLUMN_VISIBLE, TRUE,
+		FIELD_COLUMN_CONNECTED, TRUE,
+		FIELD_COLUMN_REMOTE, Name,
+		-1
+	);
+	return (ml_value_t *)Field;
 }
 
 static ml_type_t FieldsT[1] = {{
@@ -867,11 +944,6 @@ static void set_viewer_colour_index(viewer_t *Viewer, int CIndex) {
 			++CValue;
 		}
 	}
-}
-
-static int set_enum_name_fn(const char *Name, const double *Value, const char **Names) {
-	Names[(int)Value[0]] = Name;
-	return 0;
 }
 
 static void draw_node_image_loaded(GObject *Source, GAsyncResult *Result, node_t *Node) {
@@ -2451,7 +2523,6 @@ static void create_filter_window(viewer_t *Viewer) {
 	gtk_box_pack_start(GTK_BOX(FiltersBox), CreateButton, FALSE, FALSE, 6);
 
 	g_signal_connect(G_OBJECT(CreateButton), "clicked", G_CALLBACK(filter_create_ui), Viewer);
-
 	g_signal_connect(G_OBJECT(Window), "delete-event", G_CALLBACK(gtk_widget_hide_on_delete), Viewer);
 }
 
@@ -2772,6 +2843,116 @@ static void column_connected_toggled(GtkCellRendererToggle *Renderer, char *Path
 	}
 }
 
+typedef struct columns_load_t {
+	viewer_t *Viewer;
+	GtkListStore *ColumnsStore;
+	field_t **Fields;
+	int NumFields, FieldIndex, RowIndex;
+} columns_load_t;
+
+static void columns_header_field_fn(void *Data, size_t Length, columns_load_t *Info) {
+	char *Name = GC_malloc_atomic(Length + 1);
+	memcpy(Name, Data, Length);
+	Name[Length] = 0;
+	gtk_list_store_insert_with_values(Info->ColumnsStore, 0, -1, 0, Name, 1, FALSE, -1);
+	++Info->NumFields;
+}
+
+static void columns_header_record_fn(int Delim, columns_load_t *Info) {
+
+}
+
+static void columns_data_field_fn(void *Data, size_t Length, columns_load_t *Info) {
+
+}
+
+static void columns_data_record_fn(int Delim, columns_load_t *Info) {
+	Info->FieldIndex = 0;
+	++Info->RowIndex;
+}
+
+static void column_selected_toggled(GtkCellRendererToggle *Renderer, char *Path, columns_load_t *Info) {
+	GtkTreeIter Iter[1];
+	gtk_tree_model_get_iter_from_string(GTK_TREE_MODEL(Info->ColumnsStore), Iter, Path);
+	gboolean Selected;
+	gtk_tree_model_get(GTK_TREE_MODEL(Info->ColumnsStore), Iter, 1, &Selected, -1);
+	gtk_list_store_set(Info->ColumnsStore, Iter, 1, !Selected, -1);
+}
+
+static void columns_load_clicked(GtkWidget *Button, viewer_t *Viewer) {
+	GtkWidget *FileChooser = gtk_file_chooser_dialog_new(
+		"Select CSV file",
+		GTK_WINDOW(Viewer->MainWindow),
+		GTK_FILE_CHOOSER_ACTION_OPEN,
+		"Cancel", GTK_RESPONSE_CANCEL,
+		"Select", GTK_RESPONSE_ACCEPT,
+		NULL
+	);
+	if (gtk_dialog_run(GTK_DIALOG(FileChooser)) != GTK_RESPONSE_ACCEPT) {
+		gtk_widget_destroy(FileChooser);
+		return;
+	}
+	char *FileName = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(FileChooser));
+	gtk_widget_destroy(FileChooser);
+	FILE *File = fopen(FileName, "r");
+	if (!File) return;
+	columns_load_t Info[1];
+	Info->Viewer = Viewer;
+	Info->ColumnsStore = gtk_list_store_new(2, G_TYPE_STRING, G_TYPE_BOOLEAN);
+	Info->NumFields = 0;
+	struct csv_parser Parser[1];
+	csv_init(Parser, 0);
+	char Buffer[129];
+	if (!fgets(Buffer, 129, File)) return;
+	int Length = strlen(Buffer);
+	while (Length == 128) {
+		csv_parse(Parser, Buffer, Length, (void *)columns_header_field_fn, (void *)columns_header_record_fn, Info);
+		if (!fgets(Buffer, 129, File)) return;
+		int Length = strlen(Buffer);
+	}
+	csv_parse(Parser, Buffer, Length, (void *)columns_header_field_fn, (void *)columns_header_record_fn, Info);
+	GtkWidget *Dialog = gtk_dialog_new_with_buttons(
+		"Select Columns",
+		GTK_WINDOW(Viewer->MainWindow),
+		GTK_DIALOG_MODAL,
+		"Open", GTK_RESPONSE_ACCEPT,
+		NULL
+	);
+	GtkWidget *ContentArea = gtk_dialog_get_content_area(GTK_DIALOG(Dialog));
+	gtk_container_set_border_width(GTK_CONTAINER(ContentArea), 6);
+	GtkWidget *FieldsScrolled = gtk_scrolled_window_new(0, 0);
+	GtkWidget *FieldsView = gtk_tree_view_new_with_model(GTK_TREE_MODEL(Info->ColumnsStore));
+	GtkCellRenderer *SelectRenderer = gtk_cell_renderer_toggle_new();
+	g_signal_connect(G_OBJECT(SelectRenderer), "toggled", G_CALLBACK(column_selected_toggled), Viewer);
+	gtk_tree_view_append_column(GTK_TREE_VIEW(FieldsView), gtk_tree_view_column_new_with_attributes("Name", gtk_cell_renderer_text_new(), "text", 0, NULL));
+	gtk_tree_view_append_column(GTK_TREE_VIEW(FieldsView), gtk_tree_view_column_new_with_attributes("Visible", SelectRenderer, "active", 1, NULL));
+	gtk_container_add(GTK_CONTAINER(FieldsScrolled), FieldsView);
+	gtk_box_pack_start(GTK_BOX(ContentArea), FieldsScrolled, TRUE, TRUE, 2);
+	gtk_widget_show_all(Dialog);
+	gtk_dialog_run(GTK_DIALOG(Dialog));
+	gtk_widget_destroy(Dialog);
+	field_t **Fields = anew(field_t *, Info->NumFields);
+	GtkTreeIter Iter[1];
+	int I = 0;
+	if (gtk_tree_model_get_iter_first(GTK_TREE_MODEL(Info->ColumnsStore), Iter)) do {
+		gboolean Selected;
+		gtk_tree_model_get(GTK_TREE_MODEL(Info->ColumnsStore), Iter, 1, &Selected, -1);
+		if (Selected) {
+			field_t *Field = Fields[I] = (field_t *)GC_malloc(sizeof(field_t) + Viewer->NumNodes * sizeof(double));
+			Field->Type = FieldT;
+			Field->EnumMap = 0;
+			Field->Range.Min = INFINITY;
+			Field->Range.Max = -INFINITY;
+			Field->PreviewColumn = 0;
+			Field->PreviewVisible = 1;
+			Field->FilterGeneration = 0;
+			Field->Sum = Field->Sum2 = 0.0;
+			Fields[I] = Field;
+		}
+	} while (gtk_tree_model_iter_next(GTK_TREE_MODEL(Info->ColumnsStore), Iter));
+
+}
+
 static void show_columns_clicked(GtkWidget *Button, viewer_t *Viewer) {
 	GtkWidget *Window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
 	GtkWidget *VBox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
@@ -2784,6 +2965,14 @@ static void show_columns_clicked(GtkWidget *Button, viewer_t *Viewer) {
 	gtk_tree_view_append_column(GTK_TREE_VIEW(FieldsView), gtk_tree_view_column_new_with_attributes("Visible", VisibleRenderer, "active", FIELD_COLUMN_VISIBLE, NULL));
 	gtk_container_add(GTK_CONTAINER(FieldsScrolled), FieldsView);
 	gtk_box_pack_start(GTK_BOX(VBox), FieldsScrolled, TRUE, TRUE, 2);
+
+	GtkWidget *LoadColumnsButton = gtk_button_new_with_label("Load Columns");
+	gtk_button_set_image(GTK_BUTTON(LoadColumnsButton), gtk_image_new_from_icon_name("document-open-symbolic", GTK_ICON_SIZE_BUTTON));
+	g_object_set(LoadColumnsButton, "always-show-image", TRUE, NULL);
+	g_signal_connect(G_OBJECT(LoadColumnsButton), "clicked", G_CALLBACK(columns_load_clicked), Viewer);
+	GtkWidget *LoadColumnsBox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+	gtk_box_pack_start(GTK_BOX(LoadColumnsBox), LoadColumnsButton, TRUE, TRUE, 2);
+	gtk_box_pack_start(GTK_BOX(VBox), LoadColumnsBox, FALSE, FALSE, 2);
 
 	if (Viewer->RemoteSocket) {
 		columns_list_t *Info = new(columns_list_t);
@@ -3656,7 +3845,8 @@ int main(int Argc, char *Argv[]) {
 	LessOrEqualMethod = ml_method("<=");
 	GreaterOrEqualMethod = ml_method(">=");
 	NodeT = ml_type(MLAnyT, "node");
-	ml_method_by_name("[]", 0, node_field_fn, NodeT, MLStringT, NULL);
+	ml_method_by_name("[]", 0, node_field_string_fn, NodeT, MLStringT, NULL);
+	ml_method_by_name("[]", 0, node_field_field_fn, NodeT, FieldT, NULL);
 	ml_method_by_name("image", 0, node_image_fn, NodeT, NULL);
 	ml_method_by_name("string", 0, node_image_fn, NodeT, NULL);
 	FieldT = ml_type(MLAnyT, "field");
@@ -3667,6 +3857,8 @@ int main(int Argc, char *Argv[]) {
 	ml_method_by_name("min", 0, field_range_min_fn, FieldT, NULL);
 	ml_method_by_name("max", 0, field_range_max_fn, FieldT, NULL);
 	ml_method_by_name("[]", 0, fields_get_by_name, FieldsT, MLStringT, NULL);
+	ml_method_by_name("[]", 0, fields_get_by_index, FieldsT, MLIntegerT, NULL);
+	ml_method_by_name("new", 0, fields_new_field, FieldsT, MLStringT, MLStringT, NULL);
 	stringmap_insert(EventHandlers, "column/values/set", column_values_set_event);
 	viewer_t *Viewer = create_viewer(Argc, Argv);
 	gtk_main();
