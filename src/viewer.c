@@ -10,6 +10,7 @@
 #include <ml_file.h>
 #include <ml_object.h>
 #include <ml_iterfns.h>
+#include <ml_gir.h>
 #include "console.h"
 #include "ml_csv.h"
 #include <czmq.h>
@@ -3721,6 +3722,7 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 	ml_iterfns_init(Viewer->Globals);
 	ml_file_init(Viewer->Globals);
 	ml_csv_init(Viewer->Globals);
+	ml_gir_init(Viewer->Globals);
 
 	stringmap_insert(Viewer->Globals, "activate", ml_reference(&Viewer->ActivationFn));
 	stringmap_insert(Viewer->Globals, "hotkey0", ml_reference(&Viewer->HotkeyFns[0]));
