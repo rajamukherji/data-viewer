@@ -10,9 +10,9 @@
 #include <ml_file.h>
 #include <ml_object.h>
 #include <ml_iterfns.h>
-#include <ml_gir.h>
 #include "console.h"
 #include "ml_csv.h"
+#include "ml_gir.h"
 #include <czmq.h>
 #include "viewer.h"
 
