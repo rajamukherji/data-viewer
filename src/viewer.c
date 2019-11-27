@@ -13,6 +13,7 @@
 #include <ml_gir.h>
 #include <gtk_console.h>
 #include "ml_csv.h"
+#include "ml_gir.h"
 #include <czmq.h>
 #include "viewer.h"
 
