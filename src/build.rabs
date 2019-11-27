@@ -1,5 +1,5 @@
-CFLAGS := old + ['-g', '-std=gnu99', '-D_GNU_SOURCE', '-pthread', pkgconfig("--cflags gtk+-3.0 gdk-pixbuf-2.0 gtksourceview-4")]
-LDFLAGS := old + ['-g', '-lm', '-pthread', pkgconfig("--libs gtk+-3.0 gdk-pixbuf-2.0 gtksourceview-4")]
+CFLAGS := old + ['-g', '-std=gnu99', '-D_GNU_SOURCE', '-pthread', pkgconfig("--cflags gtk+-3.0 gdk-pixbuf-2.0 gtksourceview-4 gobject-introspection-1.0")]
+LDFLAGS := old + ['-g', '-lm', '-pthread', pkgconfig("--libs gtk+-3.0 gdk-pixbuf-2.0 gtksourceview-4 gobject-introspection-1.0")]
 
 if DEBUG then
 	CFLAGS := old + ["-DDEBUG"]
@@ -36,10 +36,12 @@ GC := meta("gc"):scan("install") => fun() do
 	ret [PATH/"lib/libgc.a", PATH/"lib/libcord.a"]
 end
 
-file("minilang"):mkdir
+MINILANG_USEGTK := 1
+LIBMINILANG := subdir("minilang")."LIBMINILANG"
+
 file("whereami/src"):mkdir
 CFLAGS := old + ['-D_GNU_SOURCE', "-Iinclude", '-I{file("minilang/minilang.h"):dirname}', '-I{file("whereami/src/whereami.h"):dirname}']
-LDFLAGS := old + ["-lgc", "-ldl"]
+LDFLAGS := old + ["-lgc", "-lczmq", "-ljansson", "-ldl"]
 
 file("resources.c")[file("resources.xml")] => fun(Target) do
 	execute("glib-compile-resources", '--sourcedir={file("build.rabs"):dir(:true)}', file("resources.xml"), "--generate-source", '--target={Target}')
@@ -47,28 +49,18 @@ end
 
 var Objects := [
 	file("viewer.o"),
-	file("console.o"),
 	file("resources.o"),
 	file("ml_csv.o"),
 	file("libcsv.o"),
-	file("minilang/minilang.o"),
-	file("minilang/ml_compiler.o"),
-	file("minilang/ml_runtime.o"),
-	file("minilang/ml_types.o"),
-	file("minilang/ml_object.o"),
-	file("minilang/ml_file.o"),
-	file("minilang/ml_iterfns.o"),
-	file("minilang/sha256.o"),
-	file("minilang/stringmap.o"),
 	file("whereami/src/whereami.o")
 ]
 
 if USE_GL then
 	CFLAGS := old + ['-DUSE_GL']
 	LDFLAGS := old + ['-lepoxy']
-	c_program(BIN_DIR/"data-viewer-gl", Objects)
+	c_program(BIN_DIR/"data-viewer-gl", Objects, [LIBMINILANG])
 else
-	c_program(BIN_DIR/"data-viewer", Objects)
+	c_program(BIN_DIR/"data-viewer", Objects, [LIBMINILANG])
 	install(BIN_DIR/"data-viewer", PREFIX/"bin/data-viewer", "+x")
 	install(file("data-viewer.desktop"), PREFIX/'share/applications/data-viewer.desktop')
 end
