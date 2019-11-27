@@ -10,5 +10,6 @@ void console_show(console_t *Console, GtkWindow *Parent);
 void console_log(console_t *Console, ml_value_t *Value);
 void console_append(console_t *Console, const char *Buffer, int Length);
 ml_value_t *console_print(console_t *Console, int Count, ml_value_t **Args);
+void console_printf(console_t *Console, const char *Format, ...);
 
 #endif
