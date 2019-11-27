@@ -11,7 +11,7 @@
 #include <ml_object.h>
 #include <ml_iterfns.h>
 #include <ml_gir.h>
-#include "console.h"
+#include <gtk_console.h>
 #include "ml_csv.h"
 #include <czmq.h>
 #include "viewer.h"
@@ -515,10 +515,7 @@ static ml_type_t NodeRefT[1] = {{
 	ml_default_call,
 	(void *)node_ref_deref,
 	(void *)node_ref_assign,
-	ml_default_iterate,
-	ml_default_current,
-	ml_default_next,
-	ml_default_key
+	NULL, 0, 0
 }};
 
 static ml_value_t *node_field_string_fn(void *Data, int Count, ml_value_t **Args) {
@@ -569,10 +566,7 @@ static ml_type_t NodeImageT[1] = {{
 	ml_default_call,
 	(void *)node_image_deref,
 	(void *)node_image_assign,
-	ml_default_iterate,
-	ml_default_current,
-	ml_default_next,
-	ml_default_key
+	NULL, 0, 0
 }};
 
 static ml_value_t *node_image_fn(void *Data, int Count, ml_value_t **Args) {
@@ -589,19 +583,19 @@ typedef struct nodes_iter_t {
 	int NumNodes;
 } nodes_iter_t;
 
-static ml_value_t *nodes_iter_current(ml_value_t *Ref) {
+static ml_value_t *nodes_iter_current(ml_state_t *Caller, ml_value_t *Ref) {
 	nodes_iter_t *Iter = (nodes_iter_t *)Ref;
-	return (ml_value_t *)Iter->Nodes;
+	ML_CONTINUE(Caller, Iter->Nodes);
 }
 
-static ml_value_t *nodes_iter_next(ml_value_t *Ref) {
+static ml_value_t *nodes_iter_next(ml_state_t *Caller, ml_value_t *Ref) {
 	nodes_iter_t *Iter = (nodes_iter_t *)Ref;
 	if (Iter->NumNodes) {
 		--Iter->NumNodes;
 		++Iter->Nodes;
-		return Ref;
+		ML_CONTINUE(Caller, Ref);
 	} else {
-		return MLNil;
+		ML_CONTINUE(Caller, MLNil);
 	}
 }
 
@@ -612,36 +606,30 @@ static ml_type_t NodesIterT[1] = {{
 	ml_default_call,
 	ml_default_deref,
 	ml_default_assign,
-	ml_default_iterate,
-	nodes_iter_current,
-	nodes_iter_next,
-	ml_default_key
+	NULL, 0, 0
 }};
 
-static ml_value_t *nodes_iterate(ml_value_t *Value) {
+static ml_value_t *nodes_iterate(ml_state_t *Caller, ml_value_t *Value) {
 	nodes_iter_t *Nodes = (nodes_iter_t *)Value;
 	if (Nodes->NumNodes) {
 		nodes_iter_t *Iter = new(nodes_iter_t);
 		Iter->Type = NodesIterT;
 		Iter->Nodes = Nodes->Nodes;
 		Iter->NumNodes = Nodes->NumNodes - 1;
-		return (ml_value_t *)Iter;
+		ML_CONTINUE(Caller, Iter);
 	} else {
-		return MLNil;
+		ML_CONTINUE(Caller, MLNil);
 	}
 }
 
 static ml_type_t NodesT[1] = {{
 	MLTypeT,
-	MLAnyT, "nodes",
+	MLIteratableT, "nodes",
 	ml_default_hash,
 	ml_default_call,
 	ml_default_deref,
 	ml_default_assign,
-	nodes_iterate,
-	ml_default_current,
-	ml_default_next,
-	ml_default_key
+	NULL, 0, 0
 }};
 
 typedef struct fields_t {
@@ -711,10 +699,7 @@ static ml_type_t FieldsT[1] = {{
 	ml_default_call,
 	ml_default_deref,
 	ml_default_assign,
-	ml_default_iterate,
-	ml_default_current,
-	ml_default_next,
-	ml_default_key
+	NULL, 0, 0
 }};
 
 static ml_value_t *field_name_fn(void *Data, int Count, ml_value_t **Args) {
@@ -3713,7 +3698,6 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 	Viewer->ShowBox = 0;
 	Viewer->RedrawBackground = 0;
 	Viewer->FieldsStore = gtk_list_store_new(5, G_TYPE_STRING, G_TYPE_POINTER, G_TYPE_BOOLEAN, G_TYPE_BOOLEAN, G_TYPE_STRING);
-	Viewer->Console = console_new((ml_getter_t)viewer_global_get, Viewer);
 	Viewer->ActivationFn = ml_function(Viewer->Console, (void *)console_print);
 	for (int I = 0; I < 10; ++I) Viewer->HotkeyFns[I] = Viewer->ActivationFn;
 	Viewer->PreviewWidget = 0;
@@ -3723,6 +3707,8 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 	ml_file_init(Viewer->Globals);
 	ml_csv_init(Viewer->Globals);
 	ml_gir_init(Viewer->Globals);
+
+	Viewer->Console = console_new((ml_getter_t)viewer_global_get, Viewer);
 
 	stringmap_insert(Viewer->Globals, "activate", ml_reference(&Viewer->ActivationFn));
 	stringmap_insert(Viewer->Globals, "hotkey0", ml_reference(&Viewer->HotkeyFns[0]));
@@ -3861,6 +3847,11 @@ int main(int Argc, char *Argv[]) {
 	ml_method_by_name("[]", 0, fields_get_by_name, FieldsT, MLStringT, NULL);
 	ml_method_by_name("[]", 0, fields_get_by_index, FieldsT, MLIntegerT, NULL);
 	ml_method_by_name("new", 0, fields_new_field, FieldsT, MLStringT, MLStringT, NULL);
+
+	ml_typed_fn_set(NodesT, ml_iterate, nodes_iterate);
+	ml_typed_fn_set(NodesIterT, ml_iter_next, nodes_iter_next);
+	ml_typed_fn_set(NodesIterT, ml_iter_value, nodes_iter_current);
+
 	stringmap_insert(EventHandlers, "column/values/set", column_values_set_event);
 	viewer_t *Viewer = create_viewer(Argc, Argv);
 	gtk_main();
