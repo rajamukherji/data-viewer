@@ -26,7 +26,7 @@ GC := meta("gc"):scan("install") => fun() do
 		"--enable-parallel-mark",
 		"--disable-gcj-support",
 		"--enable-redirect-malloc",
-		'--prefix={BUILDDIR}'
+		'--prefix={PATH}'
 	}
 	file("gc"):rmdir:mkdir:chdir
 	execute('wget -nv https://github.com/ivmai/bdwgc/releases/download/v{GC_VERSION}/gc-{GC_VERSION}.tar.gz -O- | tar xzP --strip-components=1')
