@@ -36,12 +36,15 @@ GC := meta("gc"):scan("install") => fun() do
 	ret [PATH/"lib/libgc.a", PATH/"lib/libcord.a"]
 end
 
+MINILANG_USERADB := 1
+MINILANG_USEMATH := 1
 MINILANG_USEGTK := 1
-LIBMINILANG := subdir("minilang")."LIBMINILANG"
+subdir("minilang")
+LIBMINILANG := context("/obj/minilang/obj")::LIBMINILANG
 
 file("whereami/src"):mkdir
-CFLAGS := old + ['-D_GNU_SOURCE', "-Iinclude", '-I{file("minilang/minilang.h"):dirname}', '-I{file("whereami/src/whereami.h"):dirname}']
-LDFLAGS := old + ["-lgc", "-lczmq", "-ljansson", "-ldl"]
+CFLAGS := old + ['-D_GNU_SOURCE', "-Iinclude", '-I{file("minilang/src/minilang.h"):dirname}', '-I{file("whereami/src/whereami.h"):dirname}']
+LDFLAGS := old + ["-lgc", "-lczmq", "-ljansson", "-ldl", "-lgvc", "-lcgraph"]
 
 file("resources.c")[file("resources.xml")] => fun(Target) do
 	execute("glib-compile-resources", '--sourcedir={file("build.rabs"):dir(:true)}', file("resources.xml"), "--generate-source", '--target={Target}')

@@ -1,6 +1,6 @@
 #include "minilang.h"
-#include "minilang/stringmap.h"
-#include "minilang/ml_macros.h"
+#include "stringmap.h"
+#include "ml_macros.h"
 #include <string.h>
 #include <stdio.h>
 #include <gc.h>
