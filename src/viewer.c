@@ -231,57 +231,6 @@ static void merge_sort_y(node_t **Start, node_t **End, node_t **Buffer) {
 	memcpy(Start, Buffer, (End - Start) * sizeof(node_t *));
 }
 
-/*static node_t *create_node_tree_x(node_t **Start, node_t **End, node_t **Buffer);
-
-static node_t *create_node_tree_y(node_t **Start, node_t **End, node_t **Buffer) {
-	if (Start == End) {
-		return 0;
-	} else if (Start + 1 == End) {
-		Start[0]->Children[0] = 0;
-		Start[0]->Children[1] = 0;
-		return Start[0];
-	} else {
-		merge_sort_y(Start, End, Buffer);
-		node_t **Mid = Start + (End - Start) / 2;
-		Mid[0]->Children[0] = create_node_tree_x(Start, Mid, Buffer);
-		Mid[0]->Children[1] = create_node_tree_x(Mid + 1, End, Buffer);
-		return Mid[0];
-	}
-}
-
-static node_t *create_node_tree_x(node_t **Start, node_t **End, node_t **Buffer) {
-	if (Start == End) {
-		return 0;
-	} else if (Start + 1 == End) {
-		Start[0]->Children[0] = 0;
-		Start[0]->Children[1] = 0;
-		return Start[0];
-	} else {
-		merge_sort_x(Start, End, Buffer);
-		node_t **Mid = Start + (End - Start) / 2;
-		Mid[0]->Children[0] = create_node_tree_y(Start, Mid, Buffer);
-		Mid[0]->Children[1] = create_node_tree_y(Mid + 1, End, Buffer);
-		return Mid[0];
-	}
-}
-
-static void update_node_tree(viewer_t *Viewer) {
-	node_t *Node = Viewer->Nodes;
-	int I = Viewer->NumNodes;
-	node_t **Sorted = Viewer->Sorted, **Tail = Sorted;
-	while (--I >= 0) {
-		if (!Node->Filtered) *(Tail++) = Node;
-		++Node;
-	}
-	if (Tail > Sorted) {
-		clock_t Start = clock();
-		Viewer->Root = create_node_tree_x(Sorted, Tail, Viewer->SortBuffer);
-		printf("update_node_tree:%d @ %lu\n", __LINE__, clock() - Start);
-	} else {
-		Viewer->Root = 0;
-	}
-}*/
-
 static void split_node_list_y(node_t *Root, node_t *HeadX, node_t *HeadY1, int Count1, int Count2);
 
 static void split_node_list_x(node_t *Root, node_t *HeadX1, node_t *HeadY, int Count1, int Count2) {
@@ -442,6 +391,8 @@ static int set_enum_name_fn(const char *Name, const double *Value, const char **
 }
 
 static ml_value_t *node_ref_assign(node_ref_t *Ref, ml_value_t *Value) {
+	Value = Value->Type->deref(Value);
+	if (Value->Type == MLErrorT) return Value;
 	field_t *Field = Ref->Field;
 	if (Field->EnumMap) {
 		int Index;
@@ -453,11 +404,10 @@ static ml_value_t *node_ref_assign(node_ref_t *Ref, ml_value_t *Value) {
 			if (Index < 0 || Index >= Field->EnumSize) return ml_error("RangeError", "enum index out of range");
 		} else if (Value->Type == MLStringT) {
 			const char *Text = ml_string_value(Value);
-			double *Ref2 = stringmap_search(Field->EnumMap, Text);
-			if (!Ref2) {
-				Ref2 = new(double);
-				stringmap_insert(Field->EnumMap, Text, Ref);
-				*(double *)Ref2 = Field->EnumMap->Size;
+			double **Slot = stringmap_slot(Field->EnumMap, Text);
+			if (!Slot[0]) {
+				double *Ref2 = Slot[0] = new(double);
+				Ref2[0] = Field->EnumMap->Size;
 				int EnumSize = Field->EnumSize = Field->EnumMap->Size + 1;
 				const char **EnumNames = (const char **)GC_malloc(EnumSize * sizeof(const char *));
 				EnumNames[0] = "";
@@ -471,7 +421,7 @@ static ml_value_t *node_ref_assign(node_ref_t *Ref, ml_value_t *Value) {
 				Field->Range.Min = 0.0;
 				Field->Range.Max = EnumSize;
 			}
-			Index = *(double *)Ref2;
+			Index = Slot[0][0];
 		} else {
 			return ml_error("TypeError", "invalid value for assignment");
 		}
@@ -552,6 +502,8 @@ static ml_value_t *node_image_deref(node_image_t *Ref) {
 }
 
 static ml_value_t *node_image_assign(node_image_t *Ref, ml_value_t *Value) {
+	Value = Value->Type->deref(Value);
+	if (Value->Type == MLErrorT) return Value;
 	if (Value->Type != MLStringT) return ml_error("TypeError", "Node image must be a string");
 	node_t *Node = Ref->Node;
 	Node->FileName = ml_string_value(Value);
@@ -584,12 +536,12 @@ typedef struct nodes_iter_t {
 	int NumNodes;
 } nodes_iter_t;
 
-static ml_value_t *nodes_iter_current(ml_state_t *Caller, ml_value_t *Ref) {
+static void nodes_iter_current(ml_state_t *Caller, ml_value_t *Ref) {
 	nodes_iter_t *Iter = (nodes_iter_t *)Ref;
 	ML_CONTINUE(Caller, Iter->Nodes);
 }
 
-static ml_value_t *nodes_iter_next(ml_state_t *Caller, ml_value_t *Ref) {
+static void nodes_iter_next(ml_state_t *Caller, ml_value_t *Ref) {
 	nodes_iter_t *Iter = (nodes_iter_t *)Ref;
 	if (Iter->NumNodes) {
 		--Iter->NumNodes;
@@ -610,7 +562,7 @@ static ml_type_t NodesIterT[1] = {{
 	NULL, 0, 0
 }};
 
-static ml_value_t *nodes_iterate(ml_state_t *Caller, ml_value_t *Value) {
+static void nodes_iterate(ml_state_t *Caller, ml_value_t *Value) {
 	nodes_iter_t *Nodes = (nodes_iter_t *)Value;
 	if (Nodes->NumNodes) {
 		nodes_iter_t *Iter = new(nodes_iter_t);
@@ -3585,8 +3537,8 @@ static json_t *ml_to_json(ml_value_t *Value) {
 	if (Value->Type == MLStringT) return json_string(ml_string_value(Value));
 	if (Value->Type == MLListT) {
 		json_t *Array = json_array();
-		for (ml_list_node_t *Node = ml_list_head(Value); Node; Node = Node->Next) {
-			json_array_append(Array, ml_to_json(Node->Value));
+		ML_LIST_FOREACH(Value, Iter) {
+			json_array_append(Array, ml_to_json(Iter->Value));
 		}
 		return Array;
 	}
@@ -3703,6 +3655,7 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 	for (int I = 0; I < 10; ++I) Viewer->HotkeyFns[I] = Viewer->ActivationFn;
 	Viewer->PreviewWidget = 0;
 
+	ml_types_init(Viewer->Globals);
 	ml_object_init(Viewer->Globals);
 	ml_iterfns_init(Viewer->Globals);
 	ml_file_init(Viewer->Globals);
