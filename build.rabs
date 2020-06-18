@@ -1,4 +1,4 @@
--- ROOT --
+:< ROOT >:
 
 PLATFORM := defined("PLATFORM") or shell("uname"):trim
 DEBUG := defined("DEBUG")
@@ -60,7 +60,6 @@ c_program := fun(Executable, Objects, Libraries) do
 	end
 	Executable[Objects, Libraries] => fun(Executable) do
 		execute(CC, '-o', Executable, Objects, Libraries, LDFLAGS)
-		--DEBUG or execute('strip', Executable)
 	end
 	DEFAULT[Executable]
 end
