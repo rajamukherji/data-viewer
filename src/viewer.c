@@ -1514,32 +1514,10 @@ static void zoom_viewer(viewer_t *Viewer, double X, double Y, double Zoom) {
 }
 
 static void pan_viewer(viewer_t *Viewer, double DeltaX, double DeltaY) {
-	if (DeltaX < 0) {
-		double XMin = Viewer->Min.X + DeltaX;
-		if (XMin < Viewer->DataMin.X) XMin = Viewer->DataMin.X;
-		double XMax = XMin + (Viewer->Max.X - Viewer->Min.X);
-		Viewer->Min.X = XMin;
-		Viewer->Max.X = XMax;
-	} else {
-		double XMax = Viewer->Max.X + DeltaX;
-		if (XMax > Viewer->DataMax.X) XMax = Viewer->DataMax.X;
-		double XMin = XMax - (Viewer->Max.X - Viewer->Min.X);
-		Viewer->Min.X = XMin;
-		Viewer->Max.X = XMax;
-	}
-	if (DeltaY < 0) {
-		double YMin = Viewer->Min.Y + DeltaY;
-		if (YMin < Viewer->DataMin.Y) YMin = Viewer->DataMin.Y;
-		double YMax = YMin + (Viewer->Max.Y - Viewer->Min.Y);
-		Viewer->Min.Y = YMin;
-		Viewer->Max.Y = YMax;
-	} else {
-		double YMax = Viewer->Max.Y + DeltaY;
-		if (YMax > Viewer->DataMax.Y) YMax = Viewer->DataMax.Y;
-		double YMin = YMax - (Viewer->Max.Y - Viewer->Min.Y);
-		Viewer->Min.Y = YMin;
-		Viewer->Max.Y = YMax;
-	}
+	Viewer->Min.X += DeltaX;
+	Viewer->Max.X += DeltaX;
+	Viewer->Min.Y += DeltaY;
+	Viewer->Max.Y += DeltaY;
 }
 
 static void resize_viewer(GtkWidget *Widget, GdkRectangle *Allocation, viewer_t *Viewer) {
