@@ -3618,8 +3618,6 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 	Viewer->ShowBox = 0;
 	Viewer->RedrawBackground = 0;
 	Viewer->FieldsStore = gtk_list_store_new(5, G_TYPE_STRING, G_TYPE_POINTER, G_TYPE_BOOLEAN, G_TYPE_BOOLEAN, G_TYPE_STRING);
-	Viewer->ActivationFn = ml_cfunction(Viewer->Console, (void *)console_print);
-	for (int I = 0; I < 10; ++I) Viewer->HotkeyFns[I] = Viewer->ActivationFn;
 	Viewer->PreviewWidget = 0;
 
 	ml_types_init(Viewer->Globals);
@@ -3630,6 +3628,8 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 	ml_gir_init(Viewer->Globals);
 
 	Viewer->Console = console_new((ml_getter_t)viewer_global_get, Viewer);
+	Viewer->ActivationFn = ml_cfunction(Viewer->Console, (void *)console_print);
+	for (int I = 0; I < 10; ++I) Viewer->HotkeyFns[I] = Viewer->ActivationFn;
 
 	stringmap_insert(Viewer->Globals, "activate", ml_reference(&Viewer->ActivationFn));
 	stringmap_insert(Viewer->Globals, "hotkey0", ml_reference(&Viewer->HotkeyFns[0]));
