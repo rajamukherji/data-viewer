@@ -1499,10 +1499,10 @@ static void zoom_viewer(viewer_t *Viewer, double X, double Y, double Zoom) {
 	double XMax = X + Zoom * (Viewer->Max.X - X);
 	double YMin = Y - Zoom * (Y - Viewer->Min.Y);
 	double YMax = Y + Zoom * (Viewer->Max.Y - Y);
-	if (XMin < Viewer->DataMin.X) XMin = Viewer->DataMin.X;
-	if (XMax > Viewer->DataMax.X) XMax = Viewer->DataMax.X;
-	if (YMin < Viewer->DataMin.Y) YMin = Viewer->DataMin.Y;
-	if (YMax > Viewer->DataMax.Y) YMax = Viewer->DataMax.Y;
+	//if (XMin < Viewer->DataMin.X) XMin = Viewer->DataMin.X;
+	//if (XMax > Viewer->DataMax.X) XMax = Viewer->DataMax.X;
+	//if (YMin < Viewer->DataMin.Y) YMin = Viewer->DataMin.Y;
+	//if (YMax > Viewer->DataMax.Y) YMax = Viewer->DataMax.Y;
 	Viewer->Min.X = XMin;
 	Viewer->Max.X = XMax;
 	Viewer->Min.Y = YMin;
