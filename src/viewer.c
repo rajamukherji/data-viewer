@@ -231,57 +231,6 @@ static void merge_sort_y(node_t **Start, node_t **End, node_t **Buffer) {
 	memcpy(Start, Buffer, (End - Start) * sizeof(node_t *));
 }
 
-/*static node_t *create_node_tree_x(node_t **Start, node_t **End, node_t **Buffer);
-
-static node_t *create_node_tree_y(node_t **Start, node_t **End, node_t **Buffer) {
-	if (Start == End) {
-		return 0;
-	} else if (Start + 1 == End) {
-		Start[0]->Children[0] = 0;
-		Start[0]->Children[1] = 0;
-		return Start[0];
-	} else {
-		merge_sort_y(Start, End, Buffer);
-		node_t **Mid = Start + (End - Start) / 2;
-		Mid[0]->Children[0] = create_node_tree_x(Start, Mid, Buffer);
-		Mid[0]->Children[1] = create_node_tree_x(Mid + 1, End, Buffer);
-		return Mid[0];
-	}
-}
-
-static node_t *create_node_tree_x(node_t **Start, node_t **End, node_t **Buffer) {
-	if (Start == End) {
-		return 0;
-	} else if (Start + 1 == End) {
-		Start[0]->Children[0] = 0;
-		Start[0]->Children[1] = 0;
-		return Start[0];
-	} else {
-		merge_sort_x(Start, End, Buffer);
-		node_t **Mid = Start + (End - Start) / 2;
-		Mid[0]->Children[0] = create_node_tree_y(Start, Mid, Buffer);
-		Mid[0]->Children[1] = create_node_tree_y(Mid + 1, End, Buffer);
-		return Mid[0];
-	}
-}
-
-static void update_node_tree(viewer_t *Viewer) {
-	node_t *Node = Viewer->Nodes;
-	int I = Viewer->NumNodes;
-	node_t **Sorted = Viewer->Sorted, **Tail = Sorted;
-	while (--I >= 0) {
-		if (!Node->Filtered) *(Tail++) = Node;
-		++Node;
-	}
-	if (Tail > Sorted) {
-		clock_t Start = clock();
-		Viewer->Root = create_node_tree_x(Sorted, Tail, Viewer->SortBuffer);
-		printf("update_node_tree:%d @ %lu\n", __LINE__, clock() - Start);
-	} else {
-		Viewer->Root = 0;
-	}
-}*/
-
 static void split_node_list_y(node_t *Root, node_t *HeadX, node_t *HeadY1, int Count1, int Count2);
 
 static void split_node_list_x(node_t *Root, node_t *HeadX1, node_t *HeadY, int Count1, int Count2) {
@@ -442,6 +391,8 @@ static int set_enum_name_fn(const char *Name, const double *Value, const char **
 }
 
 static ml_value_t *node_ref_assign(node_ref_t *Ref, ml_value_t *Value) {
+	Value = Value->Type->deref(Value);
+	if (Value->Type == MLErrorT) return Value;
 	field_t *Field = Ref->Field;
 	if (Field->EnumMap) {
 		int Index;
@@ -453,11 +404,10 @@ static ml_value_t *node_ref_assign(node_ref_t *Ref, ml_value_t *Value) {
 			if (Index < 0 || Index >= Field->EnumSize) return ml_error("RangeError", "enum index out of range");
 		} else if (Value->Type == MLStringT) {
 			const char *Text = ml_string_value(Value);
-			double *Ref2 = stringmap_search(Field->EnumMap, Text);
-			if (!Ref2) {
-				Ref2 = new(double);
-				stringmap_insert(Field->EnumMap, Text, Ref);
-				*(double *)Ref2 = Field->EnumMap->Size;
+			double **Slot = (double **)stringmap_slot(Field->EnumMap, Text);
+			if (!Slot[0]) {
+				double *Ref2 = Slot[0] = new(double);
+				Ref2[0] = Field->EnumMap->Size;
 				int EnumSize = Field->EnumSize = Field->EnumMap->Size + 1;
 				const char **EnumNames = (const char **)GC_malloc(EnumSize * sizeof(const char *));
 				EnumNames[0] = "";
@@ -471,7 +421,7 @@ static ml_value_t *node_ref_assign(node_ref_t *Ref, ml_value_t *Value) {
 				Field->Range.Min = 0.0;
 				Field->Range.Max = EnumSize;
 			}
-			Index = *(double *)Ref2;
+			Index = Slot[0][0];
 		} else {
 			return ml_error("TypeError", "invalid value for assignment");
 		}
@@ -509,17 +459,14 @@ static ml_value_t *node_ref_assign(node_ref_t *Ref, ml_value_t *Value) {
 	return Value;
 }
 
-static ml_type_t NodeRefT[1] = {{
-	MLTypeT,
-	MLAnyT, "node-ref",
-	ml_default_hash,
-	ml_default_call,
-	(void *)node_ref_deref,
-	(void *)node_ref_assign,
-	NULL, 0, 0
-}};
+ML_TYPE(NodeT, (), "node");
 
-static ml_value_t *node_field_string_fn(void *Data, int Count, ml_value_t **Args) {
+ML_TYPE(NodeRefT, (), "node-ref",
+	.deref = (void *)node_ref_deref,
+	.assign = (void *)node_ref_assign
+);
+
+ML_METHOD("[]", NodeT, MLStringT) {
 	node_t *Node = (node_t *)Args[0];
 	const char *Name = ml_string_value(Args[1]);
 	viewer_t *Viewer = Node->Viewer;
@@ -532,7 +479,9 @@ static ml_value_t *node_field_string_fn(void *Data, int Count, ml_value_t **Args
 	return (ml_value_t *)Ref;
 }
 
-static ml_value_t *node_field_field_fn(void *Data, int Count, ml_value_t **Args) {
+ML_TYPE(FieldT, (), "field");
+
+ML_METHOD("[]", NodeT, FieldT) {
 	node_t *Node = (node_t *)Args[0];
 	field_t *Field = (field_t *)Args[1];
 	node_ref_t *Ref = new(node_ref_t);
@@ -552,6 +501,8 @@ static ml_value_t *node_image_deref(node_image_t *Ref) {
 }
 
 static ml_value_t *node_image_assign(node_image_t *Ref, ml_value_t *Value) {
+	Value = Value->Type->deref(Value);
+	if (Value->Type == MLErrorT) return Value;
 	if (Value->Type != MLStringT) return ml_error("TypeError", "Node image must be a string");
 	node_t *Node = Ref->Node;
 	Node->FileName = ml_string_value(Value);
@@ -560,17 +511,12 @@ static ml_value_t *node_image_assign(node_image_t *Ref, ml_value_t *Value) {
 	return Value;
 }
 
-static ml_type_t NodeImageT[1] = {{
-	MLTypeT,
-	MLAnyT, "node-image",
-	ml_default_hash,
-	ml_default_call,
-	(void *)node_image_deref,
-	(void *)node_image_assign,
-	NULL, 0, 0
-}};
+ML_TYPE(NodeImageT, (), "node-image",
+	.deref = (void *)node_image_deref,
+	.assign = (void *)node_image_assign,
+);
 
-static ml_value_t *node_image_fn(void *Data, int Count, ml_value_t **Args) {
+ML_METHOD("image", NodeT) {
 	node_t *Node = (node_t *)Args[0];
 	node_image_t *Ref = new(node_image_t);
 	Ref->Type = NodeImageT;
@@ -584,34 +530,23 @@ typedef struct nodes_iter_t {
 	int NumNodes;
 } nodes_iter_t;
 
-static ml_value_t *nodes_iter_current(ml_state_t *Caller, ml_value_t *Ref) {
-	nodes_iter_t *Iter = (nodes_iter_t *)Ref;
+static void ML_TYPED_FN(ml_iter_value, NodesIterT, ml_state_t *Caller, nodes_iter_t *Iter) {
 	ML_CONTINUE(Caller, Iter->Nodes);
 }
 
-static ml_value_t *nodes_iter_next(ml_state_t *Caller, ml_value_t *Ref) {
-	nodes_iter_t *Iter = (nodes_iter_t *)Ref;
+static void ML_TYPED_FN(ml_iter_next, NodesIterT, ml_state_t *Caller, nodes_iter_t *Iter) {
 	if (Iter->NumNodes) {
 		--Iter->NumNodes;
 		++Iter->Nodes;
-		ML_CONTINUE(Caller, Ref);
+		ML_CONTINUE(Caller, Iter);
 	} else {
 		ML_CONTINUE(Caller, MLNil);
 	}
 }
 
-static ml_type_t NodesIterT[1] = {{
-	MLTypeT,
-	MLAnyT, "nodes-iter",
-	ml_default_hash,
-	ml_default_call,
-	ml_default_deref,
-	ml_default_assign,
-	NULL, 0, 0
-}};
+ML_TYPE(NodesIterT, (), "nodes-iter");
 
-static ml_value_t *nodes_iterate(ml_state_t *Caller, ml_value_t *Value) {
-	nodes_iter_t *Nodes = (nodes_iter_t *)Value;
+static void ML_TYPED_FN(ml_iterate, NodesT, ml_state_t *Caller, nodes_iter_t *Nodes) {
 	if (Nodes->NumNodes) {
 		nodes_iter_t *Iter = new(nodes_iter_t);
 		Iter->Type = NodesIterT;
@@ -623,35 +558,27 @@ static ml_value_t *nodes_iterate(ml_state_t *Caller, ml_value_t *Value) {
 	}
 }
 
-static ml_type_t NodesT[1] = {{
-	MLTypeT,
-	MLIteratableT, "nodes",
-	ml_default_hash,
-	ml_default_call,
-	ml_default_deref,
-	ml_default_assign,
-	NULL, 0, 0
-}};
+ML_TYPE(NodesT, (MLIteratableT), "nodes");
 
 typedef struct fields_t {
 	const ml_type_t *Type;
 	viewer_t *Viewer;
 } fields_t;
 
-static ml_value_t *fields_get_by_name(void *Data, int Count, ml_value_t **Args) {
+ML_METHOD("[]", FieldsT, MLStringT) {
 	viewer_t *Viewer = ((fields_t *)Args[0])->Viewer;
 	const char *Name = ml_string_value(Args[1]);
 	return (ml_value_t *)stringmap_search(Viewer->FieldsByName, Name) ?: MLNil;
 }
 
-static ml_value_t *fields_get_by_index(void *Data, int Count, ml_value_t **Args) {
+ML_METHOD("[]", FieldsT, MLIntegerT) {
 	viewer_t *Viewer = ((fields_t *)Args[0])->Viewer;
 	int Index = ml_integer_value(Args[1]) - 1;
 	if (Index < 0 || Index >= Viewer->NumFields) return ml_error("IndexError", "Invalid field index");
 	return (ml_value_t *)Viewer->Fields[Index];
 }
 
-static ml_value_t *fields_new_field(void *Data, int Count, ml_value_t **Args) {
+ML_METHOD("new", FieldsT, MLStringT, MLStringT) {
 	viewer_t *Viewer = ((fields_t *)Args[0])->Viewer;
 	const char *Name = ml_string_value(Args[1]);
 	const char *Type = ml_string_value(Args[2]);
@@ -693,22 +620,14 @@ static ml_value_t *fields_new_field(void *Data, int Count, ml_value_t **Args) {
 	return (ml_value_t *)Field;
 }
 
-static ml_type_t FieldsT[1] = {{
-	MLTypeT,
-	MLAnyT, "fields",
-	ml_default_hash,
-	ml_default_call,
-	ml_default_deref,
-	ml_default_assign,
-	NULL, 0, 0
-}};
+ML_TYPE(FieldsT, (), "fields");
 
-static ml_value_t *field_name_fn(void *Data, int Count, ml_value_t **Args) {
+ML_METHOD(MLStringOfMethod, FieldT) {
 	field_t *Field = (field_t *)Args[0];
 	return ml_string(Field->Name, -1);
 }
 
-static ml_value_t *field_enum_value_fn(void *Data, int Count, ml_value_t **Args) {
+ML_METHOD("[]", FieldT, MLStringT) {
 	field_t *Field = (field_t *)Args[0];
 	if (!Field->EnumMap) return ml_error("TypeError", "field is not an enum");
 	const char *Name = ml_string_value(Args[1]);
@@ -720,7 +639,7 @@ static ml_value_t *field_enum_value_fn(void *Data, int Count, ml_value_t **Args)
 	}
 }
 
-static ml_value_t *field_enum_name_fn(void *Data, int Count, ml_value_t **Args) {
+ML_METHOD("[]", FieldT, MLIntegerT) {
 	field_t *Field = (field_t *)Args[0];
 	if (!Field->EnumMap) return ml_error("TypeError", "field is not an enumeration");
 	int Value = ml_integer_value(Args[1]);
@@ -728,18 +647,18 @@ static ml_value_t *field_enum_name_fn(void *Data, int Count, ml_value_t **Args) 
 	return ml_string(Field->EnumNames[Value], -1);
 }
 
-static ml_value_t *field_enum_size_fn(void *Data, int Count, ml_value_t **Args) {
+ML_METHOD("size", FieldT) {
 	field_t *Field = (field_t *)Args[0];
 	if (!Field->EnumMap) return ml_error("TypeError", "field is not an enumeration");
 	return ml_integer(Field->EnumSize);
 }
 
-static ml_value_t *field_range_min_fn(void *Data, int Count, ml_value_t **Args) {
+ML_METHOD("min", FieldT) {
 	field_t *Field = (field_t *)Args[0];
 	return ml_real(Field->Range.Min);
 }
 
-static ml_value_t *field_range_max_fn(void *Data, int Count, ml_value_t **Args) {
+ML_METHOD("max", FieldT) {
 	field_t *Field = (field_t *)Args[0];
 	return ml_real(Field->Range.Max);
 }
@@ -1580,10 +1499,10 @@ static void zoom_viewer(viewer_t *Viewer, double X, double Y, double Zoom) {
 	double XMax = X + Zoom * (Viewer->Max.X - X);
 	double YMin = Y - Zoom * (Y - Viewer->Min.Y);
 	double YMax = Y + Zoom * (Viewer->Max.Y - Y);
-	if (XMin < Viewer->DataMin.X) XMin = Viewer->DataMin.X;
-	if (XMax > Viewer->DataMax.X) XMax = Viewer->DataMax.X;
-	if (YMin < Viewer->DataMin.Y) YMin = Viewer->DataMin.Y;
-	if (YMax > Viewer->DataMax.Y) YMax = Viewer->DataMax.Y;
+	//if (XMin < Viewer->DataMin.X) XMin = Viewer->DataMin.X;
+	//if (XMax > Viewer->DataMax.X) XMax = Viewer->DataMax.X;
+	//if (YMin < Viewer->DataMin.Y) YMin = Viewer->DataMin.Y;
+	//if (YMax > Viewer->DataMax.Y) YMax = Viewer->DataMax.Y;
 	Viewer->Min.X = XMin;
 	Viewer->Max.X = XMax;
 	Viewer->Min.Y = YMin;
@@ -1595,32 +1514,10 @@ static void zoom_viewer(viewer_t *Viewer, double X, double Y, double Zoom) {
 }
 
 static void pan_viewer(viewer_t *Viewer, double DeltaX, double DeltaY) {
-	if (DeltaX < 0) {
-		double XMin = Viewer->Min.X + DeltaX;
-		if (XMin < Viewer->DataMin.X) XMin = Viewer->DataMin.X;
-		double XMax = XMin + (Viewer->Max.X - Viewer->Min.X);
-		Viewer->Min.X = XMin;
-		Viewer->Max.X = XMax;
-	} else {
-		double XMax = Viewer->Max.X + DeltaX;
-		if (XMax > Viewer->DataMax.X) XMax = Viewer->DataMax.X;
-		double XMin = XMax - (Viewer->Max.X - Viewer->Min.X);
-		Viewer->Min.X = XMin;
-		Viewer->Max.X = XMax;
-	}
-	if (DeltaY < 0) {
-		double YMin = Viewer->Min.Y + DeltaY;
-		if (YMin < Viewer->DataMin.Y) YMin = Viewer->DataMin.Y;
-		double YMax = YMin + (Viewer->Max.Y - Viewer->Min.Y);
-		Viewer->Min.Y = YMin;
-		Viewer->Max.Y = YMax;
-	} else {
-		double YMax = Viewer->Max.Y + DeltaY;
-		if (YMax > Viewer->DataMax.Y) YMax = Viewer->DataMax.Y;
-		double YMin = YMax - (Viewer->Max.Y - Viewer->Min.Y);
-		Viewer->Min.Y = YMin;
-		Viewer->Max.Y = YMax;
-	}
+	Viewer->Min.X += DeltaX;
+	Viewer->Max.X += DeltaX;
+	Viewer->Min.Y += DeltaY;
+	Viewer->Max.Y += DeltaY;
 }
 
 static void resize_viewer(GtkWidget *Widget, GdkRectangle *Allocation, viewer_t *Viewer) {
@@ -3585,8 +3482,8 @@ static json_t *ml_to_json(ml_value_t *Value) {
 	if (Value->Type == MLStringT) return json_string(ml_string_value(Value));
 	if (Value->Type == MLListT) {
 		json_t *Array = json_array();
-		for (ml_list_node_t *Node = ml_list_head(Value); Node; Node = Node->Next) {
-			json_array_append(Array, ml_to_json(Node->Value));
+		ML_LIST_FOREACH(Value, Iter) {
+			json_array_append(Array, ml_to_json(Iter->Value));
 		}
 		return Array;
 	}
@@ -3699,10 +3596,9 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 	Viewer->ShowBox = 0;
 	Viewer->RedrawBackground = 0;
 	Viewer->FieldsStore = gtk_list_store_new(5, G_TYPE_STRING, G_TYPE_POINTER, G_TYPE_BOOLEAN, G_TYPE_BOOLEAN, G_TYPE_STRING);
-	Viewer->ActivationFn = ml_function(Viewer->Console, (void *)console_print);
-	for (int I = 0; I < 10; ++I) Viewer->HotkeyFns[I] = Viewer->ActivationFn;
 	Viewer->PreviewWidget = 0;
 
+	ml_types_init(Viewer->Globals);
 	ml_object_init(Viewer->Globals);
 	ml_iterfns_init(Viewer->Globals);
 	ml_file_init(Viewer->Globals);
@@ -3710,6 +3606,8 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 	ml_gir_init(Viewer->Globals);
 
 	Viewer->Console = console_new((ml_getter_t)viewer_global_get, Viewer);
+	Viewer->ActivationFn = ml_cfunction(Viewer->Console, (void *)console_print);
+	for (int I = 0; I < 10; ++I) Viewer->HotkeyFns[I] = Viewer->ActivationFn;
 
 	stringmap_insert(Viewer->Globals, "activate", ml_reference(&Viewer->ActivationFn));
 	stringmap_insert(Viewer->Globals, "hotkey0", ml_reference(&Viewer->HotkeyFns[0]));
@@ -3722,18 +3620,18 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 	stringmap_insert(Viewer->Globals, "hotkey7", ml_reference(&Viewer->HotkeyFns[7]));
 	stringmap_insert(Viewer->Globals, "hotkey8", ml_reference(&Viewer->HotkeyFns[8]));
 	stringmap_insert(Viewer->Globals, "hotkey9", ml_reference(&Viewer->HotkeyFns[9]));
-	stringmap_insert(Viewer->Globals, "menu", ml_function(Viewer, (void *)node_menu_fn));
-	stringmap_insert(Viewer->Globals, "print", ml_function(Viewer->Console, (void *)console_print));
-	stringmap_insert(Viewer->Globals, "clipboard", ml_function(Viewer, (void *)clipboard_fn));
-	stringmap_insert(Viewer->Globals, "execute", ml_function(Viewer, (void *)execute_fn));
-	stringmap_insert(Viewer->Globals, "shell", ml_function(Viewer, (void *)shell_fn));
-	stringmap_insert(Viewer->Globals, "getenv", ml_function(Viewer, (void *)getenv_fn));
-	stringmap_insert(Viewer->Globals, "setenv", ml_function(Viewer, (void *)setenv_fn));
-	stringmap_insert(Viewer->Globals, "open", ml_function(Viewer, ml_file_open));
-	stringmap_insert(Viewer->Globals, "filter", ml_function(Viewer, (void *)filter_fn));
-	stringmap_insert(Viewer->Globals, "connect", ml_function(Viewer, (void *)connect_fn));
-	stringmap_insert(Viewer->Globals, "remote", ml_function(Viewer, (void *)remote_fn));
-	stringmap_insert(Viewer->Globals, "random", ml_function(Viewer, (void *)random_fn));
+	stringmap_insert(Viewer->Globals, "menu", ml_cfunction(Viewer, (void *)node_menu_fn));
+	stringmap_insert(Viewer->Globals, "print", ml_cfunction(Viewer->Console, (void *)console_print));
+	stringmap_insert(Viewer->Globals, "clipboard", ml_cfunction(Viewer, (void *)clipboard_fn));
+	stringmap_insert(Viewer->Globals, "execute", ml_cfunction(Viewer, (void *)execute_fn));
+	stringmap_insert(Viewer->Globals, "shell", ml_cfunction(Viewer, (void *)shell_fn));
+	stringmap_insert(Viewer->Globals, "getenv", ml_cfunction(Viewer, (void *)getenv_fn));
+	stringmap_insert(Viewer->Globals, "setenv", ml_cfunction(Viewer, (void *)setenv_fn));
+	stringmap_insert(Viewer->Globals, "open", ml_cfunction(Viewer, ml_file_open));
+	stringmap_insert(Viewer->Globals, "filter", ml_cfunction(Viewer, (void *)filter_fn));
+	stringmap_insert(Viewer->Globals, "connect", ml_cfunction(Viewer, (void *)connect_fn));
+	stringmap_insert(Viewer->Globals, "remote", ml_cfunction(Viewer, (void *)remote_fn));
+	stringmap_insert(Viewer->Globals, "random", ml_cfunction(Viewer, (void *)random_fn));
 
 	GtkWidget *MainWindow = Viewer->MainWindow = gtk_window_new(GTK_WINDOW_TOPLEVEL);
 	gtk_window_set_title(GTK_WINDOW(Viewer->MainWindow), "DataViewer");
@@ -3833,26 +3731,7 @@ int main(int Argc, char *Argv[]) {
 	GreaterMethod = ml_method(">");
 	LessOrEqualMethod = ml_method("<=");
 	GreaterOrEqualMethod = ml_method(">=");
-	NodeT = ml_type(MLAnyT, "node");
-	ml_method_by_name("[]", 0, node_field_string_fn, NodeT, MLStringT, NULL);
-	ml_method_by_name("[]", 0, node_field_field_fn, NodeT, FieldT, NULL);
-	ml_method_by_name("image", 0, node_image_fn, NodeT, NULL);
-	ml_method_by_name("string", 0, node_image_fn, NodeT, NULL);
-	FieldT = ml_type(MLAnyT, "field");
-	ml_method_by_name("string", 0, field_name_fn, FieldT, NULL);
-	ml_method_by_name("[]", 0, field_enum_value_fn, FieldT, MLStringT, NULL);
-	ml_method_by_name("[]", 0, field_enum_name_fn, FieldT, MLIntegerT, NULL);
-	ml_method_by_name("size", 0, field_enum_size_fn, FieldT, NULL);
-	ml_method_by_name("min", 0, field_range_min_fn, FieldT, NULL);
-	ml_method_by_name("max", 0, field_range_max_fn, FieldT, NULL);
-	ml_method_by_name("[]", 0, fields_get_by_name, FieldsT, MLStringT, NULL);
-	ml_method_by_name("[]", 0, fields_get_by_index, FieldsT, MLIntegerT, NULL);
-	ml_method_by_name("new", 0, fields_new_field, FieldsT, MLStringT, MLStringT, NULL);
-
-	ml_typed_fn_set(NodesT, ml_iterate, nodes_iterate);
-	ml_typed_fn_set(NodesIterT, ml_iter_next, nodes_iter_next);
-	ml_typed_fn_set(NodesIterT, ml_iter_value, nodes_iter_current);
-
+#include "viewer_init.c"
 	stringmap_insert(EventHandlers, "column/values/set", column_values_set_event);
 	viewer_t *Viewer = create_viewer(Argc, Argv);
 	gtk_main();

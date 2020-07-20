@@ -1,4 +1,4 @@
--- ROOT --
+:< ROOT >:
 
 PLATFORM := defined("PLATFORM") or shell("uname"):trim
 DEBUG := defined("DEBUG")
@@ -27,7 +27,6 @@ c_compile := fun(Object) do
 end
 
 c_includes := fun(Target) do
-	var Files := []
 	var Lines := shell(CC, '-c {CFLAGS} -M -MG {Target:source}')
 	var Files := Lines:trim:replace(r"\\\n ", "") / r"[^\\]( +)"
 	Files:pop
@@ -61,7 +60,6 @@ c_program := fun(Executable, Objects, Libraries) do
 	end
 	Executable[Objects, Libraries] => fun(Executable) do
 		execute(CC, '-o', Executable, Objects, Libraries, LDFLAGS)
-		DEBUG or execute('strip', Executable)
 	end
 	DEFAULT[Executable]
 end

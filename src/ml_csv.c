@@ -1,6 +1,6 @@
 #include "minilang.h"
-#include "minilang/stringmap.h"
-#include "minilang/ml_macros.h"
+#include "stringmap.h"
+#include "ml_macros.h"
 #include <string.h>
 #include <stdio.h>
 #include <gc.h>
@@ -64,15 +64,17 @@ static ml_value_t *csv_write_fn(void *Data, int Count, ml_value_t **Args) {
 	csv_t *Csv = (csv_t *)Args[0];
 	if (!Csv->File) return ml_error("FileError", "Trying to write to closed file");
 	ml_list_t *Values = (ml_list_t *)Args[1];
-	for (ml_list_node_t *Node = Values->Head; Node; Node = Node->Next) {
-		ml_value_t *Field = Node->Value;
+	int Comma = 0;
+	ML_LIST_FOREACH(Values, Iter) {
+		if (Comma) fputc(',', Csv->File);
+		ml_value_t *Field = Iter->Value;
 		if (Field->Type != MLStringT) {
 			Field = ml_call(StringMethod, 1, &Field);
 			if (Field->Type == MLErrorT) return Field;
 			if (Field->Type != MLStringT) return ml_error("ResultError", "string method did not return string");
 		}
 		csv_fwrite(Csv->File, ml_string_value(Field), ml_string_length(Field));
-		if (Node->Next) fputc(',', Csv->File);
+		Comma = 1;
 	}
 	fputc('\n', Csv->File);
 	return Args[0];
@@ -125,6 +127,6 @@ void *ml_csv_init(stringmap_t *Globals) {
 	ml_method_by_name("read", 0, csv_read_fn, CsvT, NULL);
 	ml_method_by_name("write", 0, csv_write_fn, CsvT, MLListT, NULL);
 	ml_method_by_name("close", 0, csv_close_fn, CsvT, NULL);
-	stringmap_insert(Globals, "csv_open", ml_function(0, csv_open));
+	stringmap_insert(Globals, "csv_open", ml_cfunction(0, csv_open));
 	return 0;
 }

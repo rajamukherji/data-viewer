@@ -21,8 +21,8 @@ typedef struct {
 	double Min, Max;
 } range_t;
 
-static ml_type_t *NodeT;
-static ml_type_t *FieldT;
+extern ml_type_t NodeT[];
+extern ml_type_t FieldT[];
 
 struct node_t {
 	const ml_type_t *Type;
