@@ -127,6 +127,6 @@ void *ml_csv_init(stringmap_t *Globals) {
 	ml_method_by_name("read", 0, csv_read_fn, CsvT, NULL);
 	ml_method_by_name("write", 0, csv_write_fn, CsvT, MLListT, NULL);
 	ml_method_by_name("close", 0, csv_close_fn, CsvT, NULL);
-	stringmap_insert(Globals, "csv_open", ml_function(0, csv_open));
+	stringmap_insert(Globals, "csv_open", ml_cfunction(0, csv_open));
 	return 0;
 }

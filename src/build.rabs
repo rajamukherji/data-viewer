@@ -1,5 +1,14 @@
-CFLAGS := old + ['-g', '-std=gnu99', '-D_GNU_SOURCE', '-pthread', pkgconfig("--cflags gtk+-3.0 gdk-pixbuf-2.0 gtksourceview-4 gobject-introspection-1.0")]
-LDFLAGS := old + ['-g', '-lm', '-pthread', pkgconfig("--libs gtk+-3.0 gdk-pixbuf-2.0 gtksourceview-4 gobject-introspection-1.0")]
+CFLAGS := old + [
+	'-g', '-std=gnu99',
+	'-D_GNU_SOURCE',
+	"-I.", '-pthread',
+	pkgconfig("--cflags gtk+-3.0 gdk-pixbuf-2.0 gtksourceview-4 gobject-introspection-1.0")
+]
+LDFLAGS := old + [
+	'-g', '-lm',
+	'-pthread',
+	pkgconfig("--libs gtk+-3.0 gdk-pixbuf-2.0 gtksourceview-4 gobject-introspection-1.0")
+]
 
 if DEBUG then
 	CFLAGS := old + ["-DDEBUG"]
@@ -16,31 +25,13 @@ file("libcsv.o") => fun(Object) do
 	execute(CC, '-c {CFLAGS} -o{Object} -I{Source:dir} {Source}')
 end
 
-GC_VERSION := old or "8.0.4"
-GC := meta("gc"):scan("install") => fun() do
-	var Config := {
-		"--enable-munmap" is 4,
-		"--enable-large-config",
-		"--enable-shared" is :true,
-		"--with-libatomic-ops=none",
-		"--enable-parallel-mark",
-		"--disable-gcj-support",
-		"--enable-redirect-malloc",
-		'--prefix={PATH}'
-	}
-	file("gc"):rmdir:mkdir:chdir
-	execute('wget -nv https://github.com/ivmai/bdwgc/releases/download/v{GC_VERSION}/gc-{GC_VERSION}.tar.gz -O- | tar xzP --strip-components=1')
-	execute("./configure", Config)
-	execute("make")
-	execute("make install")
-	ret [PATH/"lib/libgc.a", PATH/"lib/libcord.a"]
-end
-
 MINILANG_USERADB := 1
 MINILANG_USEMATH := 1
 MINILANG_USEGTK := 1
-subdir("minilang")
-LIBMINILANG := context("/obj/minilang/obj")::LIBMINILANG
+
+let Minilang := subdir("minilang")
+
+Minilang::generate_init_files()
 
 file("whereami/src"):mkdir
 CFLAGS := old + ['-D_GNU_SOURCE', "-Iinclude", '-I{file("minilang/src/minilang.h"):dirname}', '-I{file("whereami/src/whereami.h"):dirname}']
@@ -61,9 +52,9 @@ var Objects := [
 if USE_GL then
 	CFLAGS := old + ['-DUSE_GL']
 	LDFLAGS := old + ['-lepoxy']
-	c_program(BIN_DIR/"data-viewer-gl", Objects, [LIBMINILANG])
+	c_program(BIN_DIR/"data-viewer-gl", Objects, [Minilang::LIBMINILANG])
 else
-	c_program(BIN_DIR/"data-viewer", Objects, [LIBMINILANG])
+	c_program(BIN_DIR/"data-viewer", Objects, [Minilang::LIBMINILANG])
 	install(BIN_DIR/"data-viewer", PREFIX/"bin/data-viewer", "+x")
 	install(file("data-viewer.desktop"), PREFIX/'share/applications/data-viewer.desktop')
 end
