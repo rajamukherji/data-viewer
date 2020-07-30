@@ -1,3 +1,4 @@
+#include "viewer.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -5,17 +6,12 @@
 #include <time.h>
 #include "libcsv/csv.h"
 #include <gc/gc.h>
-#include <minilang.h>
 #include <ml_macros.h>
 #include <ml_file.h>
 #include <ml_object.h>
 #include <ml_iterfns.h>
 #include <ml_gir.h>
-#include <gtk_console.h>
 #include "ml_csv.h"
-#include "ml_gir.h"
-#include <czmq.h>
-#include "viewer.h"
 
 #ifdef USE_GL
 #include <epoxy/gl.h>
@@ -794,12 +790,12 @@ static inline void set_node_rgb(node_t *Node, double H) {
 
 static void filter_enum_field(viewer_t *Viewer, field_t *Field) {
 	printf("filter_enum_field(%s)\n", Field->Name);
-	node_t *Node = Viewer->Nodes;
+	const node_t *Node = Viewer->Nodes;
 	int NumNodes = Viewer->NumNodes;
 	int *EnumValues = Field->EnumValues;
 	memset(EnumValues, 0, Field->EnumSize * sizeof(int));
 	int Max = 0;
-	double *Value = Field->Values;
+	const double *Value = Field->Values;
 	for (int I = NumNodes; --I >= 0;) {
 		if (Node->Filtered) {
 			int Index = (int)Value[0];
@@ -810,6 +806,24 @@ static void filter_enum_field(viewer_t *Viewer, field_t *Field) {
 	}
 	Field->Range.Max = Max;
 	printf("Field->Range.Max = %d\n", Max);
+	Field->FilterGeneration = Viewer->FilterGeneration;
+}
+
+static void filter_real_field(viewer_t *Viewer, field_t *Field) {
+	const node_t *Node = Viewer->Nodes;
+	double Min = INFINITY;
+	double Max = -INFINITY;
+	const double *Value = Field->Values;
+	for (int I = Viewer->NumNodes; --I >= 0;) {
+		if (Node->Filtered) {
+			Min = MIN(Min, *Value);
+			Max = MAX(Max, *Value);
+		}
+		++Node;
+		++Value;
+	}
+	Field->Range.Min = Min;
+	Field->Range.Max = Max;
 	Field->FilterGeneration = Viewer->FilterGeneration;
 }
 
@@ -840,6 +854,9 @@ static void set_viewer_colour_index(viewer_t *Viewer, int CIndex) {
 			++CValue;
 		}
 	} else {
+		if (CField->FilterGeneration != Viewer->FilterGeneration) {
+			filter_real_field(Viewer, CField);
+		}
 		double Min = CField->Range.Min;
 		double Range = CField->Range.Max - Min;
 		if (Range <= 1.0e-6) Range = 1.0;
@@ -3627,7 +3644,6 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 	stringmap_insert(Viewer->Globals, "shell", ml_cfunction(Viewer, (void *)shell_fn));
 	stringmap_insert(Viewer->Globals, "getenv", ml_cfunction(Viewer, (void *)getenv_fn));
 	stringmap_insert(Viewer->Globals, "setenv", ml_cfunction(Viewer, (void *)setenv_fn));
-	stringmap_insert(Viewer->Globals, "open", ml_cfunction(Viewer, ml_file_open));
 	stringmap_insert(Viewer->Globals, "filter", ml_cfunction(Viewer, (void *)filter_fn));
 	stringmap_insert(Viewer->Globals, "connect", ml_cfunction(Viewer, (void *)connect_fn));
 	stringmap_insert(Viewer->Globals, "remote", ml_cfunction(Viewer, (void *)remote_fn));

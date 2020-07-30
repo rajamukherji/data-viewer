@@ -1,10 +1,13 @@
 #ifndef VIEWER_H
 #define VIEWER_H
 
+#include <minilang.h>
+#include <gtk_console.h>
 #include <gtk/gtk.h>
 #include <gdk-pixbuf/gdk-pixbuf.h>
 #include <stringmap.h>
 #include <jansson.h>
+#include <czmq.h>
 
 typedef struct node_t node_t;
 typedef int node_callback_t(void *Data, node_t *Node);
