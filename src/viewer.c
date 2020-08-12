@@ -1959,6 +1959,14 @@ static void connect_dataset_open(viewer_t *Viewer, json_t *Result, connect_info_
 	gtk_window_set_title(GTK_WINDOW(Viewer->MainWindow), Title);
 }
 
+static void prefix_directory_set(GtkFileChooser *Widget, GtkEntry *Entry) {
+	const char *FileName = gtk_file_chooser_get_filename(Widget);
+	char *Path = GC_malloc_atomic(strlen(FileName) + 2);
+	strcpy(Path, FileName);
+	strcat(Path, "/");
+	gtk_entry_set_text(Entry, Path);
+}
+
 static void connect_clicked(GtkWidget *Button, viewer_t *Viewer) {
 	// Connects to a data server and connects a data set or creates one
 	connect_info_t *Info = new(connect_info_t);
@@ -2005,6 +2013,12 @@ static void connect_clicked(GtkWidget *Button, viewer_t *Viewer) {
 	gtk_box_pack_start(GTK_BOX(PrefixBox), gtk_label_new("Image Prefix"), FALSE, FALSE, 2);
 	gtk_box_pack_start(GTK_BOX(PrefixBox), PrefixEntry, TRUE, TRUE, 2);
 	gtk_box_pack_start(ContentArea, PrefixBox, FALSE, FALSE, 2);
+
+	const char *CurrentFolder = g_get_current_dir();
+	GtkWidget *PrefixChooser = gtk_file_chooser_button_new("Image prefix directory", GTK_FILE_CHOOSER_ACTION_SELECT_FOLDER);
+	gtk_file_chooser_set_current_folder(GTK_FILE_CHOOSER(PrefixChooser), CurrentFolder);
+	g_signal_connect(G_OBJECT(PrefixChooser), "file-set", G_CALLBACK(prefix_directory_set), PrefixEntry);
+	gtk_box_pack_start(GTK_BOX(PrefixBox), PrefixChooser, FALSE, FALSE, 2);
 
 	GtkWidget *CreateButton = gtk_button_new_with_label("Create");
 	gtk_button_set_image(GTK_BUTTON(CreateButton), gtk_image_new_from_icon_name("document-new-symbolic", GTK_ICON_SIZE_BUTTON));
@@ -2333,12 +2347,12 @@ static void filter_create_ui(GtkButton *Widget, viewer_t *Viewer) {
 	filter_create(Viewer, 0, -1);
 }
 
-static ml_value_t *EqualMethod = 0;
-static ml_value_t *NotEqualMethod = 0;
-static ml_value_t *LessMethod = 0;
-static ml_value_t *GreaterMethod = 0;
-static ml_value_t *LessOrEqualMethod = 0;
-static ml_value_t *GreaterOrEqualMethod = 0;
+static ML_METHOD_DECL(Equal, "=");
+static ML_METHOD_DECL(NotEqual, "!=");
+static ML_METHOD_DECL(Less, "<");
+static ML_METHOD_DECL(Greater, ">");
+static ML_METHOD_DECL(LessOrEqual, "<=");
+static ML_METHOD_DECL(GreaterOrEqual, ">=");
 
 static ml_value_t *filter_fn(viewer_t *Viewer, int Count, ml_value_t **Args) {
 	ML_CHECK_ARG_COUNT(3);
@@ -3215,10 +3229,6 @@ static void viewer_load_file(viewer_t *Viewer, const char *CsvFileName, const ch
 	gtk_window_set_title(GTK_WINDOW(Viewer->MainWindow), Title);
 }
 
-static void prefix_directory_set(GtkFileChooser *Widget, GtkEntry *Entry) {
-	gtk_entry_set_text(Entry, gtk_file_chooser_get_filename(Widget));
-}
-
 static void viewer_open_file(GtkWidget *Button, viewer_t *Viewer) {
 	GtkWidget *FileChooser = gtk_file_chooser_dialog_new(
 		"Open a CSV file",
@@ -3249,6 +3259,7 @@ static void viewer_open_file(GtkWidget *Button, viewer_t *Viewer) {
 	gtk_grid_set_row_spacing(GTK_GRID(LoadOptions), 6);
 	gtk_grid_set_column_spacing(GTK_GRID(LoadOptions), 6);
 	GtkWidget *PrefixEntry = gtk_entry_new();
+	gtk_widget_set_hexpand(PrefixEntry, TRUE);
 	gtk_grid_attach(GTK_GRID(LoadOptions), gtk_label_new("Image Prefix"), 0, 0, 1, 1);
 	gtk_grid_attach(GTK_GRID(LoadOptions), PrefixEntry, 1, 0, 1, 1);
 
