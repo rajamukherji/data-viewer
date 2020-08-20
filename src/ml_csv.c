@@ -69,7 +69,7 @@ static ml_value_t *csv_write_fn(void *Data, int Count, ml_value_t **Args) {
 		if (Comma) fputc(',', Csv->File);
 		ml_value_t *Field = Iter->Value;
 		if (Field->Type != MLStringT) {
-			Field = ml_call(StringMethod, 1, &Field);
+			Field = ml_simple_call(StringMethod, 1, &Field);
 			if (Field->Type == MLErrorT) return Field;
 			if (Field->Type != MLStringT) return ml_error("ResultError", "string method did not return string");
 		}
@@ -98,14 +98,9 @@ static void csv_finalize(csv_t *Csv, void *Data) {
 
 static ml_value_t *csv_open(void *Data, int Count, ml_value_t **Args) {
 	ML_CHECK_ARG_COUNT(2);
-	ml_value_t *FileName = Args[0];
-	if (FileName->Type != MLStringT) {
-		FileName = ml_call(StringMethod, 1, &FileName);
-		if (FileName->Type == MLErrorT) return FileName;
-		if (FileName->Type != MLStringT) return ml_error("ResultError", "string method did not return string");
-	}
+	ML_CHECK_ARG_TYPE(0, MLStringT);
 	ML_CHECK_ARG_TYPE(1, MLStringT);
-	const char *Path = ml_string_value(FileName);
+	const char *Path = ml_string_value(Args[0]);
 	const char *Mode = ml_string_value(Args[1]);
 	FILE *File = fopen(Path, Mode);
 	if (!File) return ml_error("FileError", "failed to open %s in mode %s", Path, Mode);

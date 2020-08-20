@@ -11,6 +11,8 @@
 #include <ml_object.h>
 #include <ml_iterfns.h>
 #include <ml_gir.h>
+#include <ml_math.h>
+#include <ml_array.h>
 #include "ml_csv.h"
 
 #ifdef USE_GL
@@ -664,7 +666,7 @@ static ml_value_t *clipboard_fn(viewer_t *Viewer, int Count, ml_value_t **Args) 
 	ML_CHECK_ARG_COUNT(1);
 	ml_stringbuffer_t Buffer[1] = {ML_STRINGBUFFER_INIT};
 	for (int I = 0; I < Count; ++I) {
-		ml_value_t *Result = ml_inline(AppendMethod, 2, Buffer, Args[I]);
+		ml_value_t *Result = ml_stringbuffer_append(Buffer, Args[I]);
 		if (Result->Type == MLErrorT) return Result;
 		if (Result != MLNil) ml_stringbuffer_add(Buffer, " ", 1);
 	}
@@ -1663,7 +1665,7 @@ static gboolean key_press_viewer(GtkWidget *Widget, GdkEventKey *Event, viewer_t
 	case GDK_KEY_8: case GDK_KEY_9: {
 		ml_value_t *HotkeyFn = Viewer->HotkeyFns[Event->keyval - GDK_KEY_0];
 		for (node_t *Node = Viewer->Selected; Node; Node = Node->Next) {
-			ml_value_t *Result = ml_inline(HotkeyFn, 1, Node);
+			ml_value_t *Result = ml_simple_inline(HotkeyFn, 1, Node);
 			if (Result->Type == MLErrorT) {
 				console_log(Viewer->Console, Result);
 				break;
@@ -2450,7 +2452,7 @@ static void image_node_activated(GtkIconView *View, GtkTreePath *Path, viewer_t 
 	GtkTreeIter Iter[1];
 	gtk_tree_model_get_iter(GTK_TREE_MODEL(Viewer->ImagesStore), Iter, Path);
 	gtk_tree_model_get(GTK_TREE_MODEL(Viewer->ImagesStore), Iter, 2, &Viewer->ActiveNode, -1);
-	ml_value_t *Result = ml_inline(Viewer->ActivationFn, 1, Viewer->ActiveNode);
+	ml_value_t *Result = ml_simple_inline(Viewer->ActivationFn, 1, Viewer->ActiveNode);
 	console_log(Viewer->Console, Result);
 }
 
@@ -2474,7 +2476,7 @@ typedef struct node_menu_item_t {
 
 static void node_menu_activate(GtkMenuItem *MenuItem, node_menu_item_t *NodeMenuItem) {
 	viewer_t *Viewer = NodeMenuItem->Viewer;
-	ml_value_t *Result = ml_inline(NodeMenuItem->Callback, 1, Viewer->ActiveNode);
+	ml_value_t *Result = ml_simple_inline(NodeMenuItem->Callback, 1, Viewer->ActiveNode);
 	console_log(Viewer->Console, Result);
 }
 
@@ -3410,7 +3412,7 @@ static ml_value_t *shell_fn(void *Data, int Count, ml_value_t **Args) {
 	ML_CHECK_ARG_COUNT(1);
 	ml_stringbuffer_t Buffer[1] = {ML_STRINGBUFFER_INIT};
 	for (int I = 0; I < Count; ++I) {
-		ml_value_t *Result = ml_inline(AppendMethod, 2, Buffer, Args[I]);
+		ml_value_t *Result = ml_stringbuffer_append(Buffer, Args[I]);
 		if (Result->Type == MLErrorT) return Result;
 		if (Result != MLNil) ml_stringbuffer_add(Buffer, " ", 1);
 	}
@@ -3441,7 +3443,7 @@ static ml_value_t *execute_fn(viewer_t *Viewer, int Count, ml_value_t **Args) {
 	ML_CHECK_ARG_COUNT(1);
 	ml_stringbuffer_t Buffer[1] = {ML_STRINGBUFFER_INIT};
 	for (int I = 0; I < Count; ++I) {
-		ml_value_t *Result = ml_inline(AppendMethod, 2, Buffer, Args[I]);
+		ml_value_t *Result = ml_stringbuffer_append(Buffer, Args[I]);
 		if (Result->Type == MLErrorT) return Result;
 		if (Result != MLNil) ml_stringbuffer_add(Buffer, " ", 1);
 	}
@@ -3550,7 +3552,7 @@ static ml_value_t *json_to_ml(json_t *Json) {
 }
 
 static void remote_ml_callback(viewer_t *Viewer, json_t *Result, ml_value_t *Callback) {
-	ml_inline(Callback, 1, json_to_ml(Result));
+	ml_simple_inline(Callback, 1, json_to_ml(Result));
 }
 
 static ml_value_t *connect_fn(viewer_t *Viewer, int Count, ml_value_t **Args) {
@@ -3630,6 +3632,8 @@ static viewer_t *create_viewer(int Argc, char *Argv[]) {
 	ml_object_init(Viewer->Globals);
 	ml_iterfns_init(Viewer->Globals);
 	ml_file_init(Viewer->Globals);
+	ml_math_init(Viewer->Globals);
+	ml_array_init(Viewer->Globals);
 	ml_csv_init(Viewer->Globals);
 	ml_gir_init(Viewer->Globals);
 
