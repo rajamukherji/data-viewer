@@ -3431,7 +3431,7 @@ static ml_value_t *shell_fn(void *Data, int Count, ml_value_t **Args) {
 		if (WEXITSTATUS(Result) != 0) {
 			return ml_error("ExecuteError", "process returned non-zero exit code");
 		} else {
-			return ml_stringbuffer_get_string(Buffer);
+			return ml_stringbuffer_value(Buffer);
 		}
 	} else {
 		return ml_error("ExecuteError", "process exited abnormally");
