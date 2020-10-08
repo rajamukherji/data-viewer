@@ -229,6 +229,70 @@ static void merge_sort_y(node_t **Start, node_t **End, node_t **Buffer) {
 	memcpy(Start, Buffer, (End - Start) * sizeof(node_t *));
 }
 
+static node_t *split_node_list2_y(node_t **SortedX, node_t **SortedY, node_t **Temp, int Length);
+
+static node_t *split_node_list2_x(node_t **SortedX, node_t **SortedY, node_t **Temp, int Length) {
+	int Before = Length >> 1;
+	int After = (Length - Before) - 1;
+	node_t *Root = SortedX[Before];
+	int RootIndex = Root->XIndex;
+	//printf("split_node_list2_x(%d, %d) -> %d\n", Before, After, RootIndex);
+	node_t **Left = Temp, **Right = Temp + Before + 1;
+	node_t **LeftP = Left, **RightP = Right;
+	node_t **P = SortedY;
+	for (int I = Length; --I >= 0;) {
+		node_t *Node = *P++;
+		if (Node->XIndex < RootIndex) {
+			*LeftP++ = Node;
+		} else if (Node->XIndex > RootIndex) {
+			*RightP++ = Node;
+		}
+	}
+	if (Before == 0) {
+		Root->Children[0] = NULL;
+	} else {
+		int Split = Before >> 1;
+		Root->Children[0] = split_node_list2_y(SortedX, Left, SortedY, Before);
+
+	}
+	if (After == 0) {
+		Root->Children[1] = NULL;
+	} else {
+		Root->Children[1] = split_node_list2_y(SortedX + Before + 1, Right, SortedY + Before + 1, After);
+	}
+	return Root;
+}
+
+static node_t *split_node_list2_y(node_t **SortedX, node_t **SortedY, node_t **Temp, int Length) {
+	int Before = Length >> 1;
+	int After = (Length - Before) - 1;
+	node_t *Root = SortedY[Before];
+	int RootIndex = Root->YIndex;
+	//printf("split_node_list2_y(%d, %d) -> %d\n", Before, After, RootIndex);
+	node_t **Left = Temp, **Right = Temp + Before + 1;
+	node_t **LeftP = Left, **RightP = Right;
+	node_t **P = SortedX;
+	for (int I = Length; --I >= 0;) {
+		node_t *Node = *P++;
+		if (Node->YIndex < RootIndex) {
+			*LeftP++ = Node;
+		} else if (Node->YIndex > RootIndex) {
+			*RightP++ = Node;
+		}
+	}
+	if (Before == 0) {
+		Root->Children[0] = NULL;
+	} else {
+		Root->Children[0] = split_node_list2_x(Left, SortedY, SortedX, Before);
+	}
+	if (After == 0) {
+		Root->Children[1] = NULL;
+	} else {
+		Root->Children[1] = split_node_list2_x(Right, SortedY + Before + 1, SortedX + Before + 1, After);
+	}
+	return Root;
+}
+
 static void split_node_list_y(node_t *Root, node_t *HeadX, node_t *HeadY1, int Count1, int Count2);
 
 static void split_node_list_x(node_t *Root, node_t *HeadX1, node_t *HeadY, int Count1, int Count2) {
@@ -238,12 +302,12 @@ static void split_node_list_x(node_t *Root, node_t *HeadX1, node_t *HeadY, int C
 	node_t *Root1 = 0, *Root2 = 0;
 	int Split1 = (1 + Count1) >> 1, Split2 = (1 + Count2) >> 1;
 	//printf("split_node_list_x(%d/%d, X:%d)\n\t", Count1, Count2, RootIndex);
-	//int Actual = 0, Left = 0, Right = 0;
+	int Actual = 0, Left = 0, Right = 0;
 	for (node_t *Node = HeadY; Node; Node = Node->Children[1]) {
-		//++Actual;
+		++Actual;
 		//printf(" %d,%d", Node->XIndex, Node->YIndex);
 		if (Node->XIndex < RootIndex) {
-			//++Left;
+			++Left;
 			if (--Split1 == 0) {
 				SlotY1[0] = 0;
 				Root1 = Node;
@@ -253,7 +317,7 @@ static void split_node_list_x(node_t *Root, node_t *HeadX1, node_t *HeadY, int C
 			}
 			SlotY1 = &Node->Children[1];
 		} else if (Node->XIndex > RootIndex) {
-			//++Right;
+			++Right;
 			if (--Split2 == 0) {
 				SlotY2[0] = 0;
 				Root2 = Node;
@@ -280,12 +344,12 @@ static void split_node_list_y(node_t *Root, node_t *HeadX, node_t *HeadY1, int C
 	node_t *Root1 = 0, *Root2 = 0;
 	int Split1 = (1 + Count1) >> 1, Split2 = (1 + Count2) >> 1;
 	//printf("split_node_list_y(%d/%d, X:%d)\n\t", Count1, Count2, RootIndex);
-	//int Actual = 0, Left = 0, Right = 0;
+	int Actual = 0, Left = 0, Right = 0;
 	for (node_t *Node = HeadX; Node; Node = Node->Children[0]) {
-		//++Actual;
+		++Actual;
 		//printf(" %d,%d", Node->XIndex, Node->YIndex);
 		if (Node->YIndex < RootIndex) {
-			//++Left;
+			++Left;
 			if (--Split1 == 0) {
 				SlotX1[0] = 0;
 				Root1 = Node;
@@ -295,7 +359,7 @@ static void split_node_list_y(node_t *Root, node_t *HeadX, node_t *HeadY1, int C
 			}
 			SlotX1 = &Node->Children[0];
 		} else if (Node->YIndex > RootIndex) {
-			//++Right;
+			++Right;
 			if (--Split2 == 0) {
 				SlotX2[0] = 0;
 				Root2 = Node;
@@ -316,7 +380,7 @@ static void split_node_list_y(node_t *Root, node_t *HeadX, node_t *HeadY1, int C
 }
 
 static void update_node_tree(viewer_t *Viewer) {
-	//clock_t Start = clock();
+	clock_t Start = clock();
 	if (Viewer->NumFiltered == 0) {
 		Viewer->Root = 0;
 	} else if (Viewer->NumFiltered == 1) {
@@ -326,7 +390,7 @@ static void update_node_tree(viewer_t *Viewer) {
 		Node->Children[1] = 0;
 		Viewer->Root = Node;
 	} else {
-		int Count1 = Viewer->NumFiltered >> 1;
+		/*int Count1 = Viewer->NumFiltered >> 1;
 		int MidIndex = Count1 + 1;
 		node_t *HeadX = 0, *HeadY = 0;
 		node_t **SlotX = &HeadX, **SlotY = &HeadY;
@@ -350,9 +414,22 @@ static void update_node_tree(viewer_t *Viewer) {
 		}
 		SlotX[0] = SlotY[0] = 0;
 		split_node_list_x(Root, HeadX, HeadY, Count1, Viewer->NumFiltered - Count1 - 1);
-		Viewer->Root = Root;
+		Viewer->Root = Root;*/
+		node_t **Filtered, **Sorted;
+		Filtered = Viewer->FilteredX;
+		Sorted = Viewer->SortedX;
+		for (int I = Viewer->NumNodes; --I >= 0; ++Sorted) {
+			if (Sorted[0]->Filtered) *Filtered++ = *Sorted;
+		}
+		Filtered = Viewer->FilteredY;
+		Sorted = Viewer->SortedY;
+		for (int I = Viewer->NumNodes; --I >= 0; ++Sorted) {
+			if (Sorted[0]->Filtered) *Filtered++ = *Sorted;
+		}
+		int Total = Filtered - Viewer->FilteredY;
+		Viewer->Root = split_node_list2_x(Viewer->FilteredX, Viewer->FilteredY, Viewer->SortBuffer, Viewer->NumFiltered);
 	}
-	//printf("update_node_tree took %lu\n", clock() - Start);
+	printf("update_node_tree took %lu\n", clock() - Start);
 }
 
 static ml_value_t *viewer_global_get(viewer_t *Viewer, const char *Name) {
@@ -1922,6 +1999,8 @@ static void connect_dataset_open(viewer_t *Viewer, json_t *Result, connect_info_
 	Viewer->SortedX = (node_t **)GC_malloc(NumNodes * sizeof(node_t *));
 	Viewer->SortedY = (node_t **)GC_malloc(NumNodes * sizeof(node_t *));
 	Viewer->SortBuffer = (node_t **)GC_malloc(NumNodes * sizeof(node_t *));
+	Viewer->FilteredX = (node_t **)GC_malloc(NumNodes * sizeof(node_t *));
+	Viewer->FilteredY = (node_t **)GC_malloc(NumNodes * sizeof(node_t *));
 	Viewer->NumFiltered = NumNodes;
 	memset(Nodes, 0, NumNodes * sizeof(node_t));
 	for (int I = 0; I < NumNodes; ++I) {
@@ -3123,6 +3202,8 @@ static void viewer_load_file(viewer_t *Viewer, const char *CsvFileName, const ch
 	Viewer->SortedX = (node_t **)GC_malloc(NumNodes * sizeof(node_t *));
 	Viewer->SortedY = (node_t **)GC_malloc(NumNodes * sizeof(node_t *));
 	Viewer->SortBuffer = (node_t **)GC_malloc(NumNodes * sizeof(node_t *));
+	Viewer->FilteredX = (node_t **)GC_malloc(NumNodes * sizeof(node_t *));
+	Viewer->FilteredY = (node_t **)GC_malloc(NumNodes * sizeof(node_t *));
 	Viewer->NumFiltered = NumNodes;
 	memset(Nodes, 0, NumNodes * sizeof(node_t));
 	for (int I = 0; I < NumNodes; ++I) {

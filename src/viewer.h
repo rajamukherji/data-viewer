@@ -84,6 +84,7 @@ struct viewer_t {
 	node_t *Nodes, *Root, *Selected;
 	node_t **SortBuffer;
 	node_t **SortedX, **SortedY;
+	node_t **FilteredX, **FilteredY;
 	cairo_t *Cairo;
 	node_t **LoadCache;
 	node_t *ActiveNode;
