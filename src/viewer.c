@@ -167,71 +167,45 @@ static inline void foreach_node(viewer_t *Viewer, double X1, double Y1, double X
 	//printf("foreach_node:%d @ %lu\n", __LINE__, clock() - Start);
 }
 
-static void merge_sort_x(node_t **Start, node_t **End, node_t **Buffer) {
-	node_t **Mid = Start + (End - Start) / 2;
-	if (Mid - Start > 1) merge_sort_x(Start, Mid, Buffer);
-	if (End - Mid > 1) merge_sort_x(Mid, End, Buffer);
-	node_t **A = Start;
-	node_t **B = Mid;
-	node_t **C = Buffer;
-	double XA = A[0]->X;
-	double XB = B[0]->X;
+static void quick_sort_x(node_t **Nodes, int Lo, int Hi) {
+	if (Lo >= Hi) return;
+	node_t *Pivot = Nodes[(Hi + Lo) / 2];
+	double PivotX = Pivot->X;
+	int I = Lo - 1;
+	int J = Hi + 1;
 	for (;;) {
-		if (XA <= XB) {
-			*C++ = *A++;
-			if (A < Mid) {
-				XA = A[0]->X;
-			} else {
-				memcpy(C, B, (End - B) * sizeof(node_t *));
-				break;
-			}
-		} else {
-			*C++ = *B++;
-			if (B < End) {
-				XB = B[0]->X;
-			} else {
-				memcpy(C, A, (Mid - A) * sizeof(node_t *));
-				break;
-			}
-		}
+		do ++I; while (Nodes[I]->X < PivotX);
+		do --J; while (Nodes[J]->X > PivotX);
+		if (I >= J) break;
+		node_t *Temp = Nodes[I];
+		Nodes[I] = Nodes[J];
+		Nodes[J] = Temp;
 	}
-	memcpy(Start, Buffer, (End - Start) * sizeof(node_t *));
+	quick_sort_x(Nodes, Lo, J);
+	quick_sort_x(Nodes, J + 1, Hi);
 }
 
-static void merge_sort_y(node_t **Start, node_t **End, node_t **Buffer) {
-	node_t **Mid = Start + (End - Start) / 2;
-	if (Mid - Start > 1) merge_sort_y(Start, Mid, Buffer);
-	if (End - Mid > 1) merge_sort_y(Mid, End, Buffer);
-	node_t **A = Start;
-	node_t **B = Mid;
-	node_t **C = Buffer;
-	double YA = A[0]->Y;
-	double YB = B[0]->Y;
+static void quick_sort_y(node_t **Nodes, int Lo, int Hi) {
+	if (Lo >= Hi) return;
+	node_t *Pivot = Nodes[(Hi + Lo) / 2];
+	double PivotY = Pivot->Y;
+	int I = Lo - 1;
+	int J = Hi + 1;
 	for (;;) {
-		if (YA <= YB) {
-			*C++ = *A++;
-			if (A < Mid) {
-				YA = A[0]->Y;
-			} else {
-				memcpy(C, B, (End - B) * sizeof(node_t *));
-				break;
-			}
-		} else {
-			*C++ = *B++;
-			if (B < End) {
-				YB = B[0]->Y;
-			} else {
-				memcpy(C, A, (Mid - A) * sizeof(node_t *));
-				break;
-			}
-		}
+		do ++I; while (Nodes[I]->Y < PivotY);
+		do --J; while (Nodes[J]->Y > PivotY);
+		if (I >= J) break;
+		node_t *Temp = Nodes[I];
+		Nodes[I] = Nodes[J];
+		Nodes[J] = Temp;
 	}
-	memcpy(Start, Buffer, (End - Start) * sizeof(node_t *));
+	quick_sort_y(Nodes, Lo, J);
+	quick_sort_y(Nodes, J + 1, Hi);
 }
 
-static node_t *split_node_list2_y(node_t **SortedX, node_t **SortedY, node_t **Temp, int Length);
+static node_t *split_nodes_y(node_t **SortedX, node_t **SortedY, node_t **Temp, int Length);
 
-static node_t *split_node_list2_x(node_t **SortedX, node_t **SortedY, node_t **Temp, int Length) {
+static node_t *split_nodes_x(node_t **SortedX, node_t **SortedY, node_t **Temp, int Length) {
 	int Before = Length >> 1;
 	int After = (Length - Before) - 1;
 	node_t *Root = SortedX[Before];
@@ -252,18 +226,18 @@ static node_t *split_node_list2_x(node_t **SortedX, node_t **SortedY, node_t **T
 		Root->Children[0] = NULL;
 	} else {
 		int Split = Before >> 1;
-		Root->Children[0] = split_node_list2_y(SortedX, Left, SortedY, Before);
+		Root->Children[0] = split_nodes_y(SortedX, Left, SortedY, Before);
 
 	}
 	if (After == 0) {
 		Root->Children[1] = NULL;
 	} else {
-		Root->Children[1] = split_node_list2_y(SortedX + Before + 1, Right, SortedY + Before + 1, After);
+		Root->Children[1] = split_nodes_y(SortedX + Before + 1, Right, SortedY + Before + 1, After);
 	}
 	return Root;
 }
 
-static node_t *split_node_list2_y(node_t **SortedX, node_t **SortedY, node_t **Temp, int Length) {
+static node_t *split_nodes_y(node_t **SortedX, node_t **SortedY, node_t **Temp, int Length) {
 	int Before = Length >> 1;
 	int After = (Length - Before) - 1;
 	node_t *Root = SortedY[Before];
@@ -283,100 +257,14 @@ static node_t *split_node_list2_y(node_t **SortedX, node_t **SortedY, node_t **T
 	if (Before == 0) {
 		Root->Children[0] = NULL;
 	} else {
-		Root->Children[0] = split_node_list2_x(Left, SortedY, SortedX, Before);
+		Root->Children[0] = split_nodes_x(Left, SortedY, SortedX, Before);
 	}
 	if (After == 0) {
 		Root->Children[1] = NULL;
 	} else {
-		Root->Children[1] = split_node_list2_x(Right, SortedY + Before + 1, SortedX + Before + 1, After);
+		Root->Children[1] = split_nodes_x(Right, SortedY + Before + 1, SortedX + Before + 1, After);
 	}
 	return Root;
-}
-
-static void split_node_list_y(node_t *Root, node_t *HeadX, node_t *HeadY1, int Count1, int Count2);
-
-static void split_node_list_x(node_t *Root, node_t *HeadX1, node_t *HeadY, int Count1, int Count2) {
-	int RootIndex = Root->XIndex;
-	node_t *HeadY1 = 0, *HeadY2 = 0;
-	node_t **SlotY1 = &HeadY1, **SlotY2 = &HeadY2;
-	node_t *Root1 = 0, *Root2 = 0;
-	int Split1 = (1 + Count1) >> 1, Split2 = (1 + Count2) >> 1;
-	//printf("split_node_list_x(%d/%d, X:%d)\n\t", Count1, Count2, RootIndex);
-	int Actual = 0, Left = 0, Right = 0;
-	for (node_t *Node = HeadY; Node; Node = Node->Children[1]) {
-		++Actual;
-		//printf(" %d,%d", Node->XIndex, Node->YIndex);
-		if (Node->XIndex < RootIndex) {
-			++Left;
-			if (--Split1 == 0) {
-				SlotY1[0] = 0;
-				Root1 = Node;
-				//printf("[1]");
-			} else {
-				SlotY1[0] = Node;
-			}
-			SlotY1 = &Node->Children[1];
-		} else if (Node->XIndex > RootIndex) {
-			++Right;
-			if (--Split2 == 0) {
-				SlotY2[0] = 0;
-				Root2 = Node;
-				//printf("[2]");
-			} else {
-				SlotY2[0] = Node;
-			}
-			SlotY2 = &Node->Children[1];
-		}
-	}
-	//printf(" -> %d/%d/%d\n", Actual, Left, Right);
-	SlotY1[0] = SlotY2[0] = 0;
-	node_t *HeadX2 = Root->Children[0];
-	Root->Children[0] = Root1;
-	Root->Children[1] = Root2;
-	if (Root1) split_node_list_y(Root1, HeadX1, HeadY1, Count1 - (Count1 >> 1) - 1, Count1 >> 1);
-	if (Root2) split_node_list_y(Root2, HeadX2, HeadY2, Count2 - (Count2 >> 1) - 1, Count2 >> 1);
-}
-
-static void split_node_list_y(node_t *Root, node_t *HeadX, node_t *HeadY1, int Count1, int Count2) {
-	int RootIndex = Root->YIndex;
-	node_t *HeadX1 = 0, *HeadX2 = 0;
-	node_t **SlotX1 = &HeadX1, **SlotX2 = &HeadX2;
-	node_t *Root1 = 0, *Root2 = 0;
-	int Split1 = (1 + Count1) >> 1, Split2 = (1 + Count2) >> 1;
-	//printf("split_node_list_y(%d/%d, X:%d)\n\t", Count1, Count2, RootIndex);
-	int Actual = 0, Left = 0, Right = 0;
-	for (node_t *Node = HeadX; Node; Node = Node->Children[0]) {
-		++Actual;
-		//printf(" %d,%d", Node->XIndex, Node->YIndex);
-		if (Node->YIndex < RootIndex) {
-			++Left;
-			if (--Split1 == 0) {
-				SlotX1[0] = 0;
-				Root1 = Node;
-				//printf("[1]");
-			} else {
-				SlotX1[0] = Node;
-			}
-			SlotX1 = &Node->Children[0];
-		} else if (Node->YIndex > RootIndex) {
-			++Right;
-			if (--Split2 == 0) {
-				SlotX2[0] = 0;
-				Root2 = Node;
-				//printf("[2]");
-			} else {
-				SlotX2[0] = Node;
-			}
-			SlotX2 = &Node->Children[0];
-		}
-	}
-	//printf(" -> %d/%d/%d\n", Actual, Left, Right);
-	SlotX1[0] = SlotX2[0] = 0;
-	node_t *HeadY2 = Root->Children[1];
-	Root->Children[0] = Root1;
-	Root->Children[1] = Root2;
-	if (Root1) split_node_list_x(Root1, HeadX1, HeadY1, Count1 - (Count1 >> 1) - 1, Count1 >> 1);
-	if (Root2) split_node_list_x(Root2, HeadX2, HeadY2, Count2 - (Count2 >> 1) - 1, Count2 >> 1);
 }
 
 static void update_node_tree(viewer_t *Viewer) {
@@ -390,31 +278,6 @@ static void update_node_tree(viewer_t *Viewer) {
 		Node->Children[1] = 0;
 		Viewer->Root = Node;
 	} else {
-		/*int Count1 = Viewer->NumFiltered >> 1;
-		int MidIndex = Count1 + 1;
-		node_t *HeadX = 0, *HeadY = 0;
-		node_t **SlotX = &HeadX, **SlotY = &HeadY;
-		node_t **NodeX = Viewer->SortedX, **NodeY = Viewer->SortedY;
-		node_t *Root = 0;
-		for (int I = Viewer->NumNodes; --I >= 0; ++NodeX, ++NodeY) {
-			node_t *Node = *NodeX;
-			if (Node->Filtered) {
-				if (--MidIndex == 0) {
-					Root = Node;
-					SlotX[0] = 0;
-				} else {
-					SlotX[0] = Node;
-				}
-				SlotX = &Node->Children[0];
-			}
-			if (NodeY[0]->Filtered) {
-				SlotY[0] = NodeY[0];
-				SlotY = &NodeY[0]->Children[1];
-			}
-		}
-		SlotX[0] = SlotY[0] = 0;
-		split_node_list_x(Root, HeadX, HeadY, Count1, Viewer->NumFiltered - Count1 - 1);
-		Viewer->Root = Root;*/
 		node_t **Filtered, **Sorted;
 		Filtered = Viewer->FilteredX;
 		Sorted = Viewer->SortedX;
@@ -427,7 +290,7 @@ static void update_node_tree(viewer_t *Viewer) {
 			if (Sorted[0]->Filtered) *Filtered++ = *Sorted;
 		}
 		int Total = Filtered - Viewer->FilteredY;
-		Viewer->Root = split_node_list2_x(Viewer->FilteredX, Viewer->FilteredY, Viewer->SortBuffer, Viewer->NumFiltered);
+		Viewer->Root = split_nodes_x(Viewer->FilteredX, Viewer->FilteredY, Viewer->SortBuffer, Viewer->NumFiltered);
 	}
 	printf("update_node_tree took %lu\n", clock() - Start);
 }
@@ -771,8 +634,10 @@ static void set_viewer_indices(viewer_t *Viewer, int XIndex, int YIndex) {
 		++XValue;
 		++YValue;
 	}
-	merge_sort_x(Viewer->SortedX, Viewer->SortedX + NumNodes, Viewer->SortBuffer);
-	merge_sort_y(Viewer->SortedY, Viewer->SortedY + NumNodes, Viewer->SortBuffer);
+	//clock_t Start = clock();
+	quick_sort_x(Viewer->SortedX, 0, NumNodes - 1);
+	quick_sort_y(Viewer->SortedY, 0, NumNodes - 1);
+	//printf("sorting took %d\n", clock() - Start);
 	for (int I = 0; I < NumNodes; ++I) {
 		Viewer->SortedX[I]->XIndex = I;
 		Viewer->SortedY[I]->YIndex = I;
@@ -806,8 +671,8 @@ static void clear_viewer_indices(viewer_t *Viewer) {
 		Node->Colour = 0xFF000000;
 		++Node;
 	}
-	merge_sort_x(Viewer->SortedX, Viewer->SortedX + NumNodes, Viewer->SortBuffer);
-	merge_sort_y(Viewer->SortedY, Viewer->SortedY + NumNodes, Viewer->SortBuffer);
+	quick_sort_x(Viewer->SortedX, 0, NumNodes - 1);
+	quick_sort_y(Viewer->SortedY, 0, NumNodes - 1);
 	for (int I = 0; I < NumNodes; ++I) {
 		Viewer->SortedX[I]->XIndex = I;
 		Viewer->SortedY[I]->YIndex = I;
