@@ -169,38 +169,38 @@ static inline void foreach_node(viewer_t *Viewer, double X1, double Y1, double X
 
 static void quick_sort_x(node_t **Nodes, int Lo, int Hi) {
 	if (Lo >= Hi) return;
-	node_t *Pivot = Nodes[(Hi + Lo) / 2];
-	double PivotX = Pivot->X;
+	double Pivot = Nodes[(Hi + Lo) / 2]->X;
 	int I = Lo - 1;
 	int J = Hi + 1;
 	for (;;) {
-		do ++I; while (Nodes[I]->X < PivotX);
-		do --J; while (Nodes[J]->X > PivotX);
+		do ++I; while (Nodes[I]->X < Pivot);
+		do --J; while (Nodes[J]->X > Pivot);
 		if (I >= J) break;
 		node_t *Temp = Nodes[I];
 		Nodes[I] = Nodes[J];
 		Nodes[J] = Temp;
 	}
-	quick_sort_x(Nodes, Lo, J);
-	quick_sort_x(Nodes, J + 1, Hi);
+	if (J + 1 >= Hi) return quick_sort_x(Nodes, Lo, J);
+	if (Lo < J) quick_sort_x(Nodes, Lo, J);
+	return quick_sort_x(Nodes, J + 1, Hi);
 }
 
 static void quick_sort_y(node_t **Nodes, int Lo, int Hi) {
 	if (Lo >= Hi) return;
-	node_t *Pivot = Nodes[(Hi + Lo) / 2];
-	double PivotY = Pivot->Y;
+	double Pivot = Nodes[(Hi + Lo) / 2]->Y;
 	int I = Lo - 1;
 	int J = Hi + 1;
 	for (;;) {
-		do ++I; while (Nodes[I]->Y < PivotY);
-		do --J; while (Nodes[J]->Y > PivotY);
+		do ++I; while (Nodes[I]->Y < Pivot);
+		do --J; while (Nodes[J]->Y > Pivot);
 		if (I >= J) break;
 		node_t *Temp = Nodes[I];
 		Nodes[I] = Nodes[J];
 		Nodes[J] = Temp;
 	}
-	quick_sort_y(Nodes, Lo, J);
-	quick_sort_y(Nodes, J + 1, Hi);
+	if (J + 1 >= Hi) return quick_sort_y(Nodes, Lo, J);
+	if (Lo < J) quick_sort_y(Nodes, Lo, J);
+	return quick_sort_y(Nodes, J + 1, Hi);
 }
 
 static node_t *split_nodes_y(node_t **SortedX, node_t **SortedY, node_t **Temp, int Length);
@@ -268,7 +268,7 @@ static node_t *split_nodes_y(node_t **SortedX, node_t **SortedY, node_t **Temp, 
 }
 
 static void update_node_tree(viewer_t *Viewer) {
-	clock_t Start = clock();
+	//clock_t Start = clock();
 	if (Viewer->NumFiltered == 0) {
 		Viewer->Root = 0;
 	} else if (Viewer->NumFiltered == 1) {
@@ -292,7 +292,7 @@ static void update_node_tree(viewer_t *Viewer) {
 		int Total = Filtered - Viewer->FilteredY;
 		Viewer->Root = split_nodes_x(Viewer->FilteredX, Viewer->FilteredY, Viewer->SortBuffer, Viewer->NumFiltered);
 	}
-	printf("update_node_tree took %lu\n", clock() - Start);
+	//printf("update_node_tree took %lu\n", clock() - Start);
 }
 
 static ml_value_t *viewer_global_get(viewer_t *Viewer, const char *Name) {
@@ -733,7 +733,7 @@ static inline void set_node_rgb(node_t *Node, double H) {
 }
 
 static void filter_enum_field(viewer_t *Viewer, field_t *Field) {
-	printf("filter_enum_field(%s)\n", Field->Name);
+	//printf("filter_enum_field(%s)\n", Field->Name);
 	const node_t *Node = Viewer->Nodes;
 	int NumNodes = Viewer->NumNodes;
 	int *EnumValues = Field->EnumValues;
@@ -749,7 +749,7 @@ static void filter_enum_field(viewer_t *Viewer, field_t *Field) {
 		++Value;
 	}
 	Field->Range.Max = Max;
-	printf("Field->Range.Max = %d\n", Max);
+	//printf("Field->Range.Max = %d\n", Max);
 	Field->FilterGeneration = Viewer->FilterGeneration;
 }
 
@@ -1122,7 +1122,6 @@ static void edit_node_values(viewer_t *Viewer) {
 	double Y1 = Viewer->Min.Y + (Viewer->Pointer.Y - BOX_SIZE / 2) / Viewer->Scale.Y;
 	double X2 = Viewer->Min.X + (Viewer->Pointer.X + BOX_SIZE / 2) / Viewer->Scale.X;
 	double Y2 = Viewer->Min.Y + (Viewer->Pointer.Y + BOX_SIZE / 2) / Viewer->Scale.Y;
-	printf("\n\n%s:%d\n", __FUNCTION__, __LINE__);
 	field_t *Field = Viewer->EditField;
 	if (Field->RemoteId) {
 		edit_node_remote_t Info[1] = {{Viewer, Field, json_array(), json_array()}};
@@ -1203,7 +1202,6 @@ static void redraw_viewer_background(viewer_t *Viewer) {
 #ifdef USE_GL
 	Viewer->GLCount = 0;
 	//clock_t Start = clock();
-	printf("\n\n%s:%d\n", __FUNCTION__, __LINE__);
 	foreach_node(Viewer, Viewer->Min.X, Viewer->Min.Y, Viewer->Max.X, Viewer->Max.Y, Viewer, (node_callback_t *)redraw_point);
 	//printf("foreach_node took %d\n", clock() - Start);
 	//printf("rendered %d points\n", Viewer->GLCount);
@@ -1225,7 +1223,6 @@ static void redraw_viewer_background(viewer_t *Viewer) {
 	cairo_fill(Cairo);
 	Viewer->Cairo = Cairo;
 	clock_t Start = clock();
-	printf("\n\n%s:%d\n", __FUNCTION__, __LINE__);
 	foreach_node(Viewer, Viewer->Min.X, Viewer->Min.Y, Viewer->Max.X, Viewer->Max.Y, Viewer, (node_callback_t *)redraw_point);
 	printf("foreach_node took %lu\n", clock() - Start);
 	Viewer->Cairo = 0;
@@ -1253,9 +1250,9 @@ static gboolean render_viewer(GtkGLArea *Widget, GdkGLContext *Context, viewer_t
 		0.0f, 0.0f, 0.0f, 1.0f
 	};
 
-	printf("Scale = %f, %f\n", Viewer->Scale.X, Viewer->Scale.Y);
-	printf("Width, Height = %d, %d\n", Width, Height);
-	printf("Range = (%f, %f) - (%f, %f)\n", Viewer->Min.X, Viewer->Min.Y, Viewer->Max.X, Viewer->Max.Y);
+	//printf("Scale = %f, %f\n", Viewer->Scale.X, Viewer->Scale.Y);
+	//printf("Width, Height = %d, %d\n", Width, Height);
+	//printf("Range = (%f, %f) - (%f, %f)\n", Viewer->Min.X, Viewer->Min.Y, Viewer->Max.X, Viewer->Max.Y);
 
 	transform[0] = 2.0 / Width;
 	transform[12] = -1.0;
@@ -1510,7 +1507,7 @@ static void resize_viewer(GtkWidget *Widget, GdkRectangle *Allocation, viewer_t 
 }
 
 static gboolean scroll_viewer(GtkWidget *Widget, GdkEventScroll *Event, viewer_t *Viewer) {
-	printf("scroll_viewer()\n");
+	//printf("scroll_viewer()\n");
 	double X = Viewer->Min.X + (Event->x / Viewer->Scale.X);
 	double Y = Viewer->Min.Y + (Event->y / Viewer->Scale.Y);
 	if (Event->direction == GDK_SCROLL_DOWN) {
@@ -1592,7 +1589,7 @@ static void images_selected_foreach(GtkIconView *ImagesView, GtkTreePath *Path, 
 }
 
 static gboolean key_press_viewer(GtkWidget *Widget, GdkEventKey *Event, viewer_t *Viewer) {
-	printf("key_press_viewer()\n");
+	//printf("key_press_viewer()\n");
 	if (!(Event->state & GDK_CONTROL_MASK)) return FALSE;
 	switch (Event->keyval) {
 	case GDK_KEY_s: {
@@ -1828,7 +1825,7 @@ static void connect_images_get(viewer_t *Viewer, json_t *Result, connect_info_t 
 	if (!json_is_array(Result)) return;
 	if (json_array_size(Result) != Viewer->NumNodes) return;
 	Viewer->ImagePrefix = Info->ImagePrefix;
-	printf("Viewer->ImagePrefix = %s\n", Viewer->ImagePrefix);
+	//printf("Viewer->ImagePrefix = %s\n", Viewer->ImagePrefix);
 	node_t *Nodes = Viewer->Nodes;
 	int ImagePrefixLength = strlen(Info->ImagePrefix);
 	for (int I = 0; I < Viewer->NumNodes; ++I) {
@@ -1976,7 +1973,7 @@ static void connect_clicked(GtkWidget *Button, viewer_t *Viewer) {
 	gtk_widget_show_all(Dialog);
 	if (gtk_dialog_run(GTK_DIALOG(Dialog)) == GTK_RESPONSE_ACCEPT) {
 		Info->ImagePrefix = GC_strdup(gtk_entry_get_text(GTK_ENTRY(PrefixEntry)));
-		printf("ImagePrefix = %s\n", Info->ImagePrefix);
+		//printf("ImagePrefix = %s\n", Info->ImagePrefix);
 		if (Info->DatasetId) {
 			printf("Connecting to dataset %s\n", Info->DatasetId);
 			remote_request(Viewer, "dataset/open", json_pack("{ss}", "id", Info->DatasetId), (void *)connect_dataset_open, Info);
@@ -2392,7 +2389,7 @@ static void show_filter_window(GtkButton *Widget, viewer_t *Viewer) {
 }
 
 static void image_node_activated(GtkIconView *View, GtkTreePath *Path, viewer_t *Viewer) {
-	printf("image_node_activated()\n");
+	//printf("image_node_activated()\n");
 	GtkTreeIter Iter[1];
 	gtk_tree_model_get_iter(GTK_TREE_MODEL(Viewer->ImagesStore), Iter, Path);
 	gtk_tree_model_get(GTK_TREE_MODEL(Viewer->ImagesStore), Iter, 2, &Viewer->ActiveNode, -1);
